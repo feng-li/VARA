@@ -6,22 +6,22 @@ This repository implements a **network-augmented Vector Autoregression (VAR)** m
 
 The model is defined as:
 
-[
+$$
 Y_t = \text{diag}(\beta) Y_{t-1}
 + \text{diag}(\gamma_a) W_a Y_{t-1}
 + \text{diag}(\gamma_b) W_b Y_t
 + \varepsilon_t,
-]
+$$
 
 where
 
-* (Y_t \in \mathbb{R}^p): vector of (p) endogenous time series at time (t).
-* (\text{diag}(\beta)): diagonal autoregressive coefficient matrix for own-lag effects.
-* (W_a): attention/weight matrix capturing **cross-series lagged dependence**.
-* (\text{diag}(\gamma_a)): scaling coefficients for the weighted lag term.
-* (W_b): attention/weight matrix capturing **contemporaneous dependence**.
-* (\text{diag}(\gamma_b)): scaling coefficients for contemporaneous effects.
-* (\varepsilon_t): innovation vector.
+* $Y_t \in \mathbb{R}^p$: vector of (p) endogenous time series at time (t).
+* $\text{diag}(\beta)$: diagonal autoregressive coefficient matrix for own-lag effects.
+* $W_a$: attention/weight matrix capturing **cross-series lagged dependence**.
+* $\text{diag}(\gamma_a)$: scaling coefficients for the weighted lag term.
+* $W_b): attention/weight matrix capturing **contemporaneous dependence**.
+* $\text{diag}(\gamma_b)$: scaling coefficients for contemporaneous effects.
+* $\varepsilon_t$: innovation vector.
 
 ## Key Features
 
