@@ -5,13 +5,11 @@ This repository implements a **network-augmented Vector Autoregression (VAR)** m
 ## Model
 
 The model is defined as:
-
-$$
-Y_t = \text{diag}(\beta) Y_{t-1}
-+ \text{diag}(\gamma_a) W_a Y_{t-1}
+$Y_t = \text{diag}(\beta) Y_{t-1}
++\text{diag}(\gamma_a) W_a Y_{t-1}
 + \text{diag}(\gamma_b) W_b Y_t
 + \varepsilon_t,
-$$
+$
 
 where
 
