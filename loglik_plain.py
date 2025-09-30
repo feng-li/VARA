@@ -29,7 +29,7 @@ def construct_matrices(theta, W_a, W_b, p):
     return S, G, sigma2
 
 
-def loglik(theta, Y, W_a, W_b):
+def loglik_plain(theta, Y, W_a, W_b):
     """
     Log-quasi-likelihood function.
     Y: array shape (T, p)
@@ -79,12 +79,12 @@ if __name__ == "__main__":
     ])
 
     # Compute log-likelihood
-    ll_val = loglik(theta0, Y, W_a, W_b)
+    ll_val = loglik_plain(theta0, Y, W_a, W_b)
     print("Log-likelihood:", ll_val)
 
     # Gradient and Hessian
-    grad_ll = grad(loglik)(theta0, Y, W_a, W_b)
-    hess_ll = hessian(loglik)(theta0, Y, W_a, W_b)
+    grad_ll = grad(loglik_plain)(theta0, Y, W_a, W_b)
+    hess_ll = hessian(loglik_plain)(theta0, Y, W_a, W_b)
 
     print("Gradient shape:", grad_ll.shape)
     print(grad_ll)

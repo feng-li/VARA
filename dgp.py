@@ -4,15 +4,7 @@ from jax.random import multivariate_normal, uniform, normal
 import matplotlib.pyplot as plt
 
 
-# ---------- Attention builder ----------
-def build_attention(Z, eta):
-    p, q = Z.shape
-    scores = (Z @ Z.T) / jnp.sqrt(q)
-    scores = eta * scores
-    mask = jnp.eye(p) * -1e9
-    scores = scores + mask
-    return jax.nn.softmax(scores, axis=1)
-
+from loglik import build_attention
 
 # ---------- Simulation function ----------
 def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
