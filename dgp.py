@@ -40,7 +40,13 @@ def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
     W_b = build_attention(Z, eta=eta_b)
 
 
-    # Step 4: Random noise
+    # Step 4: Construct S, G
+    S = jnp.eye(p) - jnp.diag(gamma_b) @ W_b
+    G = jnp.diag(beta) + jnp.diag(gamma_a) @ W_a
+    S_inv = jnp.linalg.inv(S)
+
+
+    # Step 5: Random noise
     if dist == "normal":
         eps_raw = normal(keys[5], (T, p))
     elif dist == "t5":
@@ -54,11 +60,6 @@ def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
 
     # Scale to Σ_e = diag(sigma2)
     eps = eps_raw * jnp.sqrt(sigma2)
-
-    # Step 5: Simulation recursion
-    S = jnp.eye(p) - jnp.diag(gamma_b) @ W_b
-    G = jnp.diag(beta) + jnp.diag(gamma_a) @ W_a
-    S_inv = jnp.linalg.inv(S)
 
     Y = jnp.zeros((T, p))
     for t in range(1, T):

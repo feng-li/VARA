@@ -151,7 +151,7 @@ def hess_block_sigma2(theta, Y, Z):
     eta_b = theta[1]
     gamma_a = theta[2:2+p]
     gamma_b = theta[2+p:2+2*p]
-    beta    = theta[2+2*p:2+3*p]
+    beta = theta[2+2*p:2+3*p]
 
     W_a = build_attention(Z, eta_a)
     W_b = build_attention(Z, eta_b)
@@ -334,8 +334,8 @@ def hess_block_beta_sigma2(theta, Y, Z):
     eta_b = theta[1]
     gamma_a = theta[2:2+p]
     gamma_b = theta[2+p:2+2*p]
-    beta    = theta[2+2*p:2+3*p]
-    sigma2  = theta[2+3*p:2+4*p]
+    beta = theta[2+2*p:2+3*p]
+    sigma2 = theta[2+3*p:2+4*p]
 
     W_a = build_attention(Z, eta_a)
     W_b = build_attention(Z, eta_b)
@@ -367,8 +367,8 @@ def loglik_hess_analytical(theta, Y, Z):
     H = jnp.zeros((d2, d2))
 
     # --- Diagonal blocks ---
-    H = H.at[0,0].set(hess_block_eta_a(theta, Y, Z))
-    H = H.at[1,1].set(hess_block_eta_b(theta, Y, Z))
+    H = H.at[0, 0].set(hess_block_eta_a(theta, Y, Z))
+    H = H.at[1, 1].set(hess_block_eta_b(theta, Y, Z))
 
     H = H.at[2:2+p, 2:2+p].set(hess_block_gamma_a(theta, Y, Z))
     H = H.at[2+p:2+2*p, 2+p:2+2*p].set(hess_block_gamma_b(theta, Y, Z))
@@ -378,8 +378,8 @@ def loglik_hess_analytical(theta, Y, Z):
     # --- Off-diagonal blocks ---
     # ηa–ηb
     val = hess_block_eta_a_eta_b(theta, Y, Z)
-    H = H.at[0,1].set(val)
-    H = H.at[1,0].set(val)
+    H = H.at[0, 1].set(val)
+    H = H.at[1, 0].set(val)
 
     # ηa–γa
     block = hess_block_eta_a_gamma_a(theta, Y, Z)
