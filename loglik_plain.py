@@ -1,32 +1,7 @@
 import jax.numpy as jnp
 from jax import grad, hessian
 
-# --------------------------------------------------------
-#  Model components
-# --------------------------------------------------------
-
-def construct_matrices(theta, W_a, W_b, p):
-    """
-    Build S and G matrices given parameter vector theta.
-    theta order: (eta_a, eta_b, gamma_a, gamma_b, beta, sigma2)
-    """
-    eta_a = theta[0]
-    eta_b = theta[1]
-    gamma_a = theta[2:2+p]
-    gamma_b = theta[2+p:2+2*p]
-    beta    = theta[2+2*p:2+3*p]
-    sigma2  = theta[2+3*p:2+4*p]
-
-    # Diagonal matrices
-    D_beta   = jnp.diag(beta)
-    D_ga     = jnp.diag(gamma_a)
-    D_gb     = jnp.diag(gamma_b)
-
-    # Model matrices
-    G = D_beta + D_ga @ W_a
-    S = jnp.eye(p) - D_gb @ W_b
-
-    return S, G, sigma2
+from loglik_attn import construct_matrices
 
 
 def loglik_plain(theta, Y, W_a, W_b):
@@ -40,7 +15,7 @@ def loglik_plain(theta, Y, W_a, W_b):
     S, G, sigma2 = construct_matrices(theta, W_a, W_b, p)
 
     # Covariance matrix of errors
-    Sigma_e = jnp.diag(sigma2)
+    # Sigma_e = jnp.diag(sigma2)
     inv_Sigma_e = jnp.diag(1.0 / sigma2)
 
     # Transformed errors
