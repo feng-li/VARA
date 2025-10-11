@@ -30,11 +30,15 @@ def mle_bfgs(Y, Z, theta_init):
 if __name__ == "__main__":
 
     from dgp import simulate_VAR_attention
+    from dgp import flatten_params
 
     key = jax.random.PRNGKey(0)
-    Y, theta_true, Z = simulate_VAR_attention(key, T=200, p=5, q=5, dist="normal")
+    Y, params, Z, W_a, W_b = simulate_VAR_attention(key, T=200, p=5, q=5, dist="normal")
 
     # Initial guess: perturb truth
+    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    theta_true = flatten_params(params, order)
+
     theta_init = theta_true + 0.05 * jax.random.normal(key, theta_true.shape)
 
     theta_hat, grad_ll, hess_ll, res = mle_bfgs(Y, Z, theta_init)

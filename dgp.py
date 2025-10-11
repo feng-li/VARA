@@ -3,7 +3,6 @@ import jax.numpy as jnp
 from jax.random import multivariate_normal, uniform, normal
 import matplotlib.pyplot as plt
 
-
 from loglik_attn import build_attention
 
 
@@ -26,15 +25,20 @@ def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
     Sigma_z = 0.5 ** jnp.abs(idx[:, None] - idx[None, :])
     Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
 
-    # Step 2: Construct W_a, W_b
-    W_a = build_attention(Z, eta=0.5)
-    W_b = build_attention(Z, eta=1.0)
 
-    # Step 3: Draw parameters
+    # Step 2: Draw parameters
+    eta_a = 0.5
+    eta_b = 1.0
     gamma_a = uniform(keys[1], (p,), minval=-0.2, maxval=0.2)
     gamma_b = uniform(keys[2], (p,), minval=-0.2, maxval=0.2)
     beta = uniform(keys[3], (p,), minval=-0.2, maxval=0.2)
     sigma2 = uniform(keys[4], (p,), minval=0.25, maxval=1.0)
+
+
+    # Step 3: Construct W_a, W_b
+    W_a = build_attention(Z, eta=eta_a)
+    W_b = build_attention(Z, eta=eta_b)
+
 
     # Step 4: Random noise
     if dist == "normal":
@@ -60,8 +64,33 @@ def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
     for t in range(1, T):
         Y = Y.at[t].set(S_inv @ (G @ Y[t - 1] + eps[t]))
 
-    params = dict(beta=beta, gamma_a=gamma_a, gamma_b=gamma_b, sigma2=sigma2)
+    params = dict(eta_a=eta_a, eta_b=eta_b, gamma_a=gamma_a, gamma_b=gamma_b, beta=beta, sigma2=sigma2)
     return Y, params, Z, W_a, W_b
+
+
+def flatten_params(params: dict, order: list[str]):
+    """
+    Flatten a parameter dictionary into a single 1D JAX array (concatenated in given order).
+
+    Scalars are broadcast to 0D arrays and concatenated after being flattened.
+
+    Args:
+        params: dict[str, scalar or jnp.ndarray]
+            Dictionary of parameters (some scalar, some arrays).
+        order: list[str]
+            Desired key order for concatenation.
+
+    Returns:
+        jnp.ndarray: 1D array containing all parameter values concatenated in order.
+    """
+    flat_list = []
+    for k in order:
+        if k not in params:
+            continue
+        v = params[k]
+        v_arr = jnp.atleast_1d(v).ravel()  # ensures scalar → array([scalar])
+        flat_list.append(v_arr)
+    return jnp.concatenate(flat_list)
 
 
 if __name__ == "__main__":
