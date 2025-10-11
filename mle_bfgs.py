@@ -5,6 +5,7 @@ from scipy.optimize import minimize
 
 from loglik_attn import loglik
 
+
 def mle_bfgs(Y, Z, theta_init):
     """
     MLE Estimator

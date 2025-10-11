@@ -3,9 +3,12 @@ import jax.numpy as jnp
 
 from loglik_attn import loglik_reparam
 
-def mle_newton(Y, Z, theta_init, max_iter=50, tol=1e-6, alpha=1.0):
-    """Newton-Raphson Estimator"""
 
+def mle_newton(Y, Z, theta_init, max_iter=50, tol=1e-6, alpha=1.0):
+    """
+    Newton-Raphson Estimator.
+
+    """
     loglik_grad = jax.grad(loglik_reparam)
     loglik_hess = jax.hessian(loglik_reparam)
 
@@ -47,23 +50,27 @@ def mle_newton(Y, Z, theta_init, max_iter=50, tol=1e-6, alpha=1.0):
 if __name__ == "__main__":
 
     from dgp import simulate_VAR_attention
+    from dgp import flatten_params
 
     key = jax.random.PRNGKey(0)
-    Y, theta_true, Z = simulate_VAR_attention(key, T=200, p=5, q=5, dist="normal")
+    Y, params, Z, W_a, W_b = simulate_VAR_attention(key, T=200, p=5, q=5, dist="normal")
+
+
+    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    theta_true = flatten_params(params, order)
 
     # Initial guess: perturb truth; log-transform sigma2 part
     p = Y.shape[1]
     log_sigma2_true = jnp.log(theta_true[2+3*p:2+4*p])
-    theta_true_reparam = jnp.concatenate([
-        theta_true[:2+3*p], log_sigma2_true
-    ])
-    theta_init = theta_true_reparam + 0.1 * jax.random.normal(key, theta_true_reparam.shape)
+    theta_true_reparam = jnp.concatenate([theta_true[:2+3*p], log_sigma2_true])
 
+    theta_init = theta_true_reparam + 0.1 * jax.random.normal(key, theta_true_reparam.shape)
     theta_hat_reparam, grad_ll, hess_ll = mle_newton(Y, Z, theta_init)
 
     # Convert back to natural scale (replace log_sigma2 with sigma2)
     log_sigma2_hat = theta_hat_reparam[2+3*p:2+4*p]
     sigma2_hat = jnp.exp(log_sigma2_hat)
+
     theta_hat = jnp.concatenate([theta_hat_reparam[:2+3*p], sigma2_hat])
 
     print("True theta:", theta_true)
