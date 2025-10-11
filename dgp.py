@@ -4,7 +4,8 @@ from jax.random import multivariate_normal, uniform, normal
 import matplotlib.pyplot as plt
 
 
-from loglik import build_attention
+from loglik_attn import build_attention
+
 
 # ---------- Simulation function ----------
 def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):

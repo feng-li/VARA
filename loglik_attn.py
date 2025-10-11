@@ -2,9 +2,6 @@ import jax
 import jax.numpy as jnp
 from jax import grad, hessian
 
-# --------------------------------------------------------
-# Attention weight construction
-# --------------------------------------------------------
 
 def build_attention(Z, eta):
     """
@@ -26,9 +23,6 @@ def build_attention(Z, eta):
     W = jax.nn.softmax(scores, axis=1)
     return W
 
-# --------------------------------------------------------
-#  Model components
-# --------------------------------------------------------
 
 def construct_matrices(theta, Z, p):
     """
@@ -82,6 +76,46 @@ def loglik(theta, Y, Z):
         -(T-1) * p / 2 * jnp.log(2 * jnp.pi)
         - (T-1) / 2 * jnp.sum(jnp.log(sigma2))
         + (T-1) * jnp.linalg.slogdet(S)[1]   # log|S|
+        - 0.5 * quad
+    )
+    return val
+
+
+def loglik_reparam(theta, Y, Z):
+    """
+    Reparameterized log-likelihood: last p entries are log(sigma2).
+    """
+    T, p = Y.shape
+    eta_a = theta[0]
+    eta_b = theta[1]
+    gamma_a = theta[2:2+p]
+    gamma_b = theta[2+p:2+2*p]
+    beta    = theta[2+2*p:2+3*p]
+    log_sigma2 = theta[2+3*p:2+4*p]
+    sigma2 = jnp.exp(log_sigma2)   # enforce positivity
+
+    W_a = build_attention(Z, eta_a)
+    W_b = build_attention(Z, eta_b)
+
+    D_beta = jnp.diag(beta)
+    D_ga = jnp.diag(gamma_a)
+    D_gb = jnp.diag(gamma_b)
+
+    G = D_beta + D_ga @ W_a
+    S = jnp.eye(p) - D_gb @ W_b
+
+    inv_Sigma_e = jnp.diag(1.0 / sigma2)
+    E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)
+    quad = jnp.sum((E @ inv_Sigma_e) * E)
+
+    signS, logdetS = jnp.linalg.slogdet(S)
+    if signS <= 0:
+        return -jnp.inf  # invalid step
+
+    val = (
+        -(T-1) * p / 2 * jnp.log(2 * jnp.pi)
+        - (T-1) / 2 * jnp.sum(log_sigma2)   # since sigma2 = exp(log_sigma2)
+        + (T-1) * logdetS
         - 0.5 * quad
     )
     return val
