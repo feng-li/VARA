@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from jax.numpy.linalg import inv
+from jax.scipy.stats import norm
 
 
 def vec(X):
@@ -30,7 +31,7 @@ def Gamma0_stationary(S, G, Sigma_e):
     return Gamma0
 
 
-def assemble_full_V_full(Wa, Wb, Wa_dot, Wb_dot,
+def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
                          gamma_a, gamma_b,
                          Sigma_e, S, G, Gamma0,
                          sigma_e2, T, kappa4=3.0):
@@ -222,10 +223,10 @@ def assemble_full_V_full(Wa, Wb, Wa_dot, Wb_dot,
     return V
 
 
-def assemble_full_H_full(Wa, Wb, Wa_dot, Wb_dot,
-                         gamma_a, gamma_b,
-                         Sigma_e, S, G, Gamma0,
-                         sigma_e2, T, kappa4=3.0):
+def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
+                    gamma_a, gamma_b,
+                    Sigma_e, S, G, Gamma0,
+                    sigma_e2, T, kappa4=3.0):
     """
     Assemble the full analytical expected Hessian matrix H(θ) = V − Δ
     for the VAR-Attention model.
@@ -253,7 +254,7 @@ def assemble_full_H_full(Wa, Wb, Wa_dot, Wb_dot,
     # ------------------------------------------------------------------
     # Step 1: Start from V (already assembled analytically)
     # ------------------------------------------------------------------
-    V = assemble_full_V_full(Wa, Wb, Wa_dot, Wb_dot,
+    V = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
                              gamma_a, gamma_b,
                              Sigma_e, S, G, Gamma0,
                              sigma_e2, T, kappa4)
@@ -369,12 +370,12 @@ def compute_sandwich_variance(Wa, Wb, Wa_dot, Wb_dot,
     """
 
     # Step 1: Compute analytical V and H matrices
-    V = assemble_full_V_full(Wa, Wb, Wa_dot, Wb_dot,
+    V = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
                              gamma_a, gamma_b,
                              Sigma_e, S, G, Gamma0,
                              sigma_e2, T, kappa4)
 
-    H = assemble_full_H_full(Wa, Wb, Wa_dot, Wb_dot,
+    H = assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
                              gamma_a, gamma_b,
                              Sigma_e, S, G, Gamma0,
                              sigma_e2, T, kappa4)
@@ -390,9 +391,6 @@ def compute_sandwich_variance(Wa, Wb, Wa_dot, Wb_dot,
 
     return var_theta
 
-
-import jax.numpy as jnp
-from jax.scipy.stats import norm
 
 def compute_confidence_intervals(theta_hat, var_theta, alpha=0.05):
     """
@@ -449,7 +447,7 @@ def test_full_V_blocks():
     Gamma0 = Gamma0_stationary(S, G, Sigma_e)
     sigma_e2 = jnp.array([0.5, 0.8, 1.2])
 
-    V_full = assemble_full_V_full(Wa, Wb, Wa_dot, Wb_dot,
+    V_full = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
                                   gamma_a, gamma_b,
                                   Sigma_e, S, G, Gamma0,
                                   sigma_e2, T)
@@ -474,7 +472,7 @@ def test_H_full():
     Gamma0 = Gamma0_stationary(S, G, Sigma_e)
     sigma_e2 = jnp.array([0.5, 0.8, 1.0])
 
-    H = assemble_full_H_full(Wa, Wb, Wa_dot, Wb_dot,
+    H = assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
                              gamma_a, gamma_b,
                              Sigma_e, S, G, Gamma0,
                              sigma_e2, T)
