@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 from loglik_attn import build_attention
 
 
-# ---------- Simulation function ----------
 def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
     """
     Simulate data from the VAR attention model.
@@ -65,8 +64,9 @@ def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
     return Y, params, Z, W_a, W_b
 
 
-# ---------- Example usage ----------
 if __name__ == "__main__":
+
+    # Set the random number seed
     key = jax.random.PRNGKey(0)
 
     # Simulate dataset with p >= 100
