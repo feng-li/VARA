@@ -37,15 +37,15 @@ def loglik_grad_analytical(theta, Y, Z):
     grad = []
 
     # ∂ℓ/∂η_a
-    Wa_tilde = W_a * (Z @ Z.T / jnp.sqrt(Z.shape[1]))  # similarity scaling
-    tmp = jnp.einsum("tp,pk->tk", E @ Sigma_inv, jnp.diag(gamma_a) @ Wa_tilde @ Y[:-1].T)
+    Wa_dot = W_a * (Z @ Z.T / jnp.sqrt(Z.shape[1]))  # derivative matrix
+    tmp = jnp.einsum("tp,pk->tk", E @ Sigma_inv, jnp.diag(gamma_a) @ Wa_dot @ Y[:-1].T)
     grad_eta_a = jnp.sum(tmp)
     grad.append(grad_eta_a)
 
     # ∂ℓ/∂η_b
-    Wb_tilde = W_b * (Z @ Z.T / jnp.sqrt(Z.shape[1]))
-    term1 = -T * jnp.trace(S_inv @ (jnp.diag(gamma_b) @ Wb_tilde))
-    term2 = jnp.sum((E @ Sigma_inv) * (jnp.diag(gamma_b) @ Wb_tilde @ Y[1:].T).T)
+    Wb_dot = W_b * (Z @ Z.T / jnp.sqrt(Z.shape[1])) # derivative matrix
+    term1 = -T * jnp.trace(S_inv @ (jnp.diag(gamma_b) @ Wb_dot))
+    term2 = jnp.sum((E @ Sigma_inv) * (jnp.diag(gamma_b) @ Wb_dot @ Y[1:].T).T)
     grad.append(term1 + term2)
 
     # ∂ℓ/∂γ_a (vector length p)

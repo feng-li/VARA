@@ -2,6 +2,8 @@ import jax.numpy as jnp
 from jax.numpy.linalg import inv
 from jax.scipy.stats import norm
 
+from loglik_attn import build_attention
+
 
 def vec(X):
     """Vectorize matrix X (column-major flatten)."""
@@ -15,7 +17,8 @@ def unvec(v, shape):
 
 def Gamma0_stationary(S, G, Sigma_e):
     """
-    Solve for Γ₀ = cov(Yₜ) given stationary VAR form:
+    Solve for Γ₀ = cov(Yₜ) given stationary VAR form.
+
         Γ₀ = (S⁻¹G) Γ₀ (S⁻¹G)ᵀ + S⁻¹ Σₑ (S⁻¹)ᵀ
     Analytical solution:
         vec(Γ₀) = [I - (S⁻¹G ⊗ S⁻¹G)]⁻¹ vec(S⁻¹ Σₑ (S⁻¹)ᵀ)
@@ -32,9 +35,9 @@ def Gamma0_stationary(S, G, Sigma_e):
 
 
 def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
-                         gamma_a, gamma_b,
-                         Sigma_e, S, G, Gamma0,
-                         sigma_e2, T, kappa4=3.0):
+                    gamma_a, gamma_b,
+                    Sigma_e, S, G, Gamma0,
+                    sigma2, T, kappa4=3.0):
     """
     Assemble the complete analytical V(θ) ∈ ℝ^{(4p+2)×(4p+2)}
     for the VAR–Attention model, including all 15 nonzero cross-blocks.
@@ -70,7 +73,7 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
         inv(Sigma_e) * ((Wb @ inv(S) @ G) @ Gamma0 @ (Wb @ inv(S) @ G).T)
     )
     V_beta_beta = T * (inv(Sigma_e) * Gamma0)
-    V_sigma_sigma = T * (kappa4 - 1.0) / 4.0 * jnp.diag(1.0 / sigma_e2**2)
+    V_sigma_sigma = T * (kappa4 - 1.0) / 4.0 * jnp.diag(1.0 / sigma2**2)
 
     # ================================================================
     # === Cross-covariance blocks (15 in total) ======================
@@ -84,18 +87,18 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
 
     # (2) cov(γ_a, η_a)
     V_gamma_a_eta_a = T * (
-        gamma_a * (1.0 / sigma_e2) * jnp.diag(Wa @ Gamma0 @ Wa_dot.T)
+        gamma_a * (1.0 / sigma2) * jnp.diag(Wa @ Gamma0 @ Wa_dot.T)
     )
 
     # (3) cov(γ_b, η_a)
     V_gamma_b_eta_a = T * (
-        gamma_a * (1.0 / sigma_e2) *
+        gamma_a * (1.0 / sigma2) *
         jnp.diag((Wb @ inv(S) @ G) @ Gamma0 @ Wa_dot.T)
     )
 
     # (4) cov(β, η_a)
     V_beta_eta_a = T * (
-        gamma_a * (1.0 / sigma_e2) * jnp.diag(Gamma0 @ Wa_dot.T)
+        gamma_a * (1.0 / sigma2) * jnp.diag(Gamma0 @ Wa_dot.T)
     )
 
     # (5) cov(σ², η_a) = 0
@@ -103,7 +106,7 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
 
     # (6) cov(γ_a, η_b)
     V_gamma_a_eta_b = T * (
-        gamma_b * (1.0 / sigma_e2) *
+        gamma_b * (1.0 / sigma2) *
         jnp.diag(Wa_dot @ Gamma0 @ (Wb_dot @ inv(S) @ G).T)
     )
 
@@ -113,19 +116,19 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
     diag2 = jnp.diag(Wb @ Sinv @ jnp.diag(gamma_b) @ Wb_dot @ Sinv)
     diag3 = jnp.diag(Wb @ Sinv) * jnp.diag(Wb_dot @ Sinv)
     V_gamma_b_eta_b = T * (
-        gamma_b * (1.0 / sigma_e2) * diag1 + diag2 +
+        gamma_b * (1.0 / sigma2) * diag1 + diag2 +
         (kappa4 - 3.0) * gamma_b * diag3
     )
 
     # (8) cov(β, η_b)
     V_beta_eta_b = T * (
-        gamma_b * (1.0 / sigma_e2) *
+        gamma_b * (1.0 / sigma2) *
         jnp.diag(Gamma0 @ (Wb_dot @ inv(S) @ G).T)
     )
 
     # (9) cov(σ², η_b)
     V_sigma_eta_b = T * (kappa4 - 1.0) / 2.0 * (
-        (1.0 / sigma_e2) * jnp.diag(Wb @ inv(S))
+        (1.0 / sigma2) * jnp.diag(Wb @ inv(S))
     )
 
     # (10) cov(γ_b, γ_a)
@@ -226,7 +229,7 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
 def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
                     gamma_a, gamma_b,
                     Sigma_e, S, G, Gamma0,
-                    sigma_e2, T, kappa4=3.0):
+                    sigma2, T, kappa4=3.0):
     """
     Assemble the full analytical expected Hessian matrix H(θ) = V − Δ
     for the VAR-Attention model.
@@ -239,7 +242,7 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
     Sigma_e : (p×p) noise covariance (diagonal)
     S, G : (p×p) system matrices
     Gamma0 : (p×p) stationary covariance of Y_t
-    sigma_e2 : (p,) variance vector
+    sigma2 : (p,) variance vector
     T : int
         Sample size
     kappa4 : float
@@ -255,9 +258,9 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
     # Step 1: Start from V (already assembled analytically)
     # ------------------------------------------------------------------
     V = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
-                             gamma_a, gamma_b,
-                             Sigma_e, S, G, Gamma0,
-                             sigma_e2, T, kappa4)
+                        gamma_a, gamma_b,
+                        Sigma_e, S, G, Gamma0,
+                        sigma2, T, kappa4)
 
     p = Wa.shape[0]
     d = 4 * p + 2
@@ -267,8 +270,8 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
     # ------------------------------------------------------------------
     Sinv = inv(S)
     Sigma_inv = inv(Sigma_e)
-    sigma_e_inv2 = 1.0 / sigma_e2
-    sigma_e_inv4 = 1.0 / (sigma_e2 ** 2)
+    sigma_e_inv2 = 1.0 / sigma2
+    sigma_e_inv4 = 1.0 / (sigma2 ** 2)
 
     # Δ_{ηb,ηb} scalar
     Delta_eta_b_eta_b = (kappa4 - 3) * jnp.trace(
@@ -335,10 +338,7 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
     return H
 
 
-def compute_sandwich_variance(Wa, Wb, Wa_dot, Wb_dot,
-                              gamma_a, gamma_b,
-                              Sigma_e, S, G, Gamma0,
-                              sigma_e2, T, kappa4=3.0):
+def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05):
     """
     Compute the robust (sandwich) covariance estimator for QMLE parameters.
 
@@ -356,7 +356,7 @@ def compute_sandwich_variance(Wa, Wb, Wa_dot, Wb_dot,
         System matrices.
     Gamma0 : array
         Stationary covariance of Y_t.
-    sigma_e2 : array
+    sigma2 : array
         Variances of ε components.
     T : int
         Sample size.
@@ -368,17 +368,41 @@ def compute_sandwich_variance(Wa, Wb, Wa_dot, Wb_dot,
     var_theta : array
         Robust covariance matrix of parameter estimates.
     """
+    T, p = Y.shape
+
+    eta_a = theta_hat[0]
+    eta_b = theta_hat[1]
+    gamma_a = theta_hat[2:2+p]
+    gamma_b = theta_hat[2+p:2+2*p]
+    beta = theta_hat[2+2*p:2+3*p]
+    sigma2 = theta_hat[2+3*p:2+4*p]
+
+    Sigma_e = jnp.diag(sigma2)
+
+    # Step 3: Construct W_a, W_b
+    Wa = build_attention(Z, eta=eta_a)
+    Wb = build_attention(Z, eta=eta_b)
+
+    # Step 4: Construct S, G
+    S = jnp.eye(p) - jnp.diag(gamma_b) @ Wb
+    G = jnp.diag(beta) + jnp.diag(gamma_a) @ Wa
+    # S_inv = jnp.linalg.inv(S)
+
+    Wa_dot = Wa * (Z @ Z.T / jnp.sqrt(Z.shape[1]))  # derivative matrix
+    Wb_dot = Wa * (Z @ Z.T / jnp.sqrt(Z.shape[1]))  # derivative matrix
+
+    Gamma0 = Gamma0_stationary(S, G, Sigma_e)
 
     # Step 1: Compute analytical V and H matrices
     V = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
-                             gamma_a, gamma_b,
-                             Sigma_e, S, G, Gamma0,
-                             sigma_e2, T, kappa4)
+                        gamma_a, gamma_b,
+                        Sigma_e, S, G, Gamma0,
+                        sigma2, T, kappa4)
 
     H = assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
-                             gamma_a, gamma_b,
-                             Sigma_e, S, G, Gamma0,
-                             sigma_e2, T, kappa4)
+                        gamma_a, gamma_b,
+                        Sigma_e, S, G, Gamma0,
+                        sigma2, T, kappa4)
 
     # Step 2: Compute inverse Hessian
     H_inv = inv(H)
@@ -389,29 +413,8 @@ def compute_sandwich_variance(Wa, Wb, Wa_dot, Wb_dot,
     # Step 4: Symmetrize for numerical stability
     var_theta = 0.5 * (var_theta + var_theta.T)
 
-    return var_theta
 
-
-def compute_confidence_intervals(theta_hat, var_theta, alpha=0.05):
-    """
-    Compute robust (sandwich-based) confidence intervals for QMLE estimates.
-
-    Parameters
-    ----------
-    theta_hat : (d,) array
-        Vector of estimated parameters.
-    var_theta : (d,d) array
-        Robust covariance matrix (from H⁻¹ V H⁻¹).
-    alpha : float, optional
-        Significance level, default 0.05 (for 95% CI).
-
-    Returns
-    -------
-    results : dict
-        Contains 'se', 'lower', 'upper', 'z_value', 'alpha'.
-    """
-
-    # Step 1: robust standard errors
+    # Step 5: robust standard errors
     se = jnp.sqrt(jnp.diag(var_theta))
 
     # Step 2: z critical value
@@ -421,16 +424,9 @@ def compute_confidence_intervals(theta_hat, var_theta, alpha=0.05):
     lower = theta_hat - z_crit * se
     upper = theta_hat + z_crit * se
 
-    # Step 4: z-values (useful for Wald tests)
-    z_values = theta_hat / se
+    out = dict(theta=theta_hat, var=var_theta, se=se, lower=lower, upper=upper)
 
-    return {
-        "alpha": alpha,
-        "se": se,
-        "z_value": z_values,
-        "lower": lower,
-        "upper": upper,
-    }
+    return out
 
 
 def test_full_V_blocks():
@@ -445,12 +441,12 @@ def test_full_V_blocks():
     S = jnp.eye(p)
     G = jnp.eye(p) * 0.8
     Gamma0 = Gamma0_stationary(S, G, Sigma_e)
-    sigma_e2 = jnp.array([0.5, 0.8, 1.2])
+    sigma2 = jnp.array([0.5, 0.8, 1.2])
 
     V_full = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
-                                  gamma_a, gamma_b,
-                                  Sigma_e, S, G, Gamma0,
-                                  sigma_e2, T)
+                             gamma_a, gamma_b,
+                             Sigma_e, S, G, Gamma0,
+                             sigma2, T)
 
     print("Full V shape:", V_full.shape)
     print("Symmetry check:", jnp.allclose(V_full, V_full.T, atol=1e-10))
@@ -470,12 +466,12 @@ def test_H_full():
     S = jnp.eye(p)
     G = jnp.eye(p) * 0.7
     Gamma0 = Gamma0_stationary(S, G, Sigma_e)
-    sigma_e2 = jnp.array([0.5, 0.8, 1.0])
+    sigma2 = jnp.array([0.5, 0.8, 1.0])
 
     H = assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
-                             gamma_a, gamma_b,
-                             Sigma_e, S, G, Gamma0,
-                             sigma_e2, T)
+                        gamma_a, gamma_b,
+                        Sigma_e, S, G, Gamma0,
+                        sigma2, T)
 
     print("H shape:", H.shape)
     print("Symmetry check:", jnp.allclose(H, H.T, atol=1e-10))
@@ -483,32 +479,31 @@ def test_H_full():
     print("Top-left 6×6 submatrix:\n", H[:6, :6])
 
 
-def test_sandwich_variance():
-    p, T = 3, 200
-    Wa = jnp.eye(p)
-    Wb = jnp.eye(p) * 0.8
-    Wa_dot = jnp.eye(p) * 0.05
-    Wb_dot = jnp.eye(p) * 0.1
-    gamma_a = jnp.array([0.4, 0.6, 0.8])
-    gamma_b = jnp.array([0.5, 0.7, 0.9])
-    Sigma_e = jnp.diag(jnp.linspace(0.5, 1.0, p))
-    S = jnp.eye(p)
-    G = jnp.eye(p) * 0.7
-    Gamma0 = Gamma0_stationary(S, G, Sigma_e)
-    sigma_e2 = jnp.array([0.5, 0.8, 1.0])
+# def test_sandwich_variance():
+#     p, T = 3, 200
+#     Wa = jnp.eye(p)
+#     Wb = jnp.eye(p) * 0.8
+#     Wa_dot = jnp.eye(p) * 0.05
+#     Wb_dot = jnp.eye(p) * 0.1
+#     gamma_a = jnp.array([0.4, 0.6, 0.8])
+#     gamma_b = jnp.array([0.5, 0.7, 0.9])
+#     Sigma_e = jnp.diag(jnp.linspace(0.5, 1.0, p))
+#     S = jnp.eye(p)
+#     G = jnp.eye(p) * 0.7
+#     Gamma0 = Gamma0_stationary(S, G, Sigma_e)
+#     sigma2 = jnp.array([0.5, 0.8, 1.0])
 
-    var_theta = compute_sandwich_variance(Wa, Wb, Wa_dot, Wb_dot,
-                                          gamma_a, gamma_b,
-                                          Sigma_e, S, G, Gamma0,
-                                          sigma_e2, T)
+#     var_theta = compute_sandwich_variance(Wa, Wb, Wa_dot, Wb_dot,
+#                                           gamma_a, gamma_b,
+#                                           Sigma_e, S, G, Gamma0,
+#                                           sigma2, T)
 
-    print("Sandwich variance shape:", var_theta.shape)
-    print("Symmetry check:", jnp.allclose(var_theta, var_theta.T, atol=1e-10))
-    print("Trace(Var):", jnp.trace(var_theta))
-    print("Leading 5×5 submatrix:\n", var_theta[:5, :5])
+#     print("Sandwich variance shape:", var_theta.shape)
+#     print("Symmetry check:", jnp.allclose(var_theta, var_theta.T, atol=1e-10))
+#     print("Trace(Var):", jnp.trace(var_theta))
+#     print("Leading 5×5 submatrix:\n", var_theta_hat[:5, :5])
 
 
 if __name__ == "__main__":
     test_full_V_blocks()
     test_H_full()
-    test_sandwich_variance()

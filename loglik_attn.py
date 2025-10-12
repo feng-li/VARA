@@ -33,17 +33,17 @@ def construct_matrices(theta, Z, p):
     eta_b = theta[1]
     gamma_a = theta[2:2+p]
     gamma_b = theta[2+p:2+2*p]
-    beta    = theta[2+2*p:2+3*p]
-    sigma2  = theta[2+3*p:2+4*p]
+    beta = theta[2+2*p:2+3*p]
+    sigma2 = theta[2+3*p:2+4*p]
 
     # Build attention weights
     W_a = build_attention(Z, eta_a)
     W_b = build_attention(Z, eta_b)
 
     # Diagonal matrices
-    D_beta   = jnp.diag(beta)
-    D_ga     = jnp.diag(gamma_a)
-    D_gb     = jnp.diag(gamma_b)
+    D_beta = jnp.diag(beta)
+    D_ga = jnp.diag(gamma_a)
+    D_gb = jnp.diag(gamma_b)
 
     # Model matrices
     G = D_beta + D_ga @ W_a
