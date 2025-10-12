@@ -26,6 +26,12 @@ def Gamma0_stationary(S, G, Sigma_e):
     p = S.shape[0]
     Sinv = inv(S)
     A = Sinv @ G
+
+    # If spectral radius( A⊗A ) ≥ 1, this inverse explodes. That destabilizes V and H numerically.
+
+    rho = max(abs(jnp.linalg.eigvals(A)))
+    print("Spectral radius of A:", rho)
+
     kron_term = jnp.kron(A, A)
     I = jnp.eye(p * p)
     rhs = vec(Sinv @ Sigma_e @ Sinv.T)
@@ -338,6 +344,61 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
     return H
 
 
+def compute_Avar(H, V, eps=1e-8, ensure_pd=True, verbose=True):
+    """
+    Compute asymptotic variance Avar = H^{-1} V H^{-1},
+    with numerical stabilization and optional PD enforcement.
+
+    Parameters
+    ----------
+    H : array_like
+        Analytical Hessian (expected information matrix)
+    V : array_like
+        Outer-product-of-gradients covariance matrix
+    eps : float
+        Regularization constant added to the diagonal (default 1e-8)
+    ensure_pd : bool
+        If True, project Avar to nearest positive-definite matrix
+    verbose : bool
+        If True, print diagnostics on eigenvalues
+
+    Returns
+    -------
+    Avar : jnp.ndarray
+        Stabilized, symmetric, (approximately) positive definite covariance matrix
+    """
+
+    # --- Step 1: Symmetrize inputs ---
+    H = (H + H.T) / 2
+    V = (V + V.T) / 2
+
+    # --- Step 2: Regularized inverse of H ---
+    H_reg = H + eps * jnp.eye(H.shape[0])
+    H_inv = jnp.linalg.inv(H_reg)
+
+    # --- Step 3: Sandwich variance ---
+    Avar = H_inv @ V @ H_inv
+
+    # --- Step 4: Symmetrize again to counter numeric asymmetry ---
+    Avar = (Avar + Avar.T) / 2
+
+    # --- Step 5: Eigenvalue diagnostics ---
+    eigvals = jnp.linalg.eigvalsh(Avar)
+    if verbose:
+        print("Eigenvalue range of Avar: [{:.3e}, {:.3e}]".format(eigvals.min(), eigvals.max()))
+
+    # --- Step 6: Enforce positive definiteness if needed ---
+    if ensure_pd and eigvals.min() <= 0:
+        eigvals_clipped = jnp.clip(eigvals, eps, None)
+        eigvecs = jnp.linalg.eigh(Avar)[1]
+        Avar = eigvecs @ jnp.diag(eigvals_clipped) @ eigvecs.T
+        if verbose:
+            print("Avar adjusted to be positive definite (min eigval clipped to {:.1e})".format(eps))
+
+    return (Avar + Avar.T) / 2  # ensure final symmetry
+
+
+
 def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05):
     """
     Compute the robust (sandwich) covariance estimator for QMLE parameters.
@@ -389,7 +450,7 @@ def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05):
     # S_inv = jnp.linalg.inv(S)
 
     Wa_dot = Wa * (Z @ Z.T / jnp.sqrt(Z.shape[1]))  # derivative matrix
-    Wb_dot = Wa * (Z @ Z.T / jnp.sqrt(Z.shape[1]))  # derivative matrix
+    Wb_dot = Wb * (Z @ Z.T / jnp.sqrt(Z.shape[1]))  # derivative matrix
 
     Gamma0 = Gamma0_stationary(S, G, Sigma_e)
 
@@ -404,18 +465,11 @@ def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05):
                         Sigma_e, S, G, Gamma0,
                         sigma2, T, kappa4)
 
-    # Step 2: Compute inverse Hessian
-    H_inv = inv(H)
 
-    # Step 3: Sandwich variance estimator
-    var_theta = H_inv @ V @ H_inv
-
-    # Step 4: Symmetrize for numerical stability
-    var_theta = 0.5 * (var_theta + var_theta.T)
-
+    Avar_theta = compute_Avar(H, V)
 
     # Step 5: robust standard errors
-    se = jnp.sqrt(jnp.diag(var_theta))
+    se = jnp.sqrt(jnp.diag(Avar_theta))
 
     # Step 2: z critical value
     z_crit = norm.ppf(1 - alpha / 2.0)
@@ -424,8 +478,9 @@ def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05):
     lower = theta_hat - z_crit * se
     upper = theta_hat + z_crit * se
 
-    out = dict(theta=theta_hat, var=var_theta, se=se, lower=lower, upper=upper)
+    out = dict(theta=theta_hat, Avar=Avar_theta, se=se, lower=lower, upper=upper)
 
+    breakpoint()
     return out
 
 

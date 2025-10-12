@@ -21,8 +21,8 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(0)
     # R = 1000              # number of replications
     T = 500               # sample size
-    p = 10               # number of responses
-    q = 5                # dimension of feature matrix
+    p = 3               # number of responses
+    q = 2                # dimension of feature matrix
 
     # DGP
     Y, params, Z, W_a, W_b = simulate_VAR_attention(
