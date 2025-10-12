@@ -3,6 +3,7 @@ import jax.numpy as jnp
 
 from dgp import simulate_VAR_attention
 from dgp import flatten_params
+from fit import estimate
 
 # --- 4. Vectorize over replications ---
 # @jax.jit

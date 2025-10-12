@@ -4,7 +4,7 @@ from mle_ad import mle_newton
 
 
 def estimate(Y, Z, key, theta_init):
-    """Estimation routine using QMLE functions"""
+    """Estimation routine using QMLE functions."""
 
     T, p = Y.shape
 
