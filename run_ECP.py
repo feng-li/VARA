@@ -5,8 +5,7 @@ from tqdm import trange
 from dgp import simulate_VAR_attention, flatten_params
 from fit import estimate
 
-
-def empirical_coverage_rate(R=100, T=500, p=3, q=2, dist="t5", seed=0):
+def empirical_coverage_rate(R=100, T=500, p=3, q=2, dist="normal", seed=0):
     """
     Monte Carlo simulation to estimate empirical coverage probability
     of QMLE-based confidence intervals, with a DGP setup summary.

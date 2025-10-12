@@ -237,7 +237,7 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
 # ===============================================================
 # === Compute Avar ==============================================
 # ===============================================================
-def compute_Avar(H, V, eps=1e-8, ensure_pd=True, verbose=True):
+def compute_Avar(H, V, eps=1e-8, ensure_pd=True, verbose=False):
     """
     Compute asymptotic covariance matrix Avar = H⁻¹ V H⁻¹
     with conditional numerical stabilization and PD enforcement.
