@@ -1,12 +1,12 @@
 import jax
 import jax.numpy as jnp
-from jax.random import multivariate_normal, uniform, normal
+from jax.random import multivariate_normal, normal
 import matplotlib.pyplot as plt
 
 from loglik_attn import build_attention
 
 
-def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
+def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal"):
     """
     Simulate data from the VAR attention model.
 
@@ -25,14 +25,13 @@ def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
     Sigma_z = 0.5 ** jnp.abs(idx[:, None] - idx[None, :])
     Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
 
-
     # Step 2: Draw parameters
-    eta_a = 0.5
-    eta_b = 1.0
-    gamma_a = uniform(keys[1], (p,), minval=-0.2, maxval=0.2)
-    gamma_b = uniform(keys[2], (p,), minval=-0.2, maxval=0.2)
-    beta = uniform(keys[3], (p,), minval=-0.2, maxval=0.2)
-    sigma2 = uniform(keys[4], (p,), minval=0.25, maxval=1.0)
+    eta_a = params["eta_a"]
+    eta_b = params["eta_b"]
+    gamma_a = params["gamma_a"]
+    gamma_b = params["gamma_b"]
+    beta = params["beta"]
+    sigma2 = params["sigma2"]
 
 
     # Step 3: Construct W_a, W_b
@@ -66,7 +65,7 @@ def simulate_VAR_attention(key, T=200, p=100, q=10, dist="normal"):
         Y = Y.at[t].set(S_inv @ (G @ Y[t - 1] + eps[t]))
 
     params = dict(eta_a=eta_a, eta_b=eta_b, gamma_a=gamma_a, gamma_b=gamma_b, beta=beta, sigma2=sigma2)
-    return Y, params, Z, W_a, W_b
+    return Y, Z, W_a, W_b
 
 
 def flatten_params(params: dict, order: list[str]):

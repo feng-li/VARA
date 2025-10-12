@@ -1,11 +1,14 @@
 import jax
 import jax.numpy as jnp
+from jax.random import uniform
+
 from tqdm import trange
 
 from dgp import simulate_VAR_attention, flatten_params
 from fit import estimate
 
-def empirical_coverage_rate(R=100, T=500, p=3, q=2, dist="normal", seed=0):
+
+def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", seed=0):
     """
     Monte Carlo simulation to estimate empirical coverage probability
     of QMLE-based confidence intervals, with a DGP setup summary.
@@ -35,6 +38,7 @@ def empirical_coverage_rate(R=100, T=500, p=3, q=2, dist="normal", seed=0):
         Mean coverage summarized by parameter group.
     """
     key = jax.random.PRNGKey(seed)
+    keys = jax.random.split(key, 7)
 
     # ===============================================================
     # === 1. Print DGP setup summary ================================
@@ -53,20 +57,22 @@ def empirical_coverage_rate(R=100, T=500, p=3, q=2, dist="normal", seed=0):
     # ===============================================================
     # === 2. True parameter vector from DGP =========================
     # ===============================================================
-    Y0, params_true, Z, W_a, W_b = simulate_VAR_attention(key, T=T, p=p, q=q, dist=dist)
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
-    theta_true = flatten_params(params_true, order)
-    log_sigma2_true = jnp.log(theta_true[2 + 3 * p : 2 + 4 * p])
-    theta_true_reparam = jnp.concatenate([theta_true[: 2 + 3 * p], log_sigma2_true])
-    d = theta_true.shape[0]
-
-    print("True parameter vector (flattened):")
-    print(jnp.round(theta_true, 4))
-    print()
 
     # ===============================================================
     # === 3. Storage for results ===================================
     # ===============================================================
+
+    params_true = dict(eta_a = 0.5,
+                       eta_b = 1.0,
+                       gamma_a = uniform(keys[1], (p,), minval=-0.2, maxval=0.2),
+                       gamma_b = uniform(keys[2], (p,), minval=-0.2, maxval=0.2),
+                       beta = uniform(keys[3], (p,), minval=-0.2, maxval=0.2),
+                       sigma2 = uniform(keys[4], (p,), minval=0.25, maxval=1.0))
+
+    theta_true = flatten_params(params_true, order)
+
+    d = theta_true.shape[0]
     inside = jnp.zeros((R, d))
     ci_length = jnp.zeros((R, d))
 
@@ -77,10 +83,17 @@ def empirical_coverage_rate(R=100, T=500, p=3, q=2, dist="normal", seed=0):
         subkey = jax.random.fold_in(key, r)
         try:
             # Simulate new dataset
-            Y, _, Z, _, _ = simulate_VAR_attention(subkey, T=T, p=p, q=q, dist=dist)
+            Y, Z, _, _ = simulate_VAR_attention(subkey, params_true, T=T, p=p, q=q, dist=dist)
+
+            log_sigma2_true = jnp.log(theta_true[2 + 3 * p:2+4*p])
+            theta_true_reparam = jnp.concatenate([theta_true[: 2 + 3 * p], log_sigma2_true])
+
+            print(f"True parameters: {theta_true}")
+            print(f"True Y: {Y}")
+            print(f"True Z: {Z}")
 
             # Slightly perturbed initialization
-            theta_init = theta_true_reparam + 0.1 * jax.random.normal(subkey, theta_true_reparam.shape)
+            theta_init = theta_true_reparam + 0.01 * jax.random.normal(subkey, theta_true_reparam.shape)
 
             # Estimate parameters and get confidence intervals
             result = estimate(Y, Z, subkey, theta_init, verbose=False)
@@ -103,12 +116,12 @@ def empirical_coverage_rate(R=100, T=500, p=3, q=2, dist="normal", seed=0):
 
     # Parameter index slices for grouping
     idx = {
-        "eta_a": slice(0, 1),
-        "eta_b": slice(1, 2),
+        "eta_a":   slice(0, 1),
+        "eta_b":   slice(1, 2),
         "gamma_a": slice(2, 2 + p),
         "gamma_b": slice(2 + p, 2 + 2 * p),
-        "beta": slice(2 + 2 * p, 2 + 3 * p),
-        "sigma2": slice(2 + 3 * p, 2 + 4 * p),
+        "beta":    slice(2 + 2 * p, 2 + 3 * p),
+        "sigma2":  slice(2 + 3 * p, 2 + 4 * p),
     }
     coverage_by_group = {name: float(coverage[s].mean()) for name, s in idx.items()}
 
@@ -129,4 +142,4 @@ def empirical_coverage_rate(R=100, T=500, p=3, q=2, dist="normal", seed=0):
 
 if __name__ == "__main__":
     # Example short run for testing
-    empirical_coverage_rate(R=100, T=300, p=3, q=2, dist="normal", seed=0)
+    empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", seed=0)
