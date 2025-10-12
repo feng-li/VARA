@@ -2,15 +2,23 @@ import jax
 import jax.numpy as jnp
 
 from loglik_attn import loglik_reparam
+from grad import loglik_grad_analytical
+from hess import loglik_hess_analytical
 
 
-def mle_newton(Y, Z, theta_init, max_iter=50, tol=1e-6, alpha=1.0):
+def mle_newton(Y, Z, theta_init, analytical_gradhess=False, max_iter=50, tol=1e-6, alpha=1.0):
     """
     Newton-Raphson Estimator.
 
     """
-    loglik_grad = jax.grad(loglik_reparam)
-    loglik_hess = jax.hessian(loglik_reparam)
+
+    if analytical_gradhess:
+        # note that sigma2 is reparameterized to log(sigma2)
+        loglik_grad = loglik_grad_analytical
+        loglik_hess = loglik_hess_analytical
+    else:
+        loglik_grad = jax.grad(loglik_reparam)
+        loglik_hess = jax.hessian(loglik_reparam)
 
     theta = theta_init
     for it in range(max_iter):
@@ -64,7 +72,7 @@ if __name__ == "__main__":
     log_sigma2_true = jnp.log(theta_true[2+3*p:2+4*p])
     theta_true_reparam = jnp.concatenate([theta_true[:2+3*p], log_sigma2_true])
 
-    theta_init = theta_true_reparam + 0.1 * jax.random.normal(key, theta_true_reparam.shape)
+    theta_init = theta_true_reparam + 0.01 * jax.random.normal(key, theta_true_reparam.shape)
     theta_hat_reparam, grad_ll, hess_ll = mle_newton(Y, Z, theta_init)
 
     # Convert back to natural scale (replace log_sigma2 with sigma2)
