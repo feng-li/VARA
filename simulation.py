@@ -5,24 +5,13 @@ from dgp import simulate_VAR_attention
 from dgp import flatten_params
 from fit import estimate
 
-# --- 4. Vectorize over replications ---
-# @jax.jit
-# def run_simulation(R, theta_true, T, seed=0):
-#     keys = random.split(random.PRNGKey(seed), R)
-#     coverage = jax.vmap(partial(estimate_once, theta_true, T))(keys)
-#     return coverage.mean(axis=0)
-
-
-# empirical_coverage = run_simulation(R, theta_true, T)
-# print("Empirical coverage per parameter:", empirical_coverage)
-
 if __name__ == "__main__":
     # --- 1. Define simulation setup ---
     key = jax.random.PRNGKey(0)
-    # R = 1000              # number of replications
-    T = 500               # sample size
-    p = 3               # number of responses
-    q = 2                # dimension of feature matrix
+    # R = 100              # number of replications
+    T = 500                # sample size
+    p = 3                  # number of responses
+    q = 2                  # dimension of feature matrix
 
     # DGP
     Y, params, Z, W_a, W_b = simulate_VAR_attention(

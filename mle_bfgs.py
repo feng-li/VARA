@@ -21,13 +21,15 @@ def mle_bfgs(Y, Z, theta_init):
     theta_hat = res.x
 
     # Gradient and Hessian at optimum
-    grad_ll = grad(loglik)(theta_hat, Y, Z)
-    hess_ll = hessian(loglik)(theta_hat, Y, Z)
+    grad_ll = []
+    hess_ll = []
+
+    # grad_ll = grad(loglik)(theta_hat, Y, Z)
+    # hess_ll = hessian(loglik)(theta_hat, Y, Z)
 
     return theta_hat, grad_ll, hess_ll, res
 
 
-# ---------- Example usage ----------
 if __name__ == "__main__":
 
     from dgp import simulate_VAR_attention
