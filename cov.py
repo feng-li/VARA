@@ -309,7 +309,7 @@ def compute_Avar(H, V, eps=1e-8, ensure_pd=True, verbose=False):
 # ===============================================================
 # === Sandwich variance with diagnostics ========================
 # ===============================================================
-def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05, verbose=True):
+def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05, verbose=False):
     """
     Compute the robust (sandwich) covariance estimator:
         Var(θ̂) = H⁻¹ V H⁻¹
