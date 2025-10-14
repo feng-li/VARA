@@ -258,7 +258,7 @@ def compute_Avar(H, V, eps=1e-8, ensure_pd=True, verbose=False):
         Regularization constant (only used if H is not PD).
     ensure_pd : bool, default=True
         If True, enforces PD-ness of Avar by eigenvalue clipping.
-    verbose : bool, default=True
+    verbose : bool, default=False
         If True, prints diagnostic information.
 
     Returns
@@ -345,7 +345,9 @@ def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05, verbose=F
     cond_S = jnp.linalg.cond(S)
     A = inv(S) @ G
     rho = jnp.max(jnp.abs(jnp.linalg.eigvals(A)))
-    print(f"Condition number of S: {cond_S:.3e}, spectral radius of A: {rho:.3f}")
+
+    if verbose:
+        print(f"Condition number of S: {cond_S:.3e}, spectral radius of A: {rho:.3f}")
 
     Gamma0 = Gamma0_stationary(S, G, Sigma_e)
 
@@ -361,7 +363,9 @@ def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05, verbose=F
     # Eigen diagnostics for H and V
     for name, M in [("H", H), ("V", V)]:
         eigvals = jnp.linalg.eigvalsh((M + M.T)/2)
-        print(f"{name}: min eig={eigvals.min():.3e}, max eig={eigvals.max():.3e}, cond≈{eigvals.max()/jnp.clip(eigvals.min(),1e-12,None):.2e}")
+
+        if verbose:
+            print(f"{name}: min eig={eigvals.min():.3e}, max eig={eigvals.max():.3e}, cond≈{eigvals.max()/jnp.clip(eigvals.min(),1e-12,None):.2e}")
 
     Avar_theta = compute_Avar(H, V, ensure_pd=True, verbose=verbose)
     se = jnp.sqrt(jnp.diag(Avar_theta))

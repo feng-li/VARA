@@ -6,14 +6,44 @@ from grad import loglik_grad_analytical
 from hess import loglik_hess_analytical
 
 
-def mle_newton(Y, Z, theta_init, analytical_gradhess=False, max_iter=50, tol=1e-6, alpha=1.0):
+def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
+               max_iter=100, tol=1e-8, alpha=1.0):
     """
-    Newton-Raphson Estimator.
+    Newton–Raphson MLE with:
+      1. softplus reparameterization for sigma²,
+      2. trust-region step-scaling,
+      3. gradient clipping,
+      4. Armijo–Goldstein line search.
 
+    Parameters
+    ----------
+    Y : array
+        Dependent variable(s)
+    Z : array
+        Covariates or regressors
+    theta_init : array
+        Initial parameter guess (on reparameterized scale)
+    analytical_gradhess : bool, default=False
+        Whether to use analytical gradient/Hessian
+    max_iter : int
+        Maximum number of iterations
+    tol : float
+        Convergence tolerance on parameter step
+    alpha : float
+        Initial step size for line search
+
+    Returns
+    -------
+    theta_hat : array
+        Estimated parameters (on reparameterized scale)
+    grad_ll : array
+        Gradient at optimum
+    hess_ll : array
+        Hessian at optimum
     """
 
+    # choose derivative functions
     if analytical_gradhess:
-        # note that sigma2 is reparameterized to log(sigma2)
         loglik_grad = loglik_grad_analytical
         loglik_hess = loglik_hess_analytical
     else:
@@ -23,24 +53,46 @@ def mle_newton(Y, Z, theta_init, analytical_gradhess=False, max_iter=50, tol=1e-
     theta = theta_init
     for it in range(max_iter):
         g = loglik_grad(theta, Y, Z)
+        g_norm = jnp.linalg.norm(g)
+
+        # ---- Gradient Clipping ----
+        max_grad_norm = 100.0
+        if g_norm > max_grad_norm:
+            g = g * (max_grad_norm / g_norm)
+            g_norm = max_grad_norm
+
         H = loglik_hess(theta, Y, Z)
 
         try:
             step = jnp.linalg.solve(H, g)
         except jnp.linalg.LinAlgError:
-            print("Hessian not invertible at iteration", it)
+            print(f"Hessian not invertible at iteration {it}.")
             break
 
-        # line search / damping
-        new_ll = loglik_reparam(theta + step, Y, Z)
-        old_ll = loglik_reparam(theta, Y, Z)
+        # ---- Trust-Region / Step Scaling ----
+        max_step_norm = 1.0
+        step_norm = jnp.linalg.norm(step)
+        if step_norm > max_step_norm:
+            step = step * (max_step_norm / step_norm)
+
+        # ---- Armijo–Goldstein Line Search ----
         step_size = alpha
-        while (not jnp.isfinite(new_ll)) or (new_ll < old_ll):
+        c1 = 1e-4   # sufficient decrease constant
+        c2 = 0.9    # curvature condition constant
+        old_ll = loglik_reparam(theta, Y, Z)
+
+        while True:
+            theta_trial = theta + step_size * step
+            new_ll = loglik_reparam(theta_trial, Y, Z)
+
+            # Armijo condition: sufficient increase in log-likelihood
+            if (jnp.isfinite(new_ll)
+                and new_ll >= old_ll + c1 * step_size * g_norm**2):
+                break  # accept
             step_size *= 0.5
-            if step_size < 1e-6:
+            if step_size < 1e-8:
                 print("Step size too small, stopping.")
                 return theta, g, H
-            new_ll = loglik_reparam(theta + step_size * step, Y, Z)
 
         theta_new = theta + step_size * step
 
