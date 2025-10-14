@@ -16,7 +16,8 @@ def build_attention(Z, eta):
     scores = eta * scores
 
     # Mask diagonal (no self-weighting) by replacing with -inf
-    mask = jnp.eye(p) * -1e9
+    mask = jnp.eye(p) * -1e10
+
     scores = scores + mask
 
     # Softmax row-wise
@@ -91,8 +92,9 @@ def loglik_reparam(theta, Y, Z):
     gamma_a = theta[2:2+p]
     gamma_b = theta[2+p:2+2*p]
     beta    = theta[2+2*p:2+3*p]
-    log_sigma2 = theta[2+3*p:2+4*p]
-    sigma2 = jnp.exp(log_sigma2)   # enforce positivity
+    sigma2_tilde = theta[2+3*p:2+4*p]
+    sigma2 = sigma2 = jax.nn.softplus(sigma2_tilde)   # Replace σ̃² with σ²
+    log_sigma2 = jnp.log(sigma2)
 
     W_a = build_attention(Z, eta_a)
     W_b = build_attention(Z, eta_b)
@@ -114,7 +116,7 @@ def loglik_reparam(theta, Y, Z):
 
     val = (
         -(T-1) * p / 2 * jnp.log(2 * jnp.pi)
-        - (T-1) / 2 * jnp.sum(log_sigma2)   # since sigma2 = exp(log_sigma2)
+        - (T-1) / 2 * jnp.sum(log_sigma2) 
         + (T-1) * logdetS
         - 0.5 * quad
     )
