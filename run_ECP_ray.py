@@ -30,7 +30,7 @@ def single_replication(subkey, params_true, theta_true, T, p, q, dist, alpha=0.0
         theta_true_reparam = jnp.concatenate([theta_true[: 2 + 3 * p], sigma2_tilde_true])
 
         # Estimate parameters and compute SE
-        theta_init = theta_true_reparam + theta_true_reparam * 0.02 * jax.random.normal(subkey, theta_true_reparam.shape)
+        theta_init = theta_true_reparam + theta_true_reparam * 0.05 * jax.random.normal(subkey, theta_true_reparam.shape)
         result = estimate(Y, Z, subkey, theta_init, analytical_gradhess=True)
 
         theta_hat = jnp.asarray(result["theta"])
@@ -169,9 +169,9 @@ if __name__ == "__main__":
     R = 1000
     p, q = 10, 10
     dist = "normal"
-    seed = random.randint(0, 100)
+    seed = random.randint(0, 1000)
 
-    T_list = [50, 100, 300, 500, 1000]
+    T_list = [100, 300, 500, 1000, 5000]
     alpha_list = [0.10, 0.05]    # for 90% and 95% coverage
 
     out_path = "results_coverage.csv"
