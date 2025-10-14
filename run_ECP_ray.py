@@ -166,12 +166,12 @@ if __name__ == "__main__":
     import numpy as np
 
     # Settings
-    R = 10                      # or 1000 if resources permit
-    p, q = 3, 3
+    R = 1000
+    p, q = 10, 10
     dist = "normal"
     seed = random.randint(0, 100)
 
-    T_list = [50, 100]
+    T_list = [50, 100, 300, 500, 1000]
     alpha_list = [0.10, 0.05]    # for 90% and 95% coverage
 
     out_path = "results_coverage.csv"
@@ -204,4 +204,30 @@ if __name__ == "__main__":
     df_results = pd.DataFrame(records)
     df_results.to_csv(out_path, index=False)
     print(f"\nAll results saved to: {out_path}")
-    print(df_results.head())
+    # print(df_results.head())
+
+
+    # --- Summary by T and nominal level ---
+    summary = (
+        df_results
+        .groupby(["T", "nominal"], as_index=False)
+        .agg(
+            mean_coverage=("coverage", "mean"),
+            mean_rmse=("rmse", "mean"),
+            mean_len=("avg_len", "mean")
+        )
+        .sort_values(["T", "nominal"])
+    )
+
+    print("\n=== Average Coverage, RMSE, and CI Length by T and Confidence Level ===")
+    print(summary.to_string(index=False, float_format=lambda x: f"{x:8.3f}"))
+
+    # --- Optional: show parameter-level changes for each T ---
+    param_summary = (
+        df_results
+        .pivot_table(index=["param"], columns=["T", "nominal"], values="coverage")
+        .round(3)
+    )
+
+    print("\n=== Parameter-Level Coverage by T and Confidence Level ===")
+    print(param_summary)
