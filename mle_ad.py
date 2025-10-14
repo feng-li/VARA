@@ -7,7 +7,7 @@ from hess import loglik_hess_analytical
 
 
 def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
-               max_iter=100, tol=1e-8, alpha=1.0):
+               max_iter=100, tol=1e-10, alpha=1.0):
     """
     Newton–Raphson MLE with:
       1. softplus reparameterization for sigma²,
@@ -52,6 +52,7 @@ def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
 
     theta = theta_init
     for it in range(max_iter):
+
         g = loglik_grad(theta, Y, Z)
         g_norm = jnp.linalg.norm(g)
 
@@ -60,6 +61,8 @@ def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
         if g_norm > max_grad_norm:
             g = g * (max_grad_norm / g_norm)
             g_norm = max_grad_norm
+
+            print(f"Gradient clipping {max_grad_norm / g_norm} used.")
 
         H = loglik_hess(theta, Y, Z)
 
@@ -74,6 +77,8 @@ def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
         step_norm = jnp.linalg.norm(step)
         if step_norm > max_step_norm:
             step = step * (max_step_norm / step_norm)
+            print(f"Step scaling {max_step_norm / step_norm} used.")
+
 
         # ---- Armijo–Goldstein Line Search ----
         step_size = alpha
@@ -89,8 +94,8 @@ def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
             if (jnp.isfinite(new_ll)
                 and new_ll >= old_ll + c1 * step_size * g_norm**2):
                 break  # accept
-            step_size *= 0.5
-            if step_size < 1e-8:
+            step_size *= 0.9
+            if step_size < 1e-10:
                 print("Step size too small, stopping.")
                 return theta, g, H
 
@@ -121,15 +126,15 @@ if __name__ == "__main__":
 
     # Initial guess: perturb truth; log-transform sigma2 part
     p = Y.shape[1]
-    log_sigma2_true = jnp.log(theta_true[2+3*p:2+4*p])
-    theta_true_reparam = jnp.concatenate([theta_true[:2+3*p], log_sigma2_true])
+    log1p_sigma2_true = jnp.log1p(theta_true[2+3*p:2+4*p])
+    theta_true_reparam = jnp.concatenate([theta_true[:2+3*p], log1p_sigma2_true])
 
     theta_init = theta_true_reparam + 0.01 * jax.random.normal(key, theta_true_reparam.shape)
     theta_hat_reparam, grad_ll, hess_ll = mle_newton(Y, Z, theta_init)
 
-    # Convert back to natural scale (replace log_sigma2 with sigma2)
-    log_sigma2_hat = theta_hat_reparam[2+3*p:2+4*p]
-    sigma2_hat = jnp.exp(log_sigma2_hat)
+    # Convert back to natural scale (replace log1p_sigma2 with sigma2)
+    log1p_sigma2_hat = theta_hat_reparam[2+3*p:2+4*p]
+    sigma2_hat = jnp.expm1(log1p_sigma2_hat)
 
     theta_hat = jnp.concatenate([theta_hat_reparam[:2+3*p], sigma2_hat])
 

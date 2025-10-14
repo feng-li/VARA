@@ -95,19 +95,35 @@ def flatten_params(params: dict, order: list[str]):
 
 if __name__ == "__main__":
 
-    # Set the random number seed
+    # Set random number seed
     key = jax.random.PRNGKey(0)
 
-    # Simulate dataset with p >= 100
-    Y, params, Z, W_a, W_b = simulate_VAR_attention(
-        key, T=200, p=100, q=10, dist="t5"
+    # Example parameter dictionary (in natural scale)
+    p, q, T = 10, 10, 200
+    params = dict(
+        eta_a=0.5,
+        eta_b=1.0,
+        gamma_a=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
+        gamma_b=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
+        beta=jax.random.uniform(key, (p,), minval=-0.3, maxval=0.3),
+        sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
+    # Simulate dataset
+    Y, Z, W_a, W_b = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal")
     print("Simulated Y shape:", Y.shape)
-    print("Sample beta:", params["beta"][:5], "...")
-    print("Sample gamma_a:", params["gamma_a"][:5], "...")
-    print("Sample gamma_b:", params["gamma_b"][:5], "...")
-    print("Sample sigma2:", params["sigma2"][:5], "...")
+
+    # Convert σ² → σ̃² for reparameterized estimation
+    sigma2_tilde = jnp.log(jnp.expm1(params["sigma2"]))
+    params_reparam = params.copy()
+    params_reparam["sigma2"] = sigma2_tilde
+
+    # Flatten parameter vector θ̃ (for estimation/Hessian functions)
+    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    theta_tilde = flatten_params(params_reparam, order)
+
+    print("Parameter vector θ̃ (reparameterized) length:", theta_tilde.shape[0])
+    print("First few σ̃²:", sigma2_tilde[:5])
 
     # ---------- Visualization ----------
     fig, axes = plt.subplots(10, 10, figsize=(20, 20), sharex=True)
