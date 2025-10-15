@@ -1,4 +1,4 @@
-jax_cpu = True
+jax_cpu = False
 if jax_cpu:
     import os
     os.environ["CUDA_VISIBLE_DEVICES"] = ""   # hide all GPUs
@@ -160,10 +160,14 @@ def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", alpha=0.05,
     return coverage, avg_length, rmse, coverage_by_group, rmse_by_group
 
 
+
 if __name__ == "__main__":
+    import itertools
+    from datetime import datetime
     import random
     import pandas as pd
     import numpy as np
+    import os
 
     # Settings
     R = 1000
@@ -174,38 +178,66 @@ if __name__ == "__main__":
     T_list = [100, 300, 500, 1000, 5000]
     alpha_list = [0.10, 0.05]    # for 90% and 95% coverage
 
-    out_path = "results_coverage.csv"
+    out_path = f"results_coverage_{datetime.now().strftime("%Y-%m-%d_%H.%M.%S")}.csv"
 
-    records = []
+    # Cartesian product of all (T, alpha) combinations
+    for T, alpha in itertools.product(T_list, alpha_list):
+        print("\n" + "=" * 70)
+        print(f"Running Monte Carlo:  T={T},  nominal={(1-alpha):.2%}")
+        print("=" * 70)
 
-    for T in T_list:
-        for alpha in alpha_list:
-            print("\n" + "=" * 70)
-            print(f"Running Monte Carlo:  T={T},  nominal={(1-alpha):.2%}")
-            print("=" * 70)
+        # --- Record start time ---
+        start_time = datetime.now()
+        start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"⏱  Started at {start_ts}")
 
-            coverage, avg_len, rmse, cov_group, rmse_group = empirical_coverage_rate(
-                R=R, T=T, p=p, q=q, dist=dist, seed=seed, alpha=alpha
-            )
+        # Ray run simulation
+        coverage, avg_len, rmse, cov_group, rmse_group = empirical_coverage_rate(
+            R=R, T=T, p=p, q=q, dist=dist, seed=seed, alpha=alpha
+        )
 
-            # flatten results for each parameter group
-            for name in cov_group.keys():
-                records.append({
-                    "T": T,
-                    "alpha": alpha,
-                    "nominal": 1 - alpha,
-                    "param": name,
-                    "coverage": cov_group[name],
-                    "rmse": rmse_group[name],
-                    "avg_len": float(np.mean(avg_len))  # overall average length
-                })
+        # --- Record finish time ---
+        finish_time = datetime.now()
+        finish_ts = finish_time.strftime("%Y-%m-%d %H:%M:%S")
+        elapsed = (finish_time - start_time).total_seconds() / 60
+        print(f"✅ Finished at {finish_ts} (elapsed {elapsed:.2f} min)")
 
-    # Convert to DataFrame and save
-    df_results = pd.DataFrame(records)
-    df_results.to_csv(out_path, index=False)
-    print(f"\nAll results saved to: {out_path}")
-    # print(df_results.head())
+        # Collect records for this run. Report each parameter element
+        param_names = []
+        param_names.append("eta_a")
+        param_names.append("eta_b")
+        param_names.extend([f"gamma_a[{i}]" for i in range(p)])
+        param_names.extend([f"gamma_b[{i}]" for i in range(p)])
+        param_names.extend([f"beta[{i}]" for i in range(p)])
+        param_names.extend([f"sigma2[{i}]" for i in range(p)])
 
+        records = []
+        for i, name in enumerate(param_names):
+            records.append({
+                "R": R,
+                "p": p,
+                "q": q,
+                "dist": dist,
+                "seed": seed,
+                "T": T,
+                "alpha": alpha,
+                "nominal": 1 - alpha,
+                "param": name,
+                "coverage": float(coverage[i]),
+                "rmse": float(rmse[i]),
+                "avg_len": float(avg_len[i]),
+                "start_time": start_ts,
+                "finish_time": finish_ts,
+                "elapsed_min": round(elapsed, 2)
+            })
+
+        df_results = pd.DataFrame(records)
+
+        # Append to CSV
+        df_results.to_csv(out_path, mode="a", index=False, header=not header_written)
+        header_written = True
+
+        print(f"✔ Results appended for T={T}, alpha={alpha}")
 
     # --- Summary by T and nominal level ---
     summary = (
