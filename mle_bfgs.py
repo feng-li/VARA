@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from jax import grad, hessian
 from scipy.optimize import minimize
 
-from loglik_attn import loglik
+from loglik_attn import loglik_reparam
 
 
 def mle_bfgs(Y, Z, theta_init):
@@ -14,7 +14,7 @@ def mle_bfgs(Y, Z, theta_init):
     # Negative loglik for minimizer
     def objective(theta_np):
         theta = jnp.array(theta_np)
-        return -loglik(theta, Y, Z)
+        return -loglik_reparam(theta, Y, Z)
 
     # Use scipy minimize
     res = minimize(objective, theta_init, method="BFGS")
