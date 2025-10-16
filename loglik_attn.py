@@ -111,12 +111,10 @@ def loglik_reparam(theta, Y, Z):
     quad = jnp.sum((E @ inv_Sigma_e) * E)
 
     signS, logdetS = jnp.linalg.slogdet(S)
-    if signS <= 0:
-        return -jnp.inf  # invalid step
 
     val = (
         -(T-1) * p / 2 * jnp.log(2 * jnp.pi)
-        - (T-1) / 2 * jnp.sum(log_sigma2) 
+        - (T-1) / 2 * jnp.sum(log_sigma2)
         + (T-1) * logdetS
         - 0.5 * quad
     )
