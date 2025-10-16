@@ -19,7 +19,7 @@ def mle_bfgs(Y, Z, theta_init, algorithm):
     # Initialize BFGS solver
 
     if algorithm == "bfgs":
-        solver = LBFGS(fun=objective,  maxiter=50, tol=1e-6, verbose=False)
+        solver = LBFGS(fun=objective, maxiter=50, tol=1e-6, verbose=False)
     else:
         raise Exception("Not implemented.")
 
