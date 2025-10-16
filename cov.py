@@ -253,10 +253,9 @@ def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05, verbose=F
                         sigma2, T, kappa4)
 
     Avar_theta = compute_Avar(H, V, ensure_pd=True, verbose=verbose)
-    se = jnp.sqrt(jnp.diag(Avar_theta))
+    se = jnp.sqrt(jnp.diag(Avar_theta)/(T-1))   # The first value not used, only T-1 left ?
     z_crit = norm.ppf(1 - alpha / 2.0)
     lower = theta_hat - z_crit * se
     upper = theta_hat + z_crit * se
 
     return dict(theta=theta_hat, Avar=Avar_theta, se=se, lower=lower, upper=upper)
-
