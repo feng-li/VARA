@@ -6,8 +6,8 @@ from grad import loglik_grad_analytical
 from hess import loglik_hess_analytical
 
 
-def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
-               max_iter=100, tol=1e-10, alpha=1.0):
+def mle_newton(Y, Z, theta_init, algorithm="analytical_gradhess",
+               max_iter=5000, tol=1e-6, alpha=1.0):
     """
     Newton–Raphson MLE with:
       1. softplus reparameterization for sigma²,
@@ -43,12 +43,14 @@ def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
     """
 
     # choose derivative functions
-    if analytical_gradhess:
+    if algorithm == "analytical_gradhess":
         loglik_grad = loglik_grad_analytical
         loglik_hess = loglik_hess_analytical
-    else:
+    elif algorithm == "auto_gradhess":
         loglik_grad = jax.grad(loglik_reparam)
         loglik_hess = jax.hessian(loglik_reparam)
+    else:
+        raise Exception("No such algorithm implemented.")
 
     theta = theta_init
     for it in range(max_iter):
@@ -62,52 +64,71 @@ def mle_newton(Y, Z, theta_init, analytical_gradhess=False,
             g = g * (max_grad_norm / g_norm)
             g_norm = max_grad_norm
 
+            # f ratio ≈ 1.0 → gradient is already moderate; no need to worry.
+            # If ratio ≪ 1.0 (e.g. 0.1 or 0.01) → gradient explosion being controlled.
+            # If clipping occurs frequently → you may want to reduce step size or inspect Hessian scaling.
             print(f"Gradient clipping {max_grad_norm / g_norm} used.")
 
         H = loglik_hess(theta, Y, Z)
 
         try:
-            step = jnp.linalg.solve(H, g)
+            print(H)
+
+            step = -jnp.linalg.solve(H, g)
         except jnp.linalg.LinAlgError:
             print(f"Hessian not invertible at iteration {it}.")
             break
 
         # ---- Trust-Region / Step Scaling ----
-        max_step_norm = 1.0
+        max_step_norm = 0.3 # A smaller value reduces overshooting, so fewer line search failures.
         step_norm = jnp.linalg.norm(step)
         if step_norm > max_step_norm:
             step = step * (max_step_norm / step_norm)
-            print(f"Step scaling {max_step_norm / step_norm} used.")
+            print(f"Step scaling {max_step_norm / step_norm:.4f} used.")
 
 
         # ---- Armijo–Goldstein Line Search ----
         step_size = alpha
-        c1 = 1e-4   # sufficient decrease constant
-        c2 = 0.9    # curvature condition constant
+        c1 = 1e-6  # A small value makes the Armijo condition easier to satisfy.
         old_ll = loglik_reparam(theta, Y, Z)
 
+
+        n_backtrack = 0
         while True:
             theta_trial = theta + step_size * step
             new_ll = loglik_reparam(theta_trial, Y, Z)
 
             # Armijo condition: sufficient increase in log-likelihood
             if (jnp.isfinite(new_ll)
-                and new_ll >= old_ll + c1 * step_size * g_norm**2):
+                and new_ll >= old_ll + c1 * step_size * g.T @ step):
                 break  # accept
             step_size *= 0.9
-            if step_size < 1e-10:
+            n_backtrack += 1
+           if n_backtrack > 30:
+               print(f"Too many line search reductions (it={it}, step_size={step_size:.2f})")
+               break
+            if step_size < 1e-6:
                 print("Step size too small, stopping.")
                 return theta, g, H
 
         theta_new = theta + step_size * step
 
-        if jnp.linalg.norm(step_size * step) < tol:
+        if jnp.linalg.norm(step_size * step) < tol or g_norm < 1e-6:
             print(f"Converged in {it+1} iterations.")
-            return theta_new, g, H
+            # g_new = loglik_grad(theta_new, Y, Z)
+            # H_new = loglik_hess(theta_new, Y, Z)
+            g_new = []
+            H_new = []
+            return theta_new, g_new, H_new
+
 
         theta = theta_new
 
     print("Max iterations reached.")
+    # g = loglik_grad(theta, Y, Z)
+    # H = loglik_hess(theta, Y, Z)
+    g = []
+    H = []
     return theta, g, H
 
 
