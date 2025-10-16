@@ -2,10 +2,10 @@ import jax
 import jax.numpy as jnp
 from cov import compute_sandwich_variance
 from mle_ad import mle_newton
-# from mle_bfgs import mle_bfgs
+from mle_jaxopt import mle_bfgs
 
 
-def estimate(Y, Z, key, theta_init, analytical_gradhess):
+def estimate(Y, Z, key, theta_init, algorithm):
     """
     Perform Quasi–Maximum Likelihood Estimation (QMLE) under the reparameterized model.
 
@@ -42,7 +42,16 @@ def estimate(Y, Z, key, theta_init, analytical_gradhess):
     T, p = Y.shape
 
     # Estimation (theta_hat_reparam contains unconstrained parameters)
-    theta_hat_reparam, grad_ll, hess_ll = mle_newton(Y, Z, theta_init, analytical_gradhess)
+
+    if algorithm == "analytical_gradhess" or algorithm == "auto_gradhess":
+        theta_hat_reparam, grad_ll, hess_ll = mle_newton(Y, Z, theta_init, algorithm)
+
+    elif algorithm == "bfgs":
+        theta_hat_reparam, grad_ll, hess_ll, res = mle_bfgs(Y, Z, theta_init, algorithm="bfgs")
+
+    else:
+        raise Exception("No such algorithm implemented")
+
 
     # Extract unconstrained variance parameter (σ̃²)
     sigma2_tilde = theta_hat_reparam[2 + 3 * p : 2 + 4 * p]
