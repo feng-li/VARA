@@ -406,7 +406,7 @@ def hess_block_beta_sigma2(theta, Y, Z):
     dL_dsig2_beta = -jnp.sum(E * Xb, axis=0) / (sigma2**2)
 
     block_diag = dL_dsig2_beta * d_sigma2
-    
+
     return jnp.diag(block_diag)
 
 
@@ -621,7 +621,7 @@ def hess_block_eta_a_eta_b(theta, Y, Z):
 # Master Hessian assembly
 # =====================================================
 
-def loglik_hess_analytical(theta, Y, Z):
+def loglik_hess_analytical(theta, Y, Z, update_idx=slice(None)):
     """Assemble full analytical Hessian H(θ̃)."""
     T, p = Y.shape
     d2 = 4*p + 2
@@ -641,10 +641,10 @@ def loglik_hess_analytical(theta, Y, Z):
 
     H = H.at[0:1, 2+2*p:2+3*p].set(hess_block_eta_a_beta(theta, Y, Z))
     H = H.at[2+2*p:2+3*p, 0:1].set(hess_block_eta_a_beta(theta, Y, Z).T)
-    
+
     H = H.at[0:1, 2+p:2+2*p].set(hess_block_eta_a_gamma_b(theta, Y, Z))
     H = H.at[2+p:2+2*p, 0:1].set(hess_block_eta_a_gamma_b(theta, Y, Z).T)
-    
+
     H = H.at[0:1, 2:2+p].set(hess_block_eta_a_gamma_a(theta, Y, Z))
     H = H.at[2:2+p, 0:1].set(hess_block_eta_a_gamma_a(theta, Y, Z).T)
 
@@ -656,12 +656,12 @@ def loglik_hess_analytical(theta, Y, Z):
 
     H = H.at[1:2, 2:2+p].set(hess_block_eta_b_gamma_a(theta, Y, Z))
     H = H.at[2:2+p, 1:2].set(hess_block_eta_b_gamma_a(theta, Y, Z).T)
-    
+
     H = H.at[1:2, 2+p:2+2*p].set(hess_block_eta_b_gamma_b(theta, Y, Z))
     H = H.at[2+p:2+2*p, 1:2].set(hess_block_eta_b_gamma_b(theta, Y, Z).T)
-    
+
     H = H.at[1:2, 2+2*p:2+3*p].set(hess_block_eta_b_beta(theta, Y, Z))
-    H = H.at[2+2*p:2+3*p, 1:2].set(hess_block_eta_b_beta(theta, Y, Z).T)    
+    H = H.at[2+2*p:2+3*p, 1:2].set(hess_block_eta_b_beta(theta, Y, Z).T)
 
     H = H.at[1:2, 2+3*p:2+4*p].set(hess_block_eta_b_sigma2(theta, Y, Z))
     H = H.at[2+3*p:2+4*p, 1:2].set(hess_block_eta_b_sigma2(theta, Y, Z).T)
@@ -673,36 +673,20 @@ def loglik_hess_analytical(theta, Y, Z):
     H = H.at[2+2*p:2+3*p, 2:2+p].set(hess_block_gamma_a_beta(theta, Y, Z).T)
 
     H = H.at[2:2+p, 2+3*p:2+4*p].set(hess_block_gamma_a_sigma2(theta, Y, Z))
-    H = H.at[2+3*p:2+4*p, 2:2+p].set(hess_block_gamma_a_sigma2(theta, Y, Z).T)    
+    H = H.at[2+3*p:2+4*p, 2:2+p].set(hess_block_gamma_a_sigma2(theta, Y, Z).T)
 
     H = H.at[2+p:2+2*p, 2+2*p:2+3*p].set(hess_block_gamma_b_beta(theta, Y, Z))
     H = H.at[2+2*p:2+3*p, 2+p:2+2*p].set(hess_block_gamma_b_beta(theta, Y, Z).T)
-    
+
     H = H.at[2+p:2+2*p, 2+3*p:2+4*p].set(hess_block_gamma_b_sigma2(theta, Y, Z))
     H = H.at[2+3*p:2+4*p, 2+p:2+2*p].set(hess_block_gamma_b_sigma2(theta, Y, Z).T)
 
     H = H.at[2+2*p:2+3*p, 2+3*p:2+4*p].set(hess_block_beta_sigma2(theta, Y, Z))
     H = H.at[2+3*p:2+4*p, 2+2*p:2+3*p].set(hess_block_beta_sigma2(theta, Y, Z).T)
 
-    return 0.5 * (H + H.T)
+    H_partial = H[jnp.ix_(update_idx, update_idx)]
 
-# =====================================================
-# Test harness
-# =====================================================
-
-def get_block(H, p, row_block, col_block):
-    """Extract a named Hessian block."""
-    def idx(name):
-        if name == "eta_a": return jnp.array([0])
-        elif name == "eta_b": return jnp.array([1])
-        elif name == "gamma_a": return jnp.arange(2, 2+p)
-        elif name == "gamma_b": return jnp.arange(2+p, 2+2*p)
-        elif name == "beta": return jnp.arange(2+2*p, 2+3*p)
-        elif name == "sigma2": return jnp.arange(2+3*p, 2+4*p)
-        else: raise ValueError("Unknown block name")
-    ridx, cidx = idx(row_block), idx(col_block)
-    return H[jnp.ix_(ridx, cidx)]
-
+    return H_partial
 
 # =====================================================
 # Test harness

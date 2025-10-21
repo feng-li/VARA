@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from loglik_attn import build_attention
 
 
-def loglik_grad_analytical(theta, Y, Z):
+def loglik_grad_analytical(theta, Y, Z, update_idx=slice(None)):
     """
     Compute the analytical gradient of the log-likelihood ℓ(θ̃)
     for the attention-based QMLE model with softplus-reparameterized variances.
@@ -131,7 +131,7 @@ def loglik_grad_analytical(theta, Y, Z):
     grad_sigma2_tilde = grad_sigma2 * jax.nn.sigmoid(sigma2_tilde)  # chain rule correction
     grad = grad.at[2+3*p:2+4*p].set(grad_sigma2_tilde)
 
-    return jnp.array(grad)
+    return jnp.array(grad)[update_idx]
 
 
 if __name__ == "__main__":
