@@ -684,9 +684,14 @@ def loglik_hess_analytical(theta, Y, Z, update_idx=slice(None)):
     H = H.at[2+2*p:2+3*p, 2+3*p:2+4*p].set(hess_block_beta_sigma2(theta, Y, Z))
     H = H.at[2+3*p:2+4*p, 2+2*p:2+3*p].set(hess_block_beta_sigma2(theta, Y, Z).T)
 
+    # slice(None) means update all parameters
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta.size)
+    update_idx = jnp.array(update_idx)
+
     H_partial = H[jnp.ix_(update_idx, update_idx)]
 
-    return H_partial
+    return H_partial  / (T-1)
 
 # =====================================================
 # Test harness

@@ -131,7 +131,12 @@ def loglik_grad_analytical(theta, Y, Z, update_idx=slice(None)):
     grad_sigma2_tilde = grad_sigma2 * jax.nn.sigmoid(sigma2_tilde)  # chain rule correction
     grad = grad.at[2+3*p:2+4*p].set(grad_sigma2_tilde)
 
-    return jnp.array(grad)[update_idx]
+    # slice(None) means update all parameters
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta.size)
+    update_idx = jnp.array(update_idx)
+
+    return jnp.array(grad)[update_idx] / (T-1)
 
 
 if __name__ == "__main__":
