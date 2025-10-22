@@ -20,9 +20,11 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal"):
     """
     keys = jax.random.split(key, 7)
 
-    # Step 1: Generate feature vectors Z ~ N(0, Σ_z)
+    # Step 1: Generate feature vectors Z ~ N(0, Σ_z) Use less-correlated features Z. Highly correlated Z makes the
+    # attention mapping degenerate.
     idx = jnp.arange(q)
-    Sigma_z = 0.5 ** jnp.abs(idx[:, None] - idx[None, :])
+    Sigma_z = 0.1 ** jnp.abs(idx[:, None] - idx[None, :])
+
     Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
 
     # Step 2: Draw parameters
@@ -65,6 +67,10 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal"):
         Y = Y.at[t].set(S_inv @ (G @ Y[t - 1] + eps[t]))
 
     params = dict(eta_a=eta_a, eta_b=eta_b, gamma_a=gamma_a, gamma_b=gamma_b, beta=beta, sigma2=sigma2)
+
+    # Add the attention checking.
+
+
     return Y, Z, W_a, W_b
 
 
@@ -99,7 +105,7 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(0)
 
     # Example parameter dictionary (in natural scale)
-    p, q, T = 10, 10, 200
+    p, q, T = 5, 5, 200
     params = dict(
         eta_a=0.5,
         eta_b=1.0,

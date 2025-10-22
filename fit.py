@@ -5,7 +5,7 @@ from mle_ad import mle_newton
 from mle_jaxopt import mle_bfgs
 
 
-def estimate(Y, Z, key, theta_init, algorithm):
+def estimate(Y, Z, key, theta_init, algorithm, update_idx=slice(None)):
     """
     Perform Quasi–Maximum Likelihood Estimation (QMLE) under the reparameterized model.
 
@@ -44,14 +44,23 @@ def estimate(Y, Z, key, theta_init, algorithm):
     # Estimation (theta_hat_reparam contains unconstrained parameters)
 
     if algorithm == "analytical_gradhess" or algorithm == "auto_gradhess":
-        theta_hat_reparam, grad_ll, hess_ll = mle_newton(Y, Z, theta_init, algorithm)
+        theta_hat_reparam_update, grad_ll, hess_ll = mle_newton(Y, Z, theta_init, algorithm, update_idx=update_idx)
 
     elif algorithm == "bfgs":
-        theta_hat_reparam, grad_ll, hess_ll, res = mle_bfgs(Y, Z, theta_init, algorithm="bfgs")
+        theta_hat_reparam_update, grad_ll, hess_ll, res = mle_bfgs(Y, Z, theta_init, algorithm="bfgs")
 
     else:
         raise Exception("No such algorithm implemented")
 
+    # breakpoint()
+
+    # slice(None) means update all parameters
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta.size)
+    update_idx = jnp.array(update_idx)
+
+    theta_hat_reparam = theta_init
+    theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_update)
 
     # Extract unconstrained variance parameter (σ̃²)
     sigma2_tilde = theta_hat_reparam[2 + 3 * p : 2 + 4 * p]
