@@ -3,11 +3,12 @@ import jax.numpy as jnp
 from jax import grad, hessian
 
 
-def build_attention(Z, eta):
+def build_attention(Z, eta, scale=20):
     """
     Construct an attention weight matrix W from feature vectors Z and scale eta.
     Z: (p, q) feature matrix, each row Z[k] is the feature vector of series k
     eta: scalar temperature parameter
+    scale Larger scale → sharper changes in W when η changes → easier for MLE to find the right η.
     Returns W: (p, p) attention weight matrix with rows summing to 1
     """
     p, q = Z.shape
@@ -15,13 +16,14 @@ def build_attention(Z, eta):
     scores = (Z @ Z.T) / jnp.sqrt(q)     # shape (p, p)
     scores = eta * scores
 
-    # Mask diagonal (no self-weighting) by replacing with -inf
-    mask = jnp.eye(p) * -1e10
+    # Mask diagonal (no self-weighting) by replacing with -inf. This makes sure diag of W is zero.
+    mask = jnp.eye(p) * -1e12
 
-    scores = scores + mask
+    scores = scores * scale + mask
 
     # Softmax row-wise
     W = jax.nn.softmax(scores, axis=1)
+
     return W
 
 
@@ -82,10 +84,31 @@ def loglik(theta, Y, Z):
     return val
 
 
-def loglik_reparam(theta, Y, Z):
+def loglik_reparam(theta, Y, Z, update_idx=slice(None)):
     """
-    Reparameterized log-likelihood: last p entries are log(sigma2).
+    Compute log-likelihood with gradient only for selected parameters.
+
+    Args:
+        theta: full parameter vector (1D array)
+        Y, Z: data matrices
+        update_idx: indices (int, list, or slice) of parameters to differentiate w.r.t.
+    Returns:
+        Scalar log-likelihood, differentiable only w.r.t. theta[update_idx].
     """
+
+    # slice(None) means update all parameters
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta.size)
+    update_idx = jnp.array(update_idx)
+
+    # extract the subset to be optimized
+    theta_sub = theta[update_idx]
+
+    # start from the current theta (structure preserved)
+    theta = jax.lax.stop_gradient(theta)
+    # reinsert differentiable subset back
+    theta = theta.at[update_idx].set(theta_sub)
+
     T, p = Y.shape
     eta_a = theta[0]
     eta_b = theta[1]
@@ -93,7 +116,7 @@ def loglik_reparam(theta, Y, Z):
     gamma_b = theta[2+p:2+2*p]
     beta    = theta[2+2*p:2+3*p]
     sigma2_tilde = theta[2+3*p:2+4*p]
-    sigma2 = sigma2 = jax.nn.softplus(sigma2_tilde)   # Replace σ̃² with σ²
+    sigma2 = jax.nn.softplus(sigma2_tilde)   # Replace σ̃² with σ²
     log_sigma2 = jnp.log(sigma2)
 
     W_a = build_attention(Z, eta_a)
@@ -118,7 +141,8 @@ def loglik_reparam(theta, Y, Z):
         + (T-1) * logdetS
         - 0.5 * quad
     )
-    return val
+    return val / (T-1)
+
 
 # --------------------------------------------------------
 # Example usage
@@ -131,7 +155,7 @@ if __name__ == "__main__":
 
     # Parameter vector: (eta_a, eta_b, gamma_a, gamma_b, beta, sigma2)
     theta0 = jnp.concatenate([
-        jnp.array([0.5, 0.5]),        # eta_a, eta_b
+        jnp.array([2, 2]),        # eta_a, eta_b
         jnp.ones(p) * 0.1,            # gamma_a
         jnp.ones(p) * 0.1,            # gamma_b
         jnp.ones(p) * 0.5,            # beta
