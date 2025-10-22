@@ -16,7 +16,9 @@ from dgp import simulate_VAR_attention, flatten_params
 from fit import estimate
 from mle_jaxopt import mle_bfgs
 
-def single_replication(subkey, params_true, theta_true, T, p, q, dist, alpha=0.05, algorithm="analytical_gradhess"):
+
+def single_replication(subkey, params_true, theta_true, T, p, q, dist, alpha=0.05,
+                       algorithm="analytical_gradhess", update_idx=slice(None)):
     """Single Monte Carlo replication (runs on a Ray worker)."""
     try:
 
@@ -28,13 +30,15 @@ def single_replication(subkey, params_true, theta_true, T, p, q, dist, alpha=0.0
         sigma2_tilde_true = jnp.log(jnp.expm1(sigma2_true))  # softplus inverse
         theta_true_reparam = jnp.concatenate([theta_true[: 2 + 3 * p], sigma2_tilde_true])
 
-        # Estimate parameters and compute SE
-        theta_init = theta_true_reparam * (1 + 0.08 * jax.random.normal(subkey, theta_true_reparam.shape))
-        theta_init = jnp.clip(theta_init, -10.0, 10.0)  # clip critical ones
-        theta_init, grad_ll, hess_ll, state = mle_bfgs(Y, Z, theta_init, algorithm="bfgs")
+        # Set initial values on update_idx values. Others values set as the true value.
+        update_idx = jnp.array(update_idx)
+        theta_init = theta_true_reparam
+        theta_init_update = theta_true_reparam[update_idx]
+        theta_init = theta_init.at[update_idx].set(theta_init_update * (1 + 0.1 * jax.random.normal(subkey, theta_init_update.shape)))
+
 
         # Results
-        result = estimate(Y, Z, subkey, theta_init, algorithm)
+        result = estimate(Y, Z, subkey, theta_init, algorithm, update_idx=update_idx)
         theta_hat = jnp.asarray(result["theta"])
         se = jnp.asarray(result["se"])  # standard errors from sandwich variance
 
@@ -79,9 +83,6 @@ def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", alpha=0.05,
     Now parallelized with ray or jax.jit.
     """
 
-    # Initialize Ray (auto-detects cores; safe to call multiple times)
-    ray.init(ignore_reinit_error=True, include_dashboard=False)
-
     key = jax.random.PRNGKey(seed)
     keys = jax.random.split(key, 7)
 
@@ -113,6 +114,8 @@ def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", alpha=0.05,
         sigma2=uniform(keys[4], (p,), minval=0.25, maxval=1.0),
     )
     theta_true = flatten_params(params_true, order)
+
+    update_idx = [0, 1]
     # d = theta_true.shape[0]
 
     # ===============================================================
@@ -126,7 +129,7 @@ def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", alpha=0.05,
         ray.init(ignore_reinit_error=True, include_dashboard=False)
         subkeys = jax.random.split(key, R)
         futures = [
-            single_replication_ray.remote(subkeys[r], params_true, theta_true, T, p, q, dist, alpha, algorithm)
+            single_replication_ray.remote(subkeys[r], params_true, theta_true, T, p, q, dist, alpha, algorithm, update_idx)
             for r in range(R)
         ]
 
@@ -140,7 +143,7 @@ def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", alpha=0.05,
         subkeys = jax.random.split(key, R)
 
         # You can also switch this to jax.jit/vmap if memory allows
-        results = [single_replication_jit(subkeys[r], params_true, theta_true, T, p, q, dist, alpha, algorithm)
+        results = [single_replication(subkeys[r], params_true, theta_true, T, p, q, dist, alpha, algorithm, update_idx)
                    for r in trange(R, desc="Monte Carlo replications", ncols=100)]
 
 
@@ -177,7 +180,8 @@ def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", alpha=0.05,
     # === 5. Print summary =========================================
     # ===============================================================
     print("\n=== Empirical Coverage and RMSE Summary ===")
-    print(f"Overall average coverage: {coverage.mean():.3f}\n")
+    print(f"nominal = {(1-alpha):.2%}")
+    print(f"Overall average coverage: {jnp.mean(coverage):.4f}\n")
     for name in idx.keys():
         print(f"{name:<8s}: coverage={coverage_by_group[name]:.3f}, RMSE={rmse_by_group[name]:.4f}")
 
@@ -186,7 +190,7 @@ def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", alpha=0.05,
     print("\nRMSE (by parameter):")
     print(jnp.round(rmse, 4))
 
-    ray.shutdown()  # Clean up Ray workers
+    # ray.shutdown()  # Clean up Ray workers
 
     return coverage, avg_length, rmse, coverage_by_group, rmse_by_group
 
@@ -266,22 +270,25 @@ def summarize_empirical_coverage(file_path: str):
     }
 
 
+
 if __name__ == "__main__":
     import itertools
     from datetime import datetime
     import random
 
-    jax.config.update("jax_enable_x64", True)
+    # jax.config.update("jax_enable_x64", True)
+    jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
     # Settings
     USE_RAY = True
     algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
+    # algorithm = "analytical_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
 
-    R = 500
-    p, q = 3, 3
+    R = 1000
+    p, q = 10, 10
     dist = "normal"
 
-    T_list = [100, 200]
+    T_list = [500]
     alpha_list = [0.10, 0.05]    # for 90% and 95% coverage
 
     out_path = f"results_coverage_{datetime.now().strftime("%Y-%m-%d_%H.%M.%S")}.csv"
