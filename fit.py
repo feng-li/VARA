@@ -56,7 +56,7 @@ def estimate(Y, Z, key, theta_init, algorithm, update_idx=slice(None)):
 
     # slice(None) means update all parameters
     if isinstance(update_idx, slice):
-        update_idx = jnp.arange(theta.size)
+        update_idx = jnp.arange(theta_init.size)
     update_idx = jnp.array(update_idx)
 
     theta_hat_reparam = theta_init

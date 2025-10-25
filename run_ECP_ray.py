@@ -31,7 +31,10 @@ def single_replication(subkey, params_true, theta_true, T, p, q, dist, alpha=0.0
         theta_true_reparam = jnp.concatenate([theta_true[: 2 + 3 * p], sigma2_tilde_true])
 
         # Set initial values on update_idx values. Others values set as the true value.
+        if isinstance(update_idx, slice):
+            update_idx = jnp.arange(theta_true_reparam.size)
         update_idx = jnp.array(update_idx)
+
         theta_init = theta_true_reparam
         theta_init_update = theta_true_reparam[update_idx]
         theta_init = theta_init.at[update_idx].set(theta_init_update * (1 + 0.1 * jax.random.normal(subkey, theta_init_update.shape)))
@@ -115,8 +118,8 @@ def empirical_coverage_rate(R=100, T=500, p=10, q=10, dist="normal", alpha=0.05,
     )
     theta_true = flatten_params(params_true, order)
 
-    update_idx = [0, 1]
-    # d = theta_true.shape[0]
+    # update_idx = [0, 1]
+    update_idx = slice(None) # Full updating
 
     # ===============================================================
     # === 3. Parallel execution with Ray or JAX ============================
@@ -288,7 +291,7 @@ if __name__ == "__main__":
     p, q = 10, 10
     dist = "normal"
 
-    T_list = [500]
+    T_list = [100, 200, 500, 1000]
     alpha_list = [0.10, 0.05]    # for 90% and 95% coverage
 
     out_path = f"results_coverage_{datetime.now().strftime("%Y-%m-%d_%H.%M.%S")}.csv"
@@ -300,7 +303,7 @@ if __name__ == "__main__":
         print(f"Running Monte Carlo:  T={T},  nominal={(1-alpha):.2%}")
         print("=" * 70)
 
-        seed = random.randint(0, 1000)
+        seed = random.randint(0, 10000)
 
         # --- Record start time ---
         start_time = datetime.now()

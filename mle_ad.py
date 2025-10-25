@@ -7,7 +7,7 @@ from hess import loglik_hess_analytical
 
 
 def mle_newton(Y, Z, theta_init, algorithm="analytical_gradhess", update_idx=slice(None),
-               max_iter=20, tol=1e-4, alpha=1.0):
+               max_iter=10, tol=1e-3, alpha=1.0):
     """
     Newton–Raphson MLE with:
       1. softplus reparameterization for sigma²,

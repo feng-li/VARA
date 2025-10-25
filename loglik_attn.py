@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from jax import grad, hessian
 
 
-def build_attention(Z, eta, scale=20):
+def build_attention(Z, eta, scale=10):
     """
     Construct an attention weight matrix W from feature vectors Z and scale eta.
     Z: (p, q) feature matrix, each row Z[k] is the feature vector of series k
