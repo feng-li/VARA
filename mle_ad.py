@@ -6,7 +6,8 @@ from grad import loglik_grad_analytical
 from hess import loglik_hess_analytical
 
 
-def mle_newton(Y, Z, theta_init, algorithm="analytical_gradhess", update_idx=slice(None),
+def mle_newton(Y, Z, theta_init, params_scale,
+               algorithm="analytical_gradhess", update_idx=slice(None),
                max_iter=10, tol=1e-3, alpha=1.0):
     """
     Newton–Raphson MLE with:
@@ -66,7 +67,7 @@ def mle_newton(Y, Z, theta_init, algorithm="analytical_gradhess", update_idx=sli
     for it in range(max_iter):
 
         # This list is the full list if jax used. clipping zero values.
-        g_0 = loglik_grad(theta_full, Y, Z, update_idx)
+        g_0 = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
         g = g_0[update_idx]
         g_norm = jnp.linalg.norm(g)
 
@@ -81,12 +82,12 @@ def mle_newton(Y, Z, theta_init, algorithm="analytical_gradhess", update_idx=sli
             # If clipping occurs frequently → you may want to reduce step size or inspect Hessian scaling.
             print(f"Gradient clipping {max_grad_norm / g_norm} used.")
 
-        H_0 = loglik_hess(theta_full, Y, Z, update_idx)
+        H_0 = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
         H = H_0[jnp.ix_(update_idx, update_idx)]
 
         try:
-            # A robust and minimal change is to damp the Newton step before entering the line search. This works
-            # extremely well for non-quadratic or non-concave likelihoods.
+            # A robust and minimal change is to damp the Newton step before entering the line search.
+            # This works extremely well for non-quadratic or non-concave likelihoods.
             lambda_damp = 0.3
             step = -jnp.linalg.solve(H, g) * lambda_damp
         except jnp.linalg.LinAlgError:
@@ -112,14 +113,14 @@ def mle_newton(Y, Z, theta_init, algorithm="analytical_gradhess", update_idx=sli
         # ---- Armijo–Goldstein Line Search ----
         step_size = alpha
         c1 = 1e-4  # A small value makes the Armijo condition easier to satisfy.
-        old_ll = loglik_reparam(theta_full, Y, Z, update_idx)
+        old_ll = loglik_reparam(theta_full, Y, Z, params_scale, update_idx)
 
         n_backtrack = 0
         while True:
             theta_trial = theta + step_size * step
             theta_trial_full = theta_full
             theta_trial_full = theta_trial_full.at[update_idx].set(theta_trial)
-            new_ll = loglik_reparam(theta_trial_full, Y, Z, update_idx)
+            new_ll = loglik_reparam(theta_trial_full, Y, Z, params_scale, update_idx)
 
             # Armijo condition: sufficient increase in log-likelihood
             if (jnp.isfinite(new_ll) and new_ll >= old_ll + c1 * step_size * g.T @ step):
@@ -150,8 +151,8 @@ def mle_newton(Y, Z, theta_init, algorithm="analytical_gradhess", update_idx=sli
         if relative_change < tol or abs_change < tol or g_norm < tol:
             print(f"Converged in {it+1} iterations.")
             # print(f"abs_change: {abs_change:6f}, relative_change: {relative_change:6f}, g_norm: {g_norm:6f}")
-            # g_new = loglik_grad(theta_new, Y, Z)
-            # H_new = loglik_hess(theta_new, Y, Z)
+            # g_new = loglik_grad(theta_new, Y, Z, params_scale)
+            # H_new = loglik_hess(theta_new, Y, Z, params_scale)
 
             # breakpoint()
             g_new = []
@@ -257,7 +258,7 @@ if __name__ == "__main__":
         ll_values = []
         for val in theta_grid:
             theta_temp = theta_true_reparam.at[idx].set(val)
-            ll = loglik_reparam(theta_temp, Y, Z, update_idx)
+            ll = loglik_reparam(theta_temp, Y, Z, params_scale, update_idx)
             ll_values.append(float(ll))
 
         ax.plot(theta_grid, ll_values, linestyle="-", linewidth=2, label="Likelihood")

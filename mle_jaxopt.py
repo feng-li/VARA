@@ -6,7 +6,7 @@ from jaxopt import LBFGS
 from loglik_attn import loglik_reparam
 
 
-def mle_bfgs(Y, Z, theta_init, algorithm):
+def mle_bfgs(Y, Z, theta_init, params_scale, algorithm):
     """
     MLE estimator using JAXopt BFGS optimizer.
     Minimizes the negative log-likelihood.
@@ -14,7 +14,7 @@ def mle_bfgs(Y, Z, theta_init, algorithm):
 
     # Define objective: negative log-likelihood
     def objective(theta):
-        return -loglik_reparam(theta, Y, Z)
+        return -loglik_reparam(theta, Y, Z, params_scale)
 
     # Initialize BFGS solver
 
@@ -56,7 +56,13 @@ if __name__ == "__main__":
         beta=jax.random.uniform(key, (p,), minval=-0.3, maxval=0.3),
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
-    Y, Z, W_a, W_b = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal")
+
+    params_scale = dict(
+        eta_a=1,
+        eta_b=10)
+
+    Y, Z, W_a, W_b = simulate_VAR_attention(key, params, T=T, p=p, q=q,
+                                            params_scale=params_scale, dist="normal")
 
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
     # Convert σ² → σ̃² for reparameterized estimation

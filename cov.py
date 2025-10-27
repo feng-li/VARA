@@ -260,7 +260,8 @@ def compute_Avar(H, V, eps=1e-8, ensure_pd=True, verbose=False):
 # ===============================================================
 # === Sandwich variance =========================================
 # ===============================================================
-def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05, verbose=False):
+def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0.05, verbose=False):
+
     T, p = Y.shape
 
     eta_a, eta_b = theta_hat[0], theta_hat[1]
@@ -271,8 +272,8 @@ def compute_sandwich_variance(Y, Z, theta_hat, kappa4=3.0, alpha=0.05, verbose=F
     Sigma_e = jnp.diag(sigma2)
 
     # ✅ use consistent attention derivatives
-    Wa, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a)
-    Wb, Wb_dot, _ = compute_Wa_Wb_dots(Z, eta_b)
+    Wa, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale["eta_a"])
+    Wb, Wb_dot, _ = compute_Wa_Wb_dots(Z, eta_b, params_scale["eta_b"])
 
     S = jnp.eye(p) - jnp.diag(gamma_b) @ Wb
     G = jnp.diag(beta) + jnp.diag(gamma_a) @ Wa

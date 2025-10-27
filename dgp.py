@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from loglik_attn import build_attention
 
 
-def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal"):
+def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params_scale=dict(eta_a=1, eta_b=10)):
     """
     Simulate data from the VAR attention model.
 
@@ -37,9 +37,8 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal"):
 
 
     # Step 3: Construct W_a, W_b
-    W_a = build_attention(Z, eta=eta_a)
-    W_b = build_attention(Z, eta=eta_b)
-
+    W_a = build_attention(Z, eta_a, params_scale['eta_a'])
+    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     # Step 4: Construct S, G
     S = jnp.eye(p) - jnp.diag(gamma_b) @ W_b
@@ -115,8 +114,12 @@ if __name__ == "__main__":
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
+    params_scale = dict(
+        eta_a=1,
+        eta_b=10   )
+
     # Simulate dataset
-    Y, Z, W_a, W_b = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal")
+    Y, Z, W_a, W_b = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal", params_scale=params_scale)
     print("Simulated Y shape:", Y.shape)
 
     # Convert σ² → σ̃² for reparameterized estimation

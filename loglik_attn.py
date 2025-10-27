@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from jax import grad, hessian
 
 
-def build_attention(Z, eta, scale=10):
+def build_attention(Z, eta, scale):
     """
     Construct an attention weight matrix W from feature vectors Z and scale eta.
     Z: (p, q) feature matrix, each row Z[k] is the feature vector of series k
@@ -27,11 +27,17 @@ def build_attention(Z, eta, scale=10):
     return W
 
 
-def construct_matrices(theta, Z, p):
+def loglik(theta, Y, Z, params_scale):
     """
-    Build S and G matrices given theta and feature embeddings Z.
-    theta order: (eta_a, eta_b, gamma_a, gamma_b, beta, sigma2)
+    Log-quasi-likelihood function with attention-based W_a, W_b.
+
+    Y: (T, p) time series data
+    Z: (p, q) feature embeddings
+    theta: parameter vector
     """
+    T, p = Y.shape
+
+    # S, G, sigma2 = construct_matrices(theta, Z, p)
     eta_a = theta[0]
     eta_b = theta[1]
     gamma_a = theta[2:2+p]
@@ -40,8 +46,8 @@ def construct_matrices(theta, Z, p):
     sigma2 = theta[2+3*p:2+4*p]
 
     # Build attention weights
-    W_a = build_attention(Z, eta_a)
-    W_b = build_attention(Z, eta_b)
+    W_a = build_attention(Z, eta_a, params_scale['eta_a'])
+    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     # Diagonal matrices
     D_beta = jnp.diag(beta)
@@ -52,18 +58,6 @@ def construct_matrices(theta, Z, p):
     G = D_beta + D_ga @ W_a
     S = jnp.eye(p) - D_gb @ W_b
 
-    return S, G, sigma2
-
-
-def loglik(theta, Y, Z):
-    """
-    Log-quasi-likelihood function with attention-based W_a, W_b.
-    Y: (T, p) time series data
-    Z: (p, q) feature embeddings
-    theta: parameter vector
-    """
-    T, p = Y.shape
-    S, G, sigma2 = construct_matrices(theta, Z, p)
 
     # Covariance matrix of errors
     inv_Sigma_e = jnp.diag(1.0 / sigma2)
@@ -84,7 +78,7 @@ def loglik(theta, Y, Z):
     return val
 
 
-def loglik_reparam(theta, Y, Z, update_idx=slice(None)):
+def loglik_reparam(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), update_idx=slice(None)):
     """
     Compute log-likelihood with gradient only for selected parameters.
 
@@ -119,8 +113,8 @@ def loglik_reparam(theta, Y, Z, update_idx=slice(None)):
     sigma2 = jax.nn.softplus(sigma2_tilde)   # Replace σ̃² with σ²
     log_sigma2 = jnp.log(sigma2)
 
-    W_a = build_attention(Z, eta_a)
-    W_b = build_attention(Z, eta_b)
+    W_a = build_attention(Z, eta_a, params_scale['eta_a'])
+    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     D_beta = jnp.diag(beta)
     D_ga = jnp.diag(gamma_a)
@@ -161,14 +155,17 @@ if __name__ == "__main__":
         jnp.ones(p) * 0.5,            # beta
         jnp.ones(p) * 1.0             # sigma2
     ])
+    params_scale = dict(
+        eta_a=1,
+        eta_b=10   )
 
     # Compute log-likelihood
-    ll_val = loglik(theta0, Y, Z)
+    ll_val = loglik(theta0, Y, Z, params_scale)
     print("Log-likelihood:", ll_val)
 
     # Gradient and Hessian
-    grad_ll = grad(loglik)(theta0, Y, Z)
-    hess_ll = hessian(loglik)(theta0, Y, Z)
+    grad_ll = grad(loglik)(theta0, Y, Z, params_scale)
+    hess_ll = hessian(loglik)(theta0, Y, Z, params_scale)
 
     print("Gradient shape:", grad_ll.shape)
     print(grad_ll)
