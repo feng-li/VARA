@@ -62,6 +62,7 @@ def mle_newton(Y, Z, theta_init, params_scale,
     theta = theta_init[update_idx]
     theta_full = theta_init
 
+    # print(params_scale)
     # print(f"theta_init: {theta_init}")
 
     for it in range(max_iter):
@@ -203,6 +204,10 @@ if __name__ == "__main__":
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
+    params_scale = dict(
+        eta_a=1,
+        eta_b=1)
+
     algorithm = "auto_gradhess"
     update_idx = [1]
     # update_idx = slice(None)
@@ -228,7 +233,7 @@ if __name__ == "__main__":
     theta_init = theta_init.at[update_idx].set(theta_init_update * (1 + 0.1 * jax.random.normal(key, theta_init_update.shape)))
 
     # Estimation
-    theta_hat_reparam, grad_ll, hess_ll = mle_newton(Y, Z, theta_init, update_idx=update_idx, algorithm=algorithm)
+    theta_hat_reparam, grad_ll, hess_ll = mle_newton(Y, Z, theta_init, params_scale, update_idx=update_idx, algorithm=algorithm)
 
     # Convert back to natural scale (with softplus)
     sigma2_tilde_hat = theta_hat_reparam[2+3*p:2+4*p]

@@ -78,7 +78,7 @@ def loglik(theta, Y, Z, params_scale):
     return val
 
 
-def loglik_reparam(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), update_idx=slice(None)):
+def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
     """
     Compute log-likelihood with gradient only for selected parameters.
 

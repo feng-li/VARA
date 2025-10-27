@@ -62,6 +62,7 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), up
       and sandwich variance estimators used in subsequent QMLE inference.
     """
 
+    print(params_scale)
     T, p = Y.shape
     eta_a = theta[0]
     eta_b = theta[1]
@@ -96,8 +97,9 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), up
     S_mat = (Z @ Z.T) / jnp.sqrt(Z.shape[1])
 
     # === ∂ℓ/∂η_a ===
+    # row_means_a = jnp.sum(W_a * S_mat * params_scale['eta_a'], axis=1, keepdims=True)
     row_means_a = jnp.sum(W_a * S_mat, axis=1, keepdims=True)
-    Wa_dot = W_a * (S_mat - row_means_a)
+    Wa_dot = W_a * (S_mat - row_means_a) * params_scale['eta_a']
     grad_eta_a = jnp.sum(
         (E @ Sigma_inv) * (Y[:-1] @ (D_ga @ Wa_dot).T)
     )
@@ -105,7 +107,7 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), up
 
     # === ∂ℓ/∂η_b ===
     row_means_b = jnp.sum(W_b * S_mat, axis=1, keepdims=True)
-    Wb_dot = W_b * (S_mat - row_means_b)
+    Wb_dot = W_b * (S_mat - row_means_b) * params_scale['eta_b']
     term1 = -T * jnp.trace(S_inv @ (D_gb @ Wb_dot))
     term2 = jnp.sum(
         (E @ Sigma_inv) * (Y[1:] @ (D_gb @ Wb_dot).T)

@@ -2,9 +2,7 @@ import jax.numpy as jnp
 from jax.numpy.linalg import inv
 from jax.scipy.stats import norm
 
-from loglik_attn import build_attention
-from hess import compute_Wa_Wb_dots  # ✅ added for consistent derivatives
-
+from hess import compute_Wa_Wb_dots
 
 # ===============================================================
 # === Utility functions =========================================
@@ -232,7 +230,7 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
 # ===============================================================
 # === Compute Avar ==============================================
 # ===============================================================
-def compute_Avar(H, V, eps=1e-8, ensure_pd=True, verbose=False):
+def compute_Avar(H, V, eps=1e-8):
     H = (H + H.T) / 2
     V = (V + V.T) / 2
 
@@ -248,13 +246,13 @@ def compute_Avar(H, V, eps=1e-8, ensure_pd=True, verbose=False):
     Avar = H_inv @ V @ H_inv
     Avar = (Avar + Avar.T) / 2
 
-    eigvals_A = jnp.linalg.eigvalsh(Avar)
-    if ensure_pd and float(eigvals_A.min()) <= 0:
-        eigvals_clipped = jnp.clip(eigvals_A, eps, None)
-        eigvecs = jnp.linalg.eigh(Avar)[1]
-        Avar = eigvecs @ jnp.diag(eigvals_clipped) @ eigvecs.T
+    # eigvals_A = jnp.linalg.eigvalsh(Avar)
+    # if ensure_pd and float(eigvals_A.min()) <= 0:
+    #     eigvals_clipped = jnp.clip(eigvals_A, eps, None)
+    #     eigvecs = jnp.linalg.eigh(Avar)[1]
+    #     Avar = eigvecs @ jnp.diag(eigvals_clipped) @ eigvecs.T
 
-    return (Avar + Avar.T) / 2
+    return Avar
 
 
 # ===============================================================
@@ -293,10 +291,12 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 
     # breakpoint()
 
-    Avar_theta = compute_Avar(H, V, ensure_pd=True, verbose=verbose)
+    Avar_theta = compute_Avar(H, V)
     se = jnp.sqrt(jnp.diag(Avar_theta))   # The first value not used, only T-1 left ?
     z_crit = norm.ppf(1 - alpha / 2.0)
     lower = theta_hat - z_crit * se
     upper = theta_hat + z_crit * se
+
+    print(params_scale)
 
     return dict(theta=theta_hat, Avar=Avar_theta, se=se, lower=lower, upper=upper)

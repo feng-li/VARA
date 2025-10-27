@@ -315,12 +315,12 @@ if __name__ == "__main__":
         sigma2=uniform(keys[4], (p,), minval=0.25, maxval=1.0),
     )
 
-    # update_idx = [0, 1]
-    update_idx = slice(None)  # Full updating
+    update_idx = [0, 1]
+    # update_idx = slice(None)  # Full updating
 
     params_scale = dict(
-        eta_a=2,
-        eta_b=6)
+        eta_a=1,
+        eta_b=1)
 
 
     # ===============================================================

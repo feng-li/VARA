@@ -36,11 +36,11 @@ def compute_Wa_Wb_dots(Z, eta, scale):
 
     # first derivative Ẇ = W ⊙ (S_mat - row_means)
     row_means = jnp.sum(W * S_mat, axis=1, keepdims=True)
-    W_dot = W * (S_mat - row_means)
+    W_dot = W * (S_mat - row_means) * scale
 
     # second derivative Ẅ = W ⊙ (S_mat - row_means)**2 − W ⊙ row_var
     row_var = jnp.sum(W * (S_mat - row_means) ** 2, axis=1, keepdims=True)
-    W_ddot = W * ((S_mat - row_means) ** 2 - row_var)
+    W_ddot = W * ((S_mat - row_means) ** 2 - row_var) * scale
     return W, W_dot, W_ddot
 
 
@@ -584,7 +584,7 @@ def hess_block_gamma_b_beta(theta, Y, Z, params_scale):
     return block
 
 
-def hess_block_beta(theta, Y, Z, params_scale):
+def hess_block_beta(theta, Y, Z):
     """∂²ℓ / ∂β ∂βᵀ ∈ R^{p×p}."""
     T, p = Y.shape
     sigma2 = jax.nn.softplus(theta[2+3*p:2+4*p])
@@ -636,7 +636,7 @@ def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(N
     H = H.at[1, 1].set(hess_block_eta_b(theta, Y, Z, params_scale))
     H = H.at[2:2+p, 2:2+p].set(hess_block_gamma_a(theta, Y, Z, params_scale))
     H = H.at[2+p:2+2*p, 2+p:2+2*p].set(hess_block_gamma_b(theta, Y, Z, params_scale, kappa4))
-    H = H.at[2+2*p:2+3*p, 2+2*p:2+3*p].set(hess_block_beta(theta, Y, Z, params_scale))
+    H = H.at[2+2*p:2+3*p, 2+2*p:2+3*p].set(hess_block_beta(theta, Y, Z))
     H = H.at[2+3*p:2+4*p, 2+3*p:2+4*p].set(hess_block_sigma2(theta, Y, Z, params_scale))
 
     # Cross-blocks
@@ -711,6 +711,8 @@ def get_block(H, p, row_block, col_block):
         elif name == "beta": return jnp.arange(2+2*p, 2+3*p)
         elif name == "sigma2": return jnp.arange(2+3*p, 2+4*p)
         else: raise ValueError("Unknown block name")
+
+
     ridx, cidx = idx(row_block), idx(col_block)
     return H[jnp.ix_(ridx, cidx)]
 
@@ -720,6 +722,8 @@ if __name__ == "__main__":
     import random
     from dgp import simulate_VAR_attention, flatten_params
     from loglik_attn import loglik_reparam
+
+    jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
     # --- Simulation settings ---
     key = jax.random.PRNGKey(random.randint(0, 100))
@@ -764,6 +768,9 @@ if __name__ == "__main__":
     # --- Full-matrix comparison ---
     diff_full = jnp.max(jnp.abs(H_analytical - H_auto))
     print(f"\nMax abs diff (full Hessian, reparameterized): {diff_full:.4f}")
+    print(H_analytical)
+    print(H_auto)
+    print(H_analytical - H_auto)
 
     # --- Diagonal block-by-block comparison ---
     diag_blocks = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
@@ -771,7 +778,10 @@ if __name__ == "__main__":
         Ha = get_block(H_analytical, p, block, block)
         Hu = get_block(H_auto, p, block, block)
         diff = jnp.max(jnp.abs(Ha - Hu))
-        print(f"Block {block:<10s} max abs diff = {diff:.4f}")
+        print(f"\nBlock {block:<10s} max abs diff = {diff:.4f}")
+        print(Ha)
+        print(Hu)
+
 
     # --- Cross-blocks ---
     cross_blocks = [
