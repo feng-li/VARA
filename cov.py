@@ -52,7 +52,7 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
     S = jnp.eye(Wb.shape[0]) - jnp.diag(gamma_b) @ Wb
     Sinv = jnp.linalg.inv(S)
 
-    Sigma_inv = jnp.diag(1.0 / sigma2)  # ✅ explicit diag for clarity
+    Sigma_inv = jnp.diag(1.0 / sigma2)  # explicit diag for clarity
 
     # --- Diagonal blocks ---
     V_eta_a_eta_a = T * jnp.trace(
@@ -177,6 +177,8 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
                     gamma_a, gamma_b,
                     Sigma_e, G, Gamma0,
                     sigma2, T, kappa4=3.0):
+
+
     V = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
                         gamma_a, gamma_b,
                         Sigma_e, G, Gamma0,
@@ -186,7 +188,7 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
     S = jnp.eye(Wb.shape[0]) - jnp.diag(gamma_b) @ Wb
     Sinv = jnp.linalg.inv(S)
 
-    Sigma_inv = jnp.diag(1.0 / sigma2)  # ✅ explicit diag
+    Sigma_inv = jnp.diag(1.0 / sigma2)  # explicit diag
     sigma_e_inv2 = 1.0 / sigma2
     sigma_e_inv4 = 1.0 / (sigma2 ** 2)
 
@@ -297,6 +299,7 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     lower = theta_hat - z_crit * se
     upper = theta_hat + z_crit * se
 
+    breakpoint()
     print(params_scale)
 
     return dict(theta=theta_hat, Avar=Avar_theta, se=se, lower=lower, upper=upper)

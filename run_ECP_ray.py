@@ -61,6 +61,10 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
         inside = (theta_true >= lower) & (theta_true <= upper)
         ci_length = upper - lower
+
+        print(f"lower: {lower[update_idx]}, upper: {upper[update_idx]}, theta_hat {theta_hat[update_idx]}")
+
+
         return inside, ci_length, theta_hat
 
     except Exception as e:
@@ -282,7 +286,7 @@ if __name__ == "__main__":
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
     # Settings
-    USE_RAY = True
+    USE_RAY = False
 
     # ===============================================================
     # === 1. Simulation from DGP ====================================
@@ -315,7 +319,7 @@ if __name__ == "__main__":
         sigma2=uniform(keys[4], (p,), minval=0.25, maxval=1.0),
     )
 
-    update_idx = [0, 1]
+    update_idx = [1]
     # update_idx = slice(None)  # Full updating
 
     params_scale = dict(
