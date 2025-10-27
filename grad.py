@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from loglik_attn import build_attention
 
 
-def loglik_grad_analytical(theta, Y, Z, update_idx=slice(None)):
+def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), update_idx=slice(None)):
     """
     Compute the analytical gradient of the log-likelihood ℓ(θ̃)
     for the attention-based QMLE model with softplus-reparameterized variances.
@@ -73,8 +73,8 @@ def loglik_grad_analytical(theta, Y, Z, update_idx=slice(None)):
     sigma2 = jax.nn.softplus(sigma2_tilde)
 
     # Build weights
-    W_a = build_attention(Z, eta_a)
-    W_b = build_attention(Z, eta_b)
+    W_a = build_attention(Z, eta_a, params_scale['eta_a'])
+    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     D_beta = jnp.diag(beta)
     D_ga = jnp.diag(gamma_a)
@@ -159,8 +159,15 @@ if __name__ == "__main__":
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
+    params_scale = dict(
+        eta_a=1,
+        eta_b=10)
+
+    update_idx = slice(None)
+
     # --- Simulate data ---
-    Y, Z, W_a, W_b = simulate_VAR_attention(key, params_true, T=T, p=p, q=q, dist="normal")
+    Y, Z, W_a, W_b = simulate_VAR_attention(key, params_true, T=T, p=p, q=q,
+                                            dist="normal", params_scale=params_scale)
     print("Simulated Y shape:", Y.shape)
 
     # --- Convert σ² → σ̃² (softplus inverse) ---
@@ -176,8 +183,10 @@ if __name__ == "__main__":
     # =====================================================
     # Gradient test
     # =====================================================
-    grad_analytical = loglik_grad_analytical(theta_true_reparam, Y, Z)
-    grad_auto = jax.grad(loglik_reparam)(theta_true_reparam, Y, Z)
+    grad_analytical = loglik_grad_analytical(theta_true_reparam, Y, Z,
+                                             params_scale=params_scale, update_idx=update_idx)
+    grad_auto = jax.grad(loglik_reparam)(theta_true_reparam, Y, Z,
+                                         params_scale=params_scale, update_idx=update_idx)
 
     diff_grad = jnp.max(jnp.abs(grad_analytical - grad_auto))
     print(f"\nMax abs diff (gradient, reparameterized): {diff_grad:.3e}")
