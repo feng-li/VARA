@@ -163,9 +163,10 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
     theta_true = flatten_params(params_true, order)
 
-    coverage = inside.mean(axis=0)
-    avg_length = ci_length.mean(axis=0)
-    rmse = jnp.sqrt(jnp.mean((theta_hat_all - theta_true) ** 2, axis=0))
+    # take the mean along an axis (e.g., axis=0) while skipping NaNs,
+    coverage = inside.nanmean(axis=0)
+    avg_length = ci_length.nanmean(axis=0)
+    rmse = jnp.sqrt(jnp.nanmean((theta_hat_all - theta_true) ** 2, axis=0))
 
     # Group indices for summary
     idx = {
@@ -320,11 +321,11 @@ if __name__ == "__main__":
     )
 
     # update_idx = [0, 1]
-    # update_idx = slice(None)  # Full updating
+    update_idx = slice(None)  # Full updating
 
     params_scale = dict(
         eta_a=1,
-        eta_b=0.2)
+        eta_b=0.1)
 
 
     # ===============================================================

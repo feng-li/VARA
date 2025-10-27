@@ -110,7 +110,7 @@ if __name__ == "__main__":
         eta_b=1.0,
         gamma_a=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
         gamma_b=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
-        beta=jax.random.uniform(key, (p,), minval=-0.3, maxval=0.3),
+        beta=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
