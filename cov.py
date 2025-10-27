@@ -60,7 +60,8 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
         (jnp.diag(gamma_a) @ Wa_dot) @ Gamma0
     )
 
-    V_eta_b_eta_b = T * jnp.trace((jnp.diag(gamma_b) @ Wb_dot).T @ Sigma_inv @ (jnp.diag(gamma_b) @ Wb_dot) @ Gamma0 +
+    V_eta_b_eta_b = T * jnp.trace((jnp.diag(gamma_b) @ Wb_dot @ Sinv @ G).T @ Sigma_inv @ (jnp.diag(gamma_b) @ Wb_dot @ Sinv @ G) @ Gamma0 +
+                                  (jnp.diag(gamma_b) @ Wb_dot @ Sinv) @ (jnp.diag(gamma_b) @ Wb_dot @ Sinv).T +
                                   (jnp.diag(gamma_b) @ Wb_dot @ Sinv) @ (jnp.diag(gamma_b) @ Wb_dot @ Sinv) +
                                   (kappa4 - 3.0) * (jnp.diag(gamma_b) @ Wb_dot @ Sinv) * (jnp.diag(gamma_b) @ Wb_dot @ Sinv))
 
@@ -299,7 +300,6 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     lower = theta_hat - z_crit * se
     upper = theta_hat + z_crit * se
 
-    breakpoint()
-    print(params_scale)
+    # print(se)
 
     return dict(theta=theta_hat, Avar=Avar_theta, se=se, lower=lower, upper=upper)

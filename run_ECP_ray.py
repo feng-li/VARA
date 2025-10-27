@@ -62,7 +62,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         inside = (theta_true >= lower) & (theta_true <= upper)
         ci_length = upper - lower
 
-        print(f"lower: {lower[update_idx]}, upper: {upper[update_idx]}, theta_hat {theta_hat[update_idx]}")
+        # print(f"lower: {lower[update_idx]}, upper: {upper[update_idx]}, theta_hat {theta_hat[update_idx]}")
 
 
         return inside, ci_length, theta_hat
@@ -286,7 +286,7 @@ if __name__ == "__main__":
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
     # Settings
-    USE_RAY = False
+    USE_RAY = True
 
     # ===============================================================
     # === 1. Simulation from DGP ====================================
@@ -294,11 +294,11 @@ if __name__ == "__main__":
     seed = random.randint(0, 1000)
     key = jax.random.PRNGKey(seed)
 
-    R = 1000
+    R = 2000
     p, q = 10, 10
     dist = "normal"
 
-    T_list = [200, 500]
+    T_list = [200, 500, 1000]
     alpha_list = [0.10, 0.05]    # for 90% and 95% coverage
 
     algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
@@ -319,12 +319,12 @@ if __name__ == "__main__":
         sigma2=uniform(keys[4], (p,), minval=0.25, maxval=1.0),
     )
 
-    update_idx = [1]
+    # update_idx = [0, 1]
     # update_idx = slice(None)  # Full updating
 
     params_scale = dict(
         eta_a=1,
-        eta_b=1)
+        eta_b=0.2)
 
 
     # ===============================================================
