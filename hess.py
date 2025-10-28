@@ -40,7 +40,7 @@ def compute_Wa_Wb_dots(Z, eta, scale):
 
     # second derivative Ẅ = W ⊙ (S_mat - row_means)**2 − W ⊙ row_var
     row_var = jnp.sum(W * (S_mat - row_means) ** 2, axis=1, keepdims=True)
-    W_ddot = W * ((S_mat - row_means) ** 2 - row_var) * scale
+    W_ddot = W * ((S_mat - row_means) ** 2 - row_var) * scale**2
     return W, W_dot, W_ddot
 
 
@@ -89,22 +89,31 @@ def hess_block_sigma2(theta, Y, Z, params_scale):
     block_diag = d_sigma2**2 * H_sigma2_diag + dd_sigma2 * grad_sigma2
     return jnp.diag(block_diag)
 
+
+
 def hess_block_eta_a_gamma_a(theta, Y, Z, params_scale):
     """∂²ℓ / ∂η_a ∂γ_aᵀ — interaction between attention strength η_a and γ_a."""
     T, p = Y.shape
     eta_a = theta[0]
+    eta_b = theta[1]
     gamma_a = theta[2:2+p]
+    gamma_b = theta[2+p:2+2*p]
+
     beta = theta[2+2*p:2+3*p]
     sigma2 = jax.nn.softplus(theta[2+3*p:2+4*p])
 
     W_a, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale['eta_a'])
+    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
     D_ga = jnp.diag(gamma_a)
     D_beta = jnp.diag(beta)
     Sigma_inv = Sigma_inv_from_sigma2(sigma2)
 
-    # residuals E_t = Y_t - Y_{t-1} G'   (S = I for η_a block)
     G = D_beta + D_ga @ W_a
-    E = (Y[1:] - Y[:-1] @ G.T)
+
+    D_gb = jnp.diag(gamma_b)
+    S = jnp.eye(p) - D_gb @ W_b
+    E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)
+    # E = (Y[1:] - Y[:-1] @ G.T)
 
     block = jnp.zeros((1, p))
     for t in range(1, T):
@@ -112,6 +121,7 @@ def hess_block_eta_a_gamma_a(theta, Y, Z, params_scale):
         term1 = jnp.diag(Sigma_inv @ (D_ga @ (Wa_dot @ y_prev))) @ (W_a @ y_prev)
         term2 = jnp.diag(Sigma_inv @ E[t-1]) @ (Wa_dot @ y_prev)
         block -= (term1 - term2)[None, :]
+
     return block
 
 
@@ -212,17 +222,23 @@ def hess_block_eta_a_sigma2(theta, Y, Z, params_scale):
     """∂²ℓ / ∂η_a ∂σ̃²ᵀ : interaction of attention strength (a) and variances."""
     T, p = Y.shape
     eta_a   = theta[0]
+    eta_b   = theta[1]
     gamma_a = theta[2:2+p]
+    gamma_b = theta[2+p:2+2*p]
     sigma2, d_sigma2, _ = softplus_sigma2(theta, p)
 
     # attention terms
     W_a, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale['eta_a'])
+    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
     D_ga = jnp.diag(gamma_a)
+    D_gb = jnp.diag(gamma_b)
 
     # residuals
     D_beta = jnp.diag(theta[2+2*p:2+3*p])
     G = D_beta + D_ga @ W_a
-    E = (Y[1:] - Y[:-1] @ G.T)
+
+    S = jnp.eye(p) - D_gb @ W_b
+    E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)        # (T-1)×p
 
     # ∂ℓ/∂η_a depends on E_t' Σ⁻¹ (∂E_t/∂η_a)
     Xa = Y[:-1] @ (D_ga @ Wa_dot).T        # (T-1)×p
@@ -336,20 +352,36 @@ def hess_block_gamma_a_beta(theta, Y, Z, params_scale):
 
 
 def hess_block_gamma_a_sigma2(theta, Y, Z, params_scale):
-    """∂²ℓ / ∂σ̃² ∂γ_aᵀ — Appendix B.2, Eq. (∂²ℓ/∂σ²∂γ_a)."""
+    """∂²ℓ / ∂σ̃² ∂γ_aᵀ — Appendix B.2, Eq. (∂²ℓ/∂σ²∂γ_a) with σ̃ reparameterization.
+
+    TODO: check
+    """
     T, p = Y.shape
-    eta_a = theta[0]
+    eta_a, eta_b = theta[0], theta[1]
     gamma_a = theta[2:2+p]
-    sigma2, d_sigma2, _ = softplus_sigma2(theta, p)
+    gamma_b = theta[2+p:2+2*p]
+    beta    = theta[2+2*p:2+3*p]
+    sigma2, d_sigma2, _ = softplus_sigma2(theta, p)  # reparameterized σ̃
 
-    W_a = build_attention(Z, eta_a, params_scale['eta_a'])
+    W_a = build_attention(Z, eta_a, params_scale["eta_a"])
+    W_b = build_attention(Z, eta_b, params_scale["eta_b"])
     D_ga = jnp.diag(gamma_a)
-    G = D_ga @ W_a
-    E = (Y[1:] - Y[:-1] @ (jnp.diag(theta[2+2*p:2+3*p]) + G).T)
+    D_gb = jnp.diag(gamma_b)
 
-    WaY_prev = Y[:-1] @ W_a.T
-    nat_diag = -jnp.sum(E * WaY_prev, axis=0) / (sigma2**2)
-    return jnp.diag(nat_diag * d_sigma2)
+    D_beta = jnp.diag(beta)
+    G = D_beta + D_ga @ W_a
+    S = jnp.eye(p) - D_gb @ W_b
+    E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)         # ε_t
+
+
+    WaY_prev = Y[:-1] @ W_a.T                  # W_a Y_{t-1}
+    nat_diag = -jnp.sum(E * WaY_prev, axis=0) / (sigma2**2)  # σ⁻⁴ ∘ Σ_t(ε_t∘W_aY_{t-1})
+
+    # Chain rule σ̃² → σ²
+    block_diag = nat_diag * d_sigma2
+
+    return jnp.diag(block_diag)
+
 
 
 def hess_block_gamma_b_sigma2(theta, Y, Z, params_scale):
@@ -608,16 +640,19 @@ def hess_block_eta_a_eta_b(theta, Y, Z, params_scale):
     gamma_b = theta[2+p:2+2*p]
     sigma2 = jax.nn.softplus(theta[2+3*p:2+4*p])
 
-    W_a = build_attention(Z, eta_a, params_scale['eta_a'])
-    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
+    W_a, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale['eta_a'])
+    W_b, Wb_dot, _ = compute_Wa_Wb_dots(Z, eta_b, params_scale['eta_b'])
+
     D_ga, D_gb = jnp.diag(gamma_a), jnp.diag(gamma_b)
-    Sigma_inv = Sigma_inv_from_sigma2(sigma2)
+    # Sigma_inv = Sigma_inv_from_sigma2(sigma2)
+    Sigma_inv = jnp.diag(1.0 / sigma2)
 
     val = 0.0
     for t in range(1, T):
-        Xa = D_ga @ W_a @ Y[t-1]
-        Xb = D_gb @ W_b @ Y[t]
-        val -= Xa.T @ Sigma_inv @ Xb
+        Xb = D_gb @ Wb_dot @ Y[t]
+        Xa = D_ga @ Wa_dot @ Y[t-1]
+        val -= Xb.T @ Sigma_inv @ Xa
+
     return val
 
 
@@ -641,7 +676,7 @@ def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(N
 
     # Cross-blocks
     H = H.at[0, 1].set(hess_block_eta_a_eta_b(theta, Y, Z, params_scale))
-    H = H.at[1, 0].set(hess_block_eta_a_eta_b(theta, Y, Z, params_scale))
+    H = H.at[1, 0].set(hess_block_eta_a_eta_b(theta, Y, Z, params_scale).T)
 
     H = H.at[0:1, 2+2*p:2+3*p].set(hess_block_eta_a_beta(theta, Y, Z, params_scale))
     H = H.at[2+2*p:2+3*p, 0:1].set(hess_block_eta_a_beta(theta, Y, Z, params_scale).T)
@@ -695,7 +730,7 @@ def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(N
 
     H_partial = H[jnp.ix_(update_idx, update_idx)]
 
-    return H_partial  / (T-1)
+    return H_partial  # / (T-1)
 
 # =====================================================
 # Test harness
@@ -723,11 +758,11 @@ if __name__ == "__main__":
     from dgp import simulate_VAR_attention, flatten_params
     from loglik_attn import loglik_reparam
 
-    jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
+    jnp.set_printoptions(threshold=10_000, linewidth=1000, suppress=True, precision=10)
 
     # --- Simulation settings ---
     key = jax.random.PRNGKey(random.randint(0, 100))
-    T, p, q = 200, 3, 3
+    T, p, q = 100, 3, 3
 
     # --- True parameters (in natural scale) ---
     params_true = dict(
@@ -741,9 +776,9 @@ if __name__ == "__main__":
 
     params_scale = dict(
         eta_a=1,
-        eta_b=10)
+        eta_b=0.1)
 
-    update_idx=slice(None)
+    update_idx = slice(None)
 
     # --- Simulate data ---
     Y, Z, W_a, W_b = simulate_VAR_attention(key, params_true, T=T, p=p, q=q,
@@ -790,6 +825,13 @@ if __name__ == "__main__":
         ("eta_a", "gamma_b"),
         ("eta_a", "beta"),
         ("eta_a", "sigma2"),
+        ("eta_b", "gamma_a"),
+        ("eta_b", "gamma_b"),
+        ("eta_b", "beta"),
+        ("eta_b", "sigma2"),
+        ("gamma_a", "gamma_b"),
+        ("gamma_a", "beta"),
+        ("gamma_a", "sigma2"),
         ("gamma_b", "beta"),
         ("gamma_b", "sigma2"),
         ("beta", "sigma2"),
