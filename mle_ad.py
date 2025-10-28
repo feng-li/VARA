@@ -7,15 +7,23 @@ from grad import loglik_grad_analytical
 from hess import loglik_hess_analytical
 
 
+import pandas as pd
+
 def mle_newton(Y, Z, theta_init, params_scale,
                algorithm="analytical_gradhess", update_idx=slice(None),
-               max_iter=15, tol=1e-3, alpha=1.0):
+               max_iter=50, tol=1e-3, alpha=1.0):
     """
     Newton–Raphson MLE with:
-      1. softplus reparameterization for sigma²,
-      2. trust-region step-scaling,
-      3. gradient clipping,
-      4. Armijo–Goldstein line search.
+      1. trust-region Newton step control,
+      2. gradient clipping for numerical stability,
+      3. Armijo–Goldstein line search as fallback,
+      4. detailed convergence diagnostics.
+
+    The trust-region algorithm adaptively adjusts the radius based on
+    the ratio between actual and predicted improvement in the
+    log-likelihood.  A fallback Armijo line search is used when the
+    trust-region step is rejected repeatedly.  A convergence log is
+    returned for iteration diagnostics.
 
     Parameters
     ----------
@@ -25,23 +33,30 @@ def mle_newton(Y, Z, theta_init, params_scale,
         Covariates or regressors
     theta_init : array
         Initial parameter guess (on reparameterized scale)
-    analytical_gradhess : bool, default=False
-        Whether to use analytical gradient/Hessian
+    params_scale : array or dict
+        Scaling factors used in reparameterization
+    algorithm : {"analytical_gradhess", "auto_gradhess"}, default="analytical_gradhess"
+        Choice of gradient/Hessian computation
+    update_idx : slice or array
+        Parameter indices to update
     max_iter : int
         Maximum number of iterations
     tol : float
-        Convergence tolerance on parameter step
+        Convergence tolerance
     alpha : float
-        Initial step size for line search
+        Initial step size for Armijo fallback
 
     Returns
     -------
     theta_hat : array
-        Estimated parameters (on reparameterized scale)
+        Estimated parameters (reparameterized scale)
     grad_ll : array
         Gradient at optimum
     hess_ll : array
         Hessian at optimum
+    convergence_log : pandas.DataFrame
+        Iteration-wise diagnostics: iteration, loglik, ratio,
+        trust_radius, grad_norm, step_norm
     """
 
     # choose derivative functions
@@ -51,11 +66,9 @@ def mle_newton(Y, Z, theta_init, params_scale,
     elif algorithm == "auto_gradhess":
         loglik_grad = jax.grad(loglik_reparam)
         loglik_hess = jax.hessian(loglik_reparam)
-
     else:
         raise Exception("No such algorithm implemented.")
 
-    # slice(None) means update all parameters
     if isinstance(update_idx, slice):
         update_idx = jnp.arange(theta_init.size)
     update_idx = jnp.array(update_idx)
@@ -63,118 +76,112 @@ def mle_newton(Y, Z, theta_init, params_scale,
     theta = theta_init[update_idx]
     theta_full = theta_init
 
-    # print(params_scale)
-    # print(f"theta_init: {theta_init}")
+    # trust-region parameters
+    trust_radius = 0.3
+    trust_radius_max = 5.0
+    shrink_factor = 0.25
+    grow_factor = 2.0
+    accept_lower = 0.25
+    accept_upper = 0.75
+
+    # record diagnostics
+    records = []
 
     for it in range(max_iter):
-
-        # This list is the full list if jax used. clipping zero values.
-        g_0 = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
-        g = g_0[update_idx]
+        g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
+        g = g_full[update_idx]
         g_norm = jnp.linalg.norm(g)
 
-        # ---- Gradient Clipping ----
+        # gradient clipping
         max_grad_norm = 100.0
         if g_norm > max_grad_norm:
             g = g * (max_grad_norm / g_norm)
             g_norm = max_grad_norm
+            print(f"Gradient clipped to {max_grad_norm}")
 
-            # f ratio ≈ 1.0 → gradient is already moderate; no need to worry.
-            # If ratio ≪ 1.0 (e.g. 0.1 or 0.01) → gradient explosion being controlled.
-            # If clipping occurs frequently → you may want to reduce step size or inspect Hessian scaling.
-            print(f"Gradient clipping {max_grad_norm / g_norm} used.")
-
-        H_0 = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
-        H = H_0[jnp.ix_(update_idx, update_idx)]
+        H_full = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
+        H = H_full[jnp.ix_(update_idx, update_idx)]
 
         try:
-            # A robust and minimal change is to damp the Newton step before entering the line search.
-            # This works extremely well for non-quadratic or non-concave likelihoods.
             lambda_damp = 0.3
             step = -jnp.linalg.solve(H, g) * lambda_damp
         except jnp.linalg.LinAlgError:
             print(f"Hessian not invertible at iteration {it}.")
             break
 
-        # ---- Trust-Region / Step Scaling ----
-        max_step_norm = 0.3  # A smaller value reduces overshooting, so fewer line search failures.
+        # trust-region control
         step_norm = jnp.linalg.norm(step)
-        if step_norm > max_step_norm:
-            scale_ratio = max_step_norm / step_norm
-            step = step * (max_step_norm / step_norm)
+        if step_norm > trust_radius:
+            step = step * (trust_radius / step_norm)
+            step_norm = trust_radius
 
-            print(f"Step scaling {scale_ratio:.4f} used.")
-
-            if scale_ratio < tol:
-                print(f"Restarting from nearby point (it={it}).")
-                theta = theta + 0.1 * jax.random.normal(jax.random.PRNGKey(random.randint(0, 100)), theta.shape)
-                continue
-
-
-
-        # ---- Armijo–Goldstein Line Search ----
-        step_size = alpha
-        c1 = 1e-2  # A small value makes the Armijo condition easier to satisfy.
         old_ll = loglik_reparam(theta_full, Y, Z, params_scale, update_idx)
+        theta_trial = theta + step
+        theta_trial_full = theta_full.at[update_idx].set(theta_trial)
+        new_ll = loglik_reparam(theta_trial_full, Y, Z, params_scale, update_idx)
 
-        n_backtrack = 0
-        while True:
-            theta_trial = theta + step_size * step
-            theta_trial_full = theta_full
-            theta_trial_full = theta_trial_full.at[update_idx].set(theta_trial)
-            new_ll = loglik_reparam(theta_trial_full, Y, Z, params_scale, update_idx)
+        predicted_gain = -(g.T @ step + 0.5 * step.T @ (H @ step))
+        actual_gain = new_ll - old_ll
+        ratio = actual_gain / predicted_gain if predicted_gain > 0 else -jnp.inf
 
-            # Armijo condition: sufficient increase in log-likelihood
-            if (jnp.isfinite(new_ll) and new_ll >= old_ll + c1 * step_size * g.T @ step):
-                break  # accept
+        # adjust trust radius
+        if ratio < accept_lower:
+            trust_radius *= shrink_factor
+        elif ratio > accept_upper and jnp.isclose(step_norm, trust_radius):
+            trust_radius = jnp.minimum(grow_factor * trust_radius, trust_radius_max)
 
-            step_size *= 0.5
-            n_backtrack += 1
+        # accept/reject
+        if ratio > 0:
+            theta = theta_trial
+            theta_full = theta_trial_full
+        else:
+            print(f"Iter {it}: trust-region step rejected (ρ={ratio:.3f}); using Armijo fallback.")
+            trust_radius *= shrink_factor
 
-            # after a few failures, regularize Hessian once
-            # if n_backtrack == 5:
-            #     print(f"Regularizing Hessian after {n_backtrack} failed trials.")
-            #     H_reg = jnp.diag(H) + eps_reg * jnp.eye(H.shape[0])
-            #     step = -jnp.linalg.solve(H_reg, g) * lambda_damp
+            # Armijo fallback
+            step_size = alpha
+            c1 = 1e-2
+            n_backtrack = 0
+            while True:
+                theta_trial = theta + step_size * step
+                theta_trial_full = theta_full.at[update_idx].set(theta_trial)
+                new_ll = loglik_reparam(theta_trial_full, Y, Z, params_scale, update_idx)
 
-            if step_size < tol and n_backtrack > 5:
-                print(f"Too many line search reductions ({n_backtrack}), step_size={step_size:.4f}. Restarting from nearby point.")
-                theta = theta + 0.1 * jax.random.normal(jax.random.PRNGKey(random.randint(0, 100)), theta.shape)
-                step_size = alpha
-                break
+                if (jnp.isfinite(new_ll) and new_ll >= old_ll + c1 * step_size * g.T @ step):
+                    theta = theta_trial
+                    theta_full = theta_trial_full
+                    break
 
-        delta_theta = step_size * step
-        theta_new = theta + delta_theta
+                step_size *= 0.5
+                n_backtrack += 1
+                if step_size < tol or n_backtrack > 5:
+                    print(f"Iter {it}: Armijo failed ({n_backtrack} reductions). Restart nearby.")
+                    theta = theta + 0.1 * jax.random.normal(
+                        jax.random.PRNGKey(random.randint(0, 100)), theta.shape
+                    )
+                    break
 
-        # Compute convergence diagnostics
-        abs_change = jnp.linalg.norm(delta_theta, 1)
-        relative_change = abs_change / jnp.maximum(1.0, jnp.linalg.norm(theta))
+        # log diagnostics
+        records.append({
+            "iteration": it,
+            "loglik": float(new_ll),
+            "ratio": float(ratio),
+            "trust_radius": float(trust_radius),
+            "grad_norm": float(g_norm),
+            "step_norm": float(step_norm),
+        })
 
-        if relative_change < tol or abs_change < tol or g_norm < tol:
+        # convergence checks
+        abs_change = jnp.linalg.norm(step, 1)
+        rel_change = abs_change / jnp.maximum(1.0, jnp.linalg.norm(theta))
+        if rel_change < tol or abs_change < tol or g_norm < tol:
             print(f"Converged in {it+1} iterations.")
-            # print(f"abs_change: {abs_change:6f}, relative_change: {relative_change:6f}, g_norm: {g_norm:6f}")
-            # g_new = loglik_grad(theta_new, Y, Z, params_scale)
-            # H_new = loglik_hess(theta_new, Y, Z, params_scale)
-
-            # breakpoint()
-            g_new = []
-            H_new = []
-            return theta_new, g_new, H_new
-
-
-        theta = theta_new
-        theta_full = theta_full.at[update_idx].set(theta)
-
-        # print(f"abs_change: {abs_change:6f}, relative_change: {relative_change:6f}, g_norm: {g_norm:6f}")
-        # print(f"theta_full: {theta_full}")
-
+            trace = pd.DataFrame(records)
+            return theta, g, H, dict(status=0, trace=trace)
 
     print("Max iterations reached.")
-    # g = loglik_grad(theta, Y, Z)
-    # H = loglik_hess(theta, Y, Z)
-    g = []
-    H = []
-    return theta, g, H
+    trace = pd.DataFrame(records)
+    return theta, g, H, dict(status=1, trace=trace)
 
 
 # ---------- Example usage ----------
