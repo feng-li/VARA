@@ -60,8 +60,7 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
         (jnp.diag(gamma_a) @ Wa_dot) @ Gamma0
     )
 
-    V_eta_b_eta_b = T * jnp.trace((jnp.diag(gamma_b) @ Wb_dot @ Sinv @ G).T @ Sigma_inv @ (jnp.diag(gamma_b) @ Wb_dot @ Sinv @ G) @ Gamma0 +
-                                  (jnp.diag(gamma_b) @ Wb_dot @ Sinv) @ (jnp.diag(gamma_b) @ Wb_dot @ Sinv).T +
+    V_eta_b_eta_b = T * jnp.trace((jnp.diag(gamma_b) @ Wb_dot).T @ Sigma_inv @ (jnp.diag(gamma_b) @ Wb_dot) @ Gamma0 +
                                   (jnp.diag(gamma_b) @ Wb_dot @ Sinv) @ (jnp.diag(gamma_b) @ Wb_dot @ Sinv) +
                                   (kappa4 - 3.0) * (jnp.diag(gamma_b) @ Wb_dot @ Sinv) * (jnp.diag(gamma_b) @ Wb_dot @ Sinv))
 
