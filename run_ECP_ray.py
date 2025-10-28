@@ -164,8 +164,8 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
     theta_true = flatten_params(params_true, order)
 
     # take the mean along an axis (e.g., axis=0) while skipping NaNs,
-    coverage = inside.nanmean(axis=0)
-    avg_length = ci_length.nanmean(axis=0)
+    coverage = jnp.nanmean(inside, axis=0)
+    avg_length = jnp.nanmean(ci_length, axis=0)
     rmse = jnp.sqrt(jnp.nanmean((theta_hat_all - theta_true) ** 2, axis=0))
 
     # Group indices for summary
@@ -177,15 +177,15 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
         "beta": slice(2 + 2 * p, 2 + 3 * p),
         "sigma2": slice(2 + 3 * p, 2 + 4 * p),
     }
-    coverage_by_group = {name: float(coverage[s].mean()) for name, s in idx.items()}
-    rmse_by_group = {name: float(rmse[s].mean()) for name, s in idx.items()}
+    coverage_by_group = {name: float(jnp.nanmean(coverage[s])) for name, s in idx.items()}
+    rmse_by_group = {name: float(jnp.nanmean(rmse[s])) for name, s in idx.items()}
 
     # ===============================================================
     # === 4. Print summary =========================================
     # ===============================================================
     print("\n=== Empirical Coverage and RMSE Summary ===")
     print(f"nominal = {(1-alpha):.2%}")
-    print(f"Overall average coverage: {jnp.mean(coverage):.4f}\n")
+    print(f"Overall average coverage: {jnp.nanmean(coverage):.4f}\n")
     for name in idx.keys():
         print(f"{name:<8s}: coverage={coverage_by_group[name]:.3f}, RMSE={rmse_by_group[name]:.4f}")
 
@@ -295,7 +295,7 @@ if __name__ == "__main__":
     seed = random.randint(0, 1000)
     key = jax.random.PRNGKey(seed)
 
-    R = 2000
+    R = 1000
     p, q = 10, 10
     dist = "normal"
 
@@ -320,8 +320,8 @@ if __name__ == "__main__":
         sigma2=uniform(keys[4], (p,), minval=0.25, maxval=1.0),
     )
 
-    # update_idx = [0, 1]
-    update_idx = slice(None)  # Full updating
+    update_idx = [0, 1]
+    # update_idx = slice(None)  # Full updating
 
     params_scale = dict(
         eta_a=1,

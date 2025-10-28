@@ -1,3 +1,4 @@
+import random
 import jax
 import jax.numpy as jnp
 
@@ -8,7 +9,7 @@ from hess import loglik_hess_analytical
 
 def mle_newton(Y, Z, theta_init, params_scale,
                algorithm="analytical_gradhess", update_idx=slice(None),
-               max_iter=10, tol=1e-3, alpha=1.0):
+               max_iter=15, tol=1e-3, alpha=1.0):
     """
     Newton–Raphson MLE with:
       1. softplus reparameterization for sigma²,
@@ -106,14 +107,14 @@ def mle_newton(Y, Z, theta_init, params_scale,
 
             if scale_ratio < tol:
                 print(f"Restarting from nearby point (it={it}).")
-                theta = theta + 0.1 * jax.random.normal(jax.random.PRNGKey(it), theta.shape)
+                theta = theta + 0.1 * jax.random.normal(jax.random.PRNGKey(random.randint(0, 100)), theta.shape)
                 continue
 
 
 
         # ---- Armijo–Goldstein Line Search ----
         step_size = alpha
-        c1 = 1e-4  # A small value makes the Armijo condition easier to satisfy.
+        c1 = 1e-2  # A small value makes the Armijo condition easier to satisfy.
         old_ll = loglik_reparam(theta_full, Y, Z, params_scale, update_idx)
 
         n_backtrack = 0
@@ -138,7 +139,7 @@ def mle_newton(Y, Z, theta_init, params_scale,
 
             if step_size < tol and n_backtrack > 5:
                 print(f"Too many line search reductions ({n_backtrack}), step_size={step_size:.4f}. Restarting from nearby point.")
-                theta = theta + 0.1 * jax.random.normal(jax.random.PRNGKey(it), theta.shape)
+                theta = theta + 0.1 * jax.random.normal(jax.random.PRNGKey(random.randint(0, 100)), theta.shape)
                 step_size = alpha
                 break
 
