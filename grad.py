@@ -138,7 +138,7 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), up
         update_idx = jnp.arange(theta.size)
     update_idx = jnp.array(update_idx)
 
-    return jnp.array(grad)[update_idx] / (T-1)
+    return jnp.array(grad)[update_idx] # / (T-1)
 
 
 if __name__ == "__main__":
@@ -163,7 +163,7 @@ if __name__ == "__main__":
 
     params_scale = dict(
         eta_a=1,
-        eta_b=10)
+        eta_b=1)
 
     update_idx = slice(None)
 
