@@ -271,7 +271,7 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     sigma2 = theta_hat[2+3*p:2+4*p]
     Sigma_e = jnp.diag(sigma2)
 
-    # ✅ use consistent attention derivatives
+    # use consistent attention derivatives
     Wa, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale["eta_a"])
     Wb, Wb_dot, _ = compute_Wa_Wb_dots(Z, eta_b, params_scale["eta_b"])
 

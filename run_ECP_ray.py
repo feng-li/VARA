@@ -47,10 +47,12 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
 
         # Results
-        result = estimate(Y, Z, subkey, theta_init,
-                          params_scale=params_scale,
-                          algorithm=algorithm,
-                          update_idx=update_idx)
+        result, convergence = estimate(
+            Y, Z, subkey, theta_init,
+            params_scale=params_scale,
+            algorithm=algorithm,
+            update_idx=update_idx)
+
         theta_hat = jnp.asarray(result["theta"])
         se = jnp.asarray(result["se"])  # standard errors from sandwich variance
 
@@ -62,10 +64,12 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         inside = (theta_true >= lower) & (theta_true <= upper)
         ci_length = upper - lower
 
+        status = convergence["status"]
+
         # print(f"lower: {lower[update_idx]}, upper: {upper[update_idx]}, theta_hat {theta_hat[update_idx]}")
 
 
-        return inside, ci_length, theta_hat
+        return inside, ci_length, theta_hat, status
 
     except Exception as e:
         print(e)
@@ -147,15 +151,17 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
 
 
 
-    inside, ci_length, theta_hat_all = zip(*results)
+    inside, ci_length, theta_hat_all, status_all = zip(*results)
     inside = jnp.stack(inside)
     ci_length = jnp.stack(ci_length)
     theta_hat_all = jnp.stack(theta_hat_all)
+    status_all = jnp.stack(status_all)
 
     # ===============================================================
     # === 3. Summarize results =====================================
     # ===============================================================
     valid_mask = jnp.isfinite(theta_hat_all).all(axis=1)
+
     inside = inside[valid_mask]
     ci_length = ci_length[valid_mask]
     theta_hat_all = theta_hat_all[valid_mask]
@@ -296,7 +302,7 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(seed)
 
     R = 1000
-    p, q = 10, 10
+    p, q = 5, 5
     dist = "normal"
 
     T_list = [200, 500, 1000]
@@ -325,7 +331,7 @@ if __name__ == "__main__":
 
     params_scale = dict(
         eta_a=1,
-        eta_b=0.1)
+        eta_b=1)
 
 
     # ===============================================================

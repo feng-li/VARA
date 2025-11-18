@@ -44,9 +44,11 @@ def estimate(Y, Z, key, theta_init, params_scale, algorithm, update_idx=slice(No
     # Estimation (theta_hat_reparam contains unconstrained parameters)
 
     if algorithm == "analytical_gradhess" or algorithm == "auto_gradhess":
-        theta_hat_reparam_update, grad_ll, hess_ll = mle_newton(
+        theta_hat_reparam_update, grad_ll, hess_ll, convergence = mle_newton(
             Y, Z, theta_init, params_scale=params_scale,
             algorithm=algorithm, update_idx=update_idx)
+
+        # print(theta_hat_reparam_update)
 
     elif algorithm == "bfgs":
         theta_hat_reparam_update, grad_ll, hess_ll, res = mle_bfgs(
@@ -77,4 +79,4 @@ def estimate(Y, Z, key, theta_init, params_scale, algorithm, update_idx=slice(No
     # Compute sandwich variance at θ̂ (natural scale)
     var_theta = compute_sandwich_variance(Y, Z, theta_hat, params_scale)
 
-    return var_theta
+    return var_theta, convergence
