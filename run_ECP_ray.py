@@ -14,49 +14,73 @@ import pandas as pd
 
 from dgp import simulate_VAR_attention, flatten_params
 from fit import estimate
-from mle_jaxopt import mle_bfgs
+# from mle_jaxopt import mle_bfgs
 
 
 def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0.05,
-                       algorithm="analytical_gradhess", update_idx=slice(None)):
-    """Single Monte Carlo replication (runs on a Ray worker)."""
-    try:
+                       algorithm="analytical_gradhess", update_idx=slice(None),
+                       max_tries=10):
+    """Single Monte Carlo replication (runs on a Ray worker).
 
-        # Simulate one dataset
-        Y, Z, _, _ = simulate_VAR_attention(subkey, params_true, T=T, p=p, q=q,
-                                            dist=dist, params_scale=params_scale)
+    Re-runs simulation & estimation up to `max_tries` times until convergence
+    status == 0. On complete failure, returns NaNs.
+    """
 
-        # Transform and initialize
-        order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    # ---- Pre-compute true parameters (independent of attempts) ----
+    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    theta_true = flatten_params(params_true, order)
 
-        theta_true = flatten_params(params_true, order)
+    # sigma2 reparameterisation
+    sigma2_true = theta_true[2 + 3 * p : 2 + 4 * p]              # actual σ² values
+    sigma2_tilde_true = jnp.log(jnp.expm1(sigma2_true))          # softplus inverse
+    theta_true_reparam = jnp.concatenate(
+        [theta_true[: 2 + 3 * p], sigma2_tilde_true]
+    )
 
-        sigma2_true = theta_true[2 + 3 * p : 2 + 4 * p]  # actual σ² values
-        sigma2_tilde_true = jnp.log(jnp.expm1(sigma2_true))  # softplus inverse
-        theta_true_reparam = jnp.concatenate([theta_true[: 2 + 3 * p], sigma2_tilde_true])
+    d = theta_true.shape[0]
 
-        # Set initial values on update_idx values. Others values set as the true value.
-        if isinstance(update_idx, slice):
-            update_idx = jnp.arange(theta_true_reparam.size)
-        update_idx = jnp.array(update_idx)
+    # Handle update_idx: if slice, use all parameters; otherwise convert to array
+    if isinstance(update_idx, slice):
+        update_idx_array = jnp.arange(theta_true_reparam.size)
+    else:
+        update_idx_array = jnp.array(update_idx)
 
+    # ---- Default "failure" outputs ----
+    last_inside = jnp.zeros(d, dtype=bool)
+    last_ci_length = jnp.full(d, jnp.nan)
+    last_theta_hat = jnp.full(d, jnp.nan)
+    last_status = -1  # non-zero meaning "no success"
+
+    # ---- Try up to max_tries times ----
+    for attempt in range(max_tries):
+        # Make attempt-specific keys so each try is different but reproducible
+        attempt_key = jax.random.fold_in(subkey, attempt)
+        noise_key = jax.random.fold_in(subkey, attempt + max_tries)
+
+        # 1. Simulate one dataset
+        Y, Z, _, _ = simulate_VAR_attention(
+            attempt_key, params_true, T=T, p=p, q=q,
+            dist=dist, params_scale=params_scale
+        )
+
+        # 2. Build initial values (perturb true values on update_idx)
         theta_init = theta_true_reparam
-        theta_init_update = theta_true_reparam[update_idx]
-        theta_init = theta_init.at[update_idx].set(
-            theta_init_update * (1 + 0.1 * jax.random.normal(subkey, theta_init_update.shape)))
+        theta_init_update = theta_true_reparam[update_idx_array]
+        perturb = 1 + 0.1 * jax.random.normal(noise_key, theta_init_update.shape)
+        theta_init = theta_init.at[update_idx_array].set(theta_init_update * perturb)
 
-
-        # Results
+        # 3. Estimation
         result, convergence = estimate(
-            Y, Z, subkey, theta_init,
+            Y, Z, attempt_key, theta_init,
             params_scale=params_scale,
             algorithm=algorithm,
-            update_idx=update_idx)
+            update_idx=update_idx_array,
+        )
 
         theta_hat = jnp.asarray(result["theta"])
         se = jnp.asarray(result["se"])  # standard errors from sandwich variance
 
-        # Compute lower/upper based on chosen alpha
+        # 4. Confidence intervals
         z_crit = jax.scipy.stats.norm.ppf(1 - alpha / 2.0)
         lower = theta_hat - z_crit * se
         upper = theta_hat + z_crit * se
@@ -64,18 +88,17 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         inside = (theta_true >= lower) & (theta_true <= upper)
         ci_length = upper - lower
 
-        status = convergence["status"]
+        status = int(convergence["status"])
+        # last_inside, last_ci_length, last_theta_hat, last_status = (
+        #     inside, ci_length, theta_hat, status
+        # )
 
-        # print(f"lower: {lower[update_idx]}, upper: {upper[update_idx]}, theta_hat {theta_hat[update_idx]}")
+        # If converged, return immediately
+        if status == 0:
+            return inside, ci_length, theta_hat, status
 
-
-        return inside, ci_length, theta_hat, status
-
-    except Exception as e:
-        print(e)
-        # Return NaNs on failure to avoid breaking aggregation
-        d = theta_true.shape[0]
-        return jnp.zeros(d, dtype=bool), jnp.full(d, jnp.nan), jnp.full(d, jnp.nan)
+    # If all attempts fail to reach status == 0, return last attempt (or NaNs)
+    return last_inside, last_ci_length, last_theta_hat, last_status
 
 
 # JAX JIT wrapper

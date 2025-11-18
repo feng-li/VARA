@@ -112,7 +112,7 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
 
     V_sigma_beta    = jnp.zeros((p, p))
 
-    # --- Assemble selected blocks (unchanged) ---
+    # --- Assemble selected blocks ---
     V = V.at[0, 0].set(V_eta_a_eta_a)
     V = V.at[1, 1].set(V_eta_b_eta_b)
     V = V.at[2:2+p, 2:2+p].set(V_gamma_a_gamma_a)
@@ -120,7 +120,7 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
     V = V.at[2+2*p:2+3*p, 2+2*p:2+3*p].set(V_beta_beta)
     V = V.at[2+3*p:2+4*p, 2+3*p:2+4*p].set(V_sigma_sigma)
 
-    # --- Cross-block symmetric filling (unchanged) ---
+    # --- Cross-block symmetric filling ---
     V = V.at[1, 0].set(V_eta_b_eta_a)
     V = V.at[0, 1].set(V_eta_b_eta_a)
 
