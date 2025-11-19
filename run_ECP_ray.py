@@ -96,6 +96,9 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         # If converged, return immediately
         if status == 0:
             return inside, ci_length, theta_hat, status
+        else:
+            print(f"{attempt} attempts failed to simulate proper data under this condition. Retrying.")
+
 
     # If all attempts fail to reach status == 0, return last attempt (or NaNs)
     return last_inside, last_ci_length, last_theta_hat, last_status
@@ -354,7 +357,7 @@ if __name__ == "__main__":
 
     params_scale = dict(
         eta_a=1,
-        eta_b=1)
+        eta_b=10)
 
 
     # ===============================================================
