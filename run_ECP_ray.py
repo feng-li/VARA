@@ -327,8 +327,8 @@ if __name__ == "__main__":
     seed = random.randint(0, 1000)
     key = jax.random.PRNGKey(seed)
 
-    R = 1000
-    p, q = 5, 5
+    R = 200
+    p, q = 10, 10
     dist = "normal"
 
     T_list = [200, 500, 1000]
@@ -345,19 +345,19 @@ if __name__ == "__main__":
     keys = jax.random.split(key, 10)
     params_true = dict(
         eta_a=0.5,
-        eta_b=1.0,
+        eta_b=0.2,
         gamma_a=uniform(keys[1], (p,), minval=-0.2, maxval=0.2),
         gamma_b=uniform(keys[2], (p,), minval=-0.2, maxval=0.2),
         beta=uniform(keys[3], (p,), minval=-0.2, maxval=0.2),
         sigma2=uniform(keys[4], (p,), minval=0.25, maxval=1.0),
     )
 
-    update_idx = [0, 1]
-    # update_idx = slice(None)  # Full updating
+    # update_idx = [0, 1]
+    update_idx = slice(None)  # Full updating
 
     params_scale = dict(
         eta_a=1,
-        eta_b=10)
+        eta_b=1)
 
 
     # ===============================================================

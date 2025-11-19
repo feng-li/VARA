@@ -216,7 +216,7 @@ if __name__ == "__main__":
     # --- True parameters (in natural scale) ---
     params_true = dict(
         eta_a=0.5,
-        eta_b=1.5,
+        eta_b=0.1,
         gamma_a=jnp.linspace(-0.15, 0.15, p),
         gamma_b=jnp.linspace(-0.10, 0.10, p),
         beta=jnp.linspace(-0.20, 0.20, p),
@@ -227,9 +227,9 @@ if __name__ == "__main__":
         eta_a=1,
         eta_b=1)
 
-    # algorithm = "auto_gradhess"
-    algorithm = "analytical_gradhess"
-    update_idx = [11, 12, 13]
+    algorithm = "auto_gradhess"
+    # algorithm = "analytical_gradhess"
+    update_idx = [0, 1]
     # update_idx = slice(None)
 
     # --- Simulate data ---
