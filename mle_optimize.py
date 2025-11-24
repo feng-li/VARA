@@ -1,40 +1,49 @@
 import jax
 import jax.numpy as jnp
-
-from jaxopt import LBFGS
+import optax
 
 from loglik_attn import loglik_reparam
 
 
-def mle_bfgs(Y, Z, theta_init, params_scale, algorithm):
+def mle_optimize(Y, Z, theta_init, params_scale, algorithm):
     """
-    MLE estimator using JAXopt BFGS optimizer.
-    Minimizes the negative log-likelihood.
+    MLE estimator using Optax LBFGS (line-search version).
     """
 
-    # Define objective: negative log-likelihood
+    # Negative log-likelihood
     def objective(theta):
         return -loglik_reparam(theta, Y, Z, params_scale)
 
-    # Initialize BFGS solver
-
     if algorithm == "bfgs":
-        solver = LBFGS(fun=objective, maxiter=50, tol=1e-6, verbose=False)
+        opt_init, opt_update = optax.lbfgs()
     else:
         raise Exception("Not implemented.")
 
-    # Run optimization
-    res = solver.run(theta_init)
+    theta = theta_init
+    state = opt_init(theta)
 
-    # Gradient and Hessian (optional)
-    theta_hat = res.params
-    state = res.state
-    # grad_ll = jax.grad(loglik_reparam)(theta_hat, Y, Z)
-    # hess_ll = jax.hessian(loglik_reparam)(theta_hat, Y, Z)
-    grad_ll = []
-    hess_ll = []
+    maxiter = 50
 
-    return theta_hat, grad_ll, hess_ll, state
+    for _ in range(maxiter):
+        loss, grad = jax.value_and_grad(objective)(theta)
+
+        # ★★★ correct required signature ★★★
+        updates, state = opt_update(
+            grad, state, theta,
+            value=loss,
+            grad=grad,
+            value_fn=objective
+        )
+
+        theta = optax.apply_updates(theta, updates)
+
+        if jnp.linalg.norm(updates) < 1e-6:
+            break
+
+    theta_hat = theta
+
+    return theta_hat, [], [], state
+
 
 
 if __name__ == "__main__":
@@ -50,7 +59,7 @@ if __name__ == "__main__":
     p, q, T = 10, 10, 200
     params = dict(
         eta_a=0.5,
-        eta_b=1.0,
+        eta_b=0.2,
         gamma_a=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
         gamma_b=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
         beta=jax.random.uniform(key, (p,), minval=-0.3, maxval=0.3),
@@ -59,7 +68,7 @@ if __name__ == "__main__":
 
     params_scale = dict(
         eta_a=1,
-        eta_b=10)
+        eta_b=1)
 
     Y, Z, W_a, W_b = simulate_VAR_attention(key, params, T=T, p=p, q=q,
                                             params_scale=params_scale, dist="normal")
@@ -76,11 +85,10 @@ if __name__ == "__main__":
 
     theta_init = theta_tilde + 0.05 * jax.random.normal(key, theta_tilde.shape)
 
-
-    theta_hat, grad_ll, hess_ll, state = mle_bfgs(Y, Z, theta_init, algorithm)
+    theta_hat, grad_ll, hess_ll, state = mle_optimize(Y, Z, theta_init, params_scale, algorithm)
 
     print("True theta:", theta_tilde)
     print("Initial theta:",  theta_init)
     print("Estimated theta:", theta_hat)
     # print("Gradient at optimum:", grad_ll)
-    print("Converged:", state.error < 1e-6)
+    print(f"Converge state: {state}")

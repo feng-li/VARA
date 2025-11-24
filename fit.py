@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from cov import compute_sandwich_variance
 from mle_ad import mle_newton
-from mle_jaxopt import mle_bfgs
+# from mle_jaxopt import mle_bfgs # not maintained
 
 
 def estimate(Y, Z, key, theta_init, params_scale, algorithm, update_idx=slice(None)):

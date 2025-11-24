@@ -1,8 +1,7 @@
 # jax_cpu = False
 # if jax_cpu:
-#     import os
-#     os.environ["CUDA_VISIBLE_DEVICES"] = ""   # hide all GPUs
-#     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # optional, prevent GPU mem alloc
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # optional, prevent GPU mem alloc
 
 import jax
 import jax.numpy as jnp
@@ -109,6 +108,7 @@ single_replication_jit = jax.jit(single_replication,
                                  static_argnames=["params_scale", "dist", "algorithm"])
 
 # Ray wrapper (wrap the same function)
+# @ray.remote(num_gpus=0.04)
 @ray.remote
 def single_replication_ray(*args, **kwargs):
     try:
@@ -154,6 +154,8 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
     # Submit tasks to Ray cluster/workers
     if USE_RAY:
         print("🔹 Running with Ray parallelization")
+        print("JAX devices:", jax.devices())
+
         ray.init(ignore_reinit_error=True, include_dashboard=False)
         futures = [
             single_replication_ray.remote(
@@ -320,6 +322,8 @@ if __name__ == "__main__":
 
     # Settings
     USE_RAY = True
+
+
 
     # ===============================================================
     # === 1. Simulation from DGP ====================================
