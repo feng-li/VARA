@@ -95,7 +95,7 @@ def mle_newton(Y, Z, theta_init, params_scale,
     records = []
 
     for it in range(max_iter):
-        g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx) / T
+        g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
         g = g_full[update_idx]
         g_norm = jnp.linalg.norm(g)
 
@@ -107,7 +107,7 @@ def mle_newton(Y, Z, theta_init, params_scale,
             print(f"Gradient clipped to {max_grad_norm}")
 
         # breakpoint()
-        H_full = loglik_hess(theta_full, Y, Z, params_scale, update_idx) / T**2
+        H_full = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
         H = H_full[jnp.ix_(update_idx, update_idx)]
 
         try:
@@ -148,29 +148,29 @@ def mle_newton(Y, Z, theta_init, params_scale,
             print(f"Iter {it}: trust-region step rejected (ρ={ratio:.3f})")
             trust_radius *= shrink_factor
 
-            # # Armijo fallback
-            # step_size = alpha
-            # c1 = 1e-2
-            # n_backtrack = 0
-            # while True:
-            #     print("Using Armijo fallback.")
-            #     theta_trial = theta + step_size * step
-            #     theta_trial_full = theta_full.at[update_idx].set(theta_trial)
-            #     new_ll = loglik_reparam(theta_trial_full, Y, Z, params_scale, update_idx)
+            # Armijo fallback
+            step_size = alpha
+            c1 = 1e-2
+            n_backtrack = 0
+            while True:
+                print("Using Armijo fallback.")
+                theta_trial = theta + step_size * step
+                theta_trial_full = theta_full.at[update_idx].set(theta_trial)
+                new_ll = loglik_reparam(theta_trial_full, Y, Z, params_scale, update_idx)
 
-            #     if (jnp.isfinite(new_ll) and new_ll >= old_ll + c1 * step_size * g.T @ step):
-            #         theta = theta_trial
-            #         theta_full = theta_trial_full
-            #         break
+                if (jnp.isfinite(new_ll) and new_ll >= old_ll + c1 * step_size * g.T @ step):
+                    theta = theta_trial
+                    theta_full = theta_trial_full
+                    break
 
-            #     step_size *= 0.5
-            #     n_backtrack += 1
-            #     if step_size < tol or n_backtrack > 5:
-            #         print(f"Iter {it}: Armijo failed ({n_backtrack} reductions). Restart nearby.")
-            #         theta = theta + 0.1 * jax.random.normal(
-            #             jax.random.PRNGKey(random.randint(0, 100)), theta.shape
-            #         )
-            #         break
+                step_size *= 0.5
+                n_backtrack += 1
+                if step_size < tol or n_backtrack > 5:
+                    print(f"Iter {it}: Armijo failed ({n_backtrack} reductions). Restart nearby.")
+                    theta = theta + 0.1 * jax.random.normal(
+                        jax.random.PRNGKey(random.randint(0, 100)), theta.shape
+                    )
+                    break
 
         # log diagnostics
         records.append({
@@ -184,7 +184,7 @@ def mle_newton(Y, Z, theta_init, params_scale,
         # convergence checks
         abs_change = jnp.linalg.norm(step, jnp.inf)  # measures the single largest change in any parameter.
         rel_change = abs_change / jnp.maximum(1.0, jnp.linalg.norm(theta))
-        if rel_change < tol or abs_change < tol : # or g_norm < tol:
+        if rel_change < tol or g_norm < tol: #  or abs_change < tol
             print(f"g_norm: {g_norm}, rel_change: {rel_change}, abs_change: {abs_change}, actual_gain: {actual_gain}")
             print(f"Converged in {it+1} iterations.")
             trace = pd.DataFrame(records)
@@ -243,7 +243,7 @@ if __name__ == "__main__":
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
-    theta_true_reparam = flatten_params(params_reparam, order)
+    theta_true_reparam, _ = flatten_params(params_reparam, order)
     print("θ̃ length:", theta_true_reparam.size)
 
     # Only initialize update_idx related initial values

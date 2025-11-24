@@ -730,7 +730,7 @@ def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(N
 
     H_partial = H[jnp.ix_(update_idx, update_idx)]
 
-    return H_partial  # / (T-1)
+    return H_partial  / (T-1)**2 # wrt likelihood loss (log likelihood/N)
 
 # =====================================================
 # Test harness
@@ -792,9 +792,8 @@ if __name__ == "__main__":
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
-    theta_true_reparam = flatten_params(params_reparam, order)
+    theta_true_reparam, _ = flatten_params(params_reparam, order)
     print("θ̃ length:", theta_true_reparam.size)
-
 
     # --- Compute analytical and automatic Hessians ---
     H_analytical = loglik_hess_analytical(theta_true_reparam, Y, Z, params_scale, kappa4=3, update_idx=update_idx)

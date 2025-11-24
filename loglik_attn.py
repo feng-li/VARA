@@ -135,7 +135,7 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
         + (T-1) * logdetS
         - 0.5 * quad
     )
-    return val  # / (T-1)
+    return val / (T-1)
 
 
 # --------------------------------------------------------

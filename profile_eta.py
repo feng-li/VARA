@@ -7,7 +7,7 @@ def suggest_eta_max(q, scale, k=5.0):
 
 q_list = [10, 20, 50, 100]
 scale_a = 1.0     # eta_a
-scale_b = 10.0    # eta_b
+scale_b = 1.0    # eta_b
 
 records = []
 for q in q_list:

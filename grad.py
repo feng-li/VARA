@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from loglik_attn import build_attention
 
 
-def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), update_idx=slice(None)):
+def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=1), update_idx=slice(None)):
     """
     Compute the analytical gradient of the log-likelihood ℓ(θ̃)
     for the attention-based QMLE model with softplus-reparameterized variances.
@@ -138,7 +138,7 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=10), up
         update_idx = jnp.arange(theta.size)
     update_idx = jnp.array(update_idx)
 
-    return jnp.array(grad)[update_idx] # / (T-1)
+    return jnp.array(grad)[update_idx] / (T-1) # wrt likelihood loss (log likelihood/N)
 
 
 if __name__ == "__main__":

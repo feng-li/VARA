@@ -5,7 +5,7 @@ from tqdm import tqdm
 # ----- Simulation settings -----
 phi_true = 0.6     # true AR(1) coefficient
 sigma_true = 1.0   # true innovation SD
-T = 100            # time series length
+T = 1000            # time series length
 R = 10000          # number of replications
 alpha = 0.1        # significance level
 

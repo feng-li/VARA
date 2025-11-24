@@ -75,27 +75,39 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
 
 def flatten_params(params: dict, order: list[str]):
     """
-    Flatten a parameter dictionary into a single 1D JAX array (concatenated in given order).
-
-    Scalars are broadcast to 0D arrays and concatenated after being flattened.
+    Flatten a parameter dictionary into a single 1D JAX array (concatenated in given order)
+    and return parameter slices.
 
     Args:
         params: dict[str, scalar or jnp.ndarray]
-            Dictionary of parameters (some scalar, some arrays).
+            Dictionary of parameters (some scalars, some arrays).
         order: list[str]
             Desired key order for concatenation.
 
     Returns:
-        jnp.ndarray: 1D array containing all parameter values concatenated in order.
+        theta_flat : jnp.ndarray
+            1D array with all parameters concatenated in the specified order.
+        param_slices : dict[str, slice]
+            Dictionary mapping parameter names to their index slices in theta_flat.
     """
     flat_list = []
+    param_slices = {}
+
+    start = 0
     for k in order:
         if k not in params:
             continue
+
         v = params[k]
-        v_arr = jnp.atleast_1d(v).ravel()  # ensures scalar → array([scalar])
+        v_arr = jnp.atleast_1d(v).ravel()     # scalar → array([scalar])
         flat_list.append(v_arr)
-    return jnp.concatenate(flat_list)
+
+        end = start + v_arr.size
+        param_slices[k] = slice(start, end)
+        start = end
+
+    theta_flat = jnp.concatenate(flat_list)
+    return theta_flat, param_slices
 
 
 if __name__ == "__main__":
@@ -129,7 +141,7 @@ if __name__ == "__main__":
 
     # Flatten parameter vector θ̃ (for estimation/Hessian functions)
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
-    theta_tilde = flatten_params(params_reparam, order)
+    theta_tilde, _ = flatten_params(params_reparam, order)
 
     print("Parameter vector θ̃ (reparameterized) length:", theta_tilde.shape[0])
     print("First few σ̃²:", sigma2_tilde[:5])

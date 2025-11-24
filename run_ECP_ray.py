@@ -1,6 +1,7 @@
 # jax_cpu = False
 # if jax_cpu:
 import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # optional, prevent GPU mem alloc
 
 import jax
@@ -27,7 +28,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
     # ---- Pre-compute true parameters (independent of attempts) ----
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
-    theta_true = flatten_params(params_true, order)
+    theta_true, param_slices = flatten_params(params_true, order)
 
     # sigma2 reparameterisation
     sigma2_true = theta_true[2 + 3 * p : 2 + 4 * p]              # actual σ² values
@@ -64,9 +65,22 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
         # 2. Build initial values (perturb true values on update_idx)
         theta_init = theta_true_reparam
-        theta_init_update = theta_true_reparam[update_idx_array]
-        perturb = 1 + 0.1 * jax.random.normal(noise_key, theta_init_update.shape)
-        theta_init = theta_init.at[update_idx_array].set(theta_init_update * perturb)
+        perturb_scales = {"eta_a": 0.3,
+                          "eta_b": 0.3,
+                          "gamma_a": 0.8,
+                          "gamma_b": 0.8,
+                          "beta": 0.2,
+                          "sigma2": 0.10
+                          }
+
+        for name, sl in param_slices.items():
+            key, noise_key = jax.random.split(noise_key)
+            scale = perturb_scales[name]
+            idx = jnp.intersect1d(jnp.arange(len(theta_true_reparam))[sl], update_idx_array)
+            if idx.size > 0:
+                noise = 1.0 + scale * jax.random.normal(key, shape=(len(idx),))
+                theta_init = theta_init.at[idx].set(theta_true_reparam[idx] * noise)
+
 
         # 3. Estimation
         result, convergence = estimate(
@@ -108,7 +122,7 @@ single_replication_jit = jax.jit(single_replication,
                                  static_argnames=["params_scale", "dist", "algorithm"])
 
 # Ray wrapper (wrap the same function)
-# @ray.remote(num_gpus=0.04)
+# @ray.remote(num_gpus=0.01)
 @ray.remote
 def single_replication_ray(*args, **kwargs):
     try:
@@ -195,7 +209,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
     theta_hat_all = theta_hat_all[valid_mask]
 
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
-    theta_true = flatten_params(params_true, order)
+    theta_true, idx = flatten_params(params_true, order)
 
     # take the mean along an axis (e.g., axis=0) while skipping NaNs,
     coverage = jnp.nanmean(inside, axis=0)
@@ -203,14 +217,14 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
     rmse = jnp.sqrt(jnp.nanmean((theta_hat_all - theta_true) ** 2, axis=0))
 
     # Group indices for summary
-    idx = {
-        "eta_a": slice(0, 1),
-        "eta_b": slice(1, 2),
-        "gamma_a": slice(2, 2 + p),
-        "gamma_b": slice(2 + p, 2 + 2 * p),
-        "beta": slice(2 + 2 * p, 2 + 3 * p),
-        "sigma2": slice(2 + 3 * p, 2 + 4 * p),
-    }
+    # idx = {
+    #     "eta_a": slice(0, 1),
+    #     "eta_b": slice(1, 2),
+    #     "gamma_a": slice(2, 2 + p),
+    #     "gamma_b": slice(2 + p, 2 + 2 * p),
+    #     "beta": slice(2 + 2 * p, 2 + 3 * p),
+    #     "sigma2": slice(2 + 3 * p, 2 + 4 * p),
+    # }
     coverage_by_group = {name: float(jnp.nanmean(coverage[s])) for name, s in idx.items()}
     rmse_by_group = {name: float(jnp.nanmean(rmse[s])) for name, s in idx.items()}
 
@@ -323,20 +337,20 @@ if __name__ == "__main__":
     # Settings
     USE_RAY = True
 
-
-
     # ===============================================================
     # === 1. Simulation from DGP ====================================
     # ===============================================================
-    seed = random.randint(0, 1000)
+    # seed = random.randint(0, 1000)
+    seed = 2025
     key = jax.random.PRNGKey(seed)
 
-    R = 200
+    R = 1000
     p, q = 10, 10
     dist = "normal"
 
-    T_list = [200, 500, 1000]
-    alpha_list = [0.10, 0.05]    # for 90% and 95% coverage
+    # T_list = [50, 100, 200, 500, 1000]
+    T_list = [1000]
+    alpha_list = [0.1]    # for 90% and 95% coverage
 
     algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
     # algorithm = "analytical_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
@@ -348,7 +362,7 @@ if __name__ == "__main__":
     # ===============================================================
     keys = jax.random.split(key, 10)
     params_true = dict(
-        eta_a=0.5,
+        eta_a=0.1,
         eta_b=0.2,
         gamma_a=uniform(keys[1], (p,), minval=-0.2, maxval=0.2),
         gamma_b=uniform(keys[2], (p,), minval=-0.2, maxval=0.2),

@@ -60,7 +60,7 @@ if __name__ == "__main__":
 
     # Flatten parameter vector θ̃ (for estimation/Hessian functions)
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
-    theta_tilde = flatten_params(params_reparam, order)
+    theta_tilde, _ = flatten_params(params_reparam, order)
 
     theta_init = theta_tilde + 0.05 * jax.random.normal(key, theta_tilde.shape)
 
