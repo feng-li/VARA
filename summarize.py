@@ -54,14 +54,35 @@ def summarize_empirical_coverage(file_path: str):
     print("\n"+"="*70+"\n=== ECP: Parameter-level \n"+"="*70)
     param_summary = (
         df.pivot_table(
-            index="param",
+            index=["param_group","param"],
             columns=["dist", "R", "T", "p", "q", "nominal"],
             values="coverage",
             aggfunc="mean"
         )
         .round(3)
     )
-    print(param_summary)
+    print(param_summary.T)
+    # param_summary.to_csv("param_summary.csv")
+    # order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    # for group in order:
+    #     if group not in param_summary.index.get_level_values(0):
+    #         continue
+    #     sub = param_summary.loc[group]
+    #     for param_name, row in sub.iterrows():
+    #         print(f"\n[{group}] {param_name}")
+    #         print(row.to_string())
+    print("\n"+"="*70+"\n=== ECP: Parameter group level \n"+"="*70)
+    param_ECP_summary = (
+        df.pivot_table(
+            index=["param_group"],
+            columns=["dist", "R", "T", "p", "q", "nominal"],
+            values="coverage",
+            aggfunc="mean"
+        )
+        .round(3)
+    )
+    print(param_ECP_summary.T.to_string())
+
 
     # --- Parameter group ---
     print("\n"+"="*70+"\n=== RMSE: Parameter group level \n"+"="*70)
@@ -74,7 +95,7 @@ def summarize_empirical_coverage(file_path: str):
         )
         .round(3)
     )
-    print(param_group_summary)
+    print(param_group_summary.T.to_string())
 
     # --- Overall coverage by nominal level ---
     print("\n"+"="*70+"\n=== ECP: Overall \n"+"="*70)
@@ -88,7 +109,6 @@ def summarize_empirical_coverage(file_path: str):
     elapsed_time = df.groupby(["R", "T", "p", "q", "dist"])["elapsed_min"].mean().reset_index()
     print(elapsed_time.to_string(index=False, float_format=lambda x: f"{x:8.3f}"))
 
-
     print("\n"+"="*70+"\n=== Summary ends here \n"+"="*70)
 
     return {
@@ -96,8 +116,6 @@ def summarize_empirical_coverage(file_path: str):
         "param_summary": param_summary,
         "grand_summary": grand_summary
     }
-
-
 
 def main():
     if len(sys.argv) < 2:
