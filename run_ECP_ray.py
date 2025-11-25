@@ -271,7 +271,7 @@ if __name__ == "__main__":
 
     R_list = [100, 200, 500, 1000]
     p, q = 10, 10
-    dist = "normal"
+    dist_list = ["normal", "t5"]
 
     # T_list = [50, 100, 200, 500, 1000]
     T_list = [1000]
@@ -308,10 +308,8 @@ if __name__ == "__main__":
     # ===============================================================
     # Cartesian product of all (T, alpha) combinations
     header_written = False
-    for R, T, alpha in itertools.product(R_list, T_list, alpha_list):
-        print("\n" + "=" * 70)
-        print(f"Running Monte Carlo:  T={T},  nominal={(1-alpha):.2%}")
-        print("=" * 70)
+    for dist, R, T, alpha in itertools.product(dist_list, R_list, T_list, alpha_list):
+        print("\n" + "=" * 70 + f"Running Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
 
         # seed = random.randint(0, 10000)
 

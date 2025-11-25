@@ -51,11 +51,11 @@ def summarize_empirical_coverage(file_path: str):
     print(summary_group_nominal.to_string(index=False, float_format=lambda x: f"{x:8.3f}"))
 
     # --- Parameter-level coverage table ---
-    print("\n"+"="*70+"\n=== ECP: Parameter-level ===\n"+"="*70)
+    print("\n"+"="*70+"\n=== ECP: Parameter-level \n"+"="*70)
     param_summary = (
         df.pivot_table(
             index="param",
-            columns=["R", "T", "nominal"],
+            columns=["dist", "R", "T", "p", "q", "nominal"],
             values="coverage",
             aggfunc="mean"
         )
@@ -64,7 +64,7 @@ def summarize_empirical_coverage(file_path: str):
     print(param_summary)
 
     # --- Parameter group ---
-    print("\n"+"="*70+"\n=== RMSE: Parameter group level ===\n"+"="*70)
+    print("\n"+"="*70+"\n=== RMSE: Parameter group level \n"+"="*70)
     param_group_summary = (
         df.pivot_table(
             index="param_group",
@@ -77,14 +77,19 @@ def summarize_empirical_coverage(file_path: str):
     print(param_group_summary)
 
     # --- Overall coverage by nominal level ---
-    print("\n"+"="*70+"\n=== ECP: Overall ===\n"+"="*70)
+    print("\n"+"="*70+"\n=== ECP: Overall \n"+"="*70)
     grand_summary = (
         df.groupby(["nominal"], as_index=False)
         .agg(overall_mean_coverage=("coverage", "mean"))
     )
     print(grand_summary.to_string(index=False, float_format=lambda x: f"{x:8.3f}"))
 
-    print("\n"+"="*70+"\n=== Summary ends here ===\n"+"="*70)
+    print("\n"+"="*70+"\n=== Computing time: Overall \n"+"="*70)
+    elapsed_time = df.groupby(["R", "T", "p", "q", "dist"])["elapsed_min"].mean().reset_index()
+    print(elapsed_time.to_string(index=False, float_format=lambda x: f"{x:8.3f}"))
+
+
+    print("\n"+"="*70+"\n=== Summary ends here \n"+"="*70)
 
     return {
         "summary_group_nominal": summary_group_nominal,
@@ -103,7 +108,7 @@ def main():
     print(f"Reading results from: {csv_path}")
 
     results = summarize_empirical_coverage(csv_path)
-    print(results)
+    # print(results)
 
 if __name__ == "__main__":
     main()
