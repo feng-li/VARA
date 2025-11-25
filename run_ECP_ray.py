@@ -275,12 +275,12 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(seed)
 
     R_list = [100, 200, 500, 1000]
-    p_list = [10, 20, 50]
-    q_list = [10, 20, 50]
+    p_list = [50]
+    q_list = [50]
     dist_list = ["normal", "t5"]
 
     # T_list = [50, 100, 200, 500, 1000]
-    T_list = [100]
+    T_list = [500]
     alpha_list = [0.1]    # for 90% and 95% coverage
 
     algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
@@ -373,4 +373,4 @@ if __name__ == "__main__":
         print(f"✔ Results appended for T={T}, alpha={alpha}")
 
     # --- Summary by T and nominal level ---
-    summarize_empirical_coverage(out_path)
+    summarize_empirical_coverage(out_path, latex=False)

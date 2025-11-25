@@ -3,8 +3,7 @@
 import sys
 import pandas as pd
 
-
-def summarize_empirical_coverage(file_path: str):
+def summarize_empirical_coverage(file_path: str, latex: bool):
     """
     Summarize empirical coverage results across all parameters, sample sizes (T),
     and nominal confidence levels.
@@ -83,10 +82,9 @@ def summarize_empirical_coverage(file_path: str):
     )
     print(param_ECP_summary.T.to_string())
 
-
     # --- Parameter group ---
     print("\n"+"="*70+"\n=== RMSE: Parameter group level \n"+"="*70)
-    param_group_summary = (
+    param_RMSE_summary = (
         df.pivot_table(
             index="param_group",
             columns=["dist", "R", "T", "p", "q"],
@@ -95,7 +93,23 @@ def summarize_empirical_coverage(file_path: str):
         )
         .round(3)
     )
-    print(param_group_summary.T.to_string())
+    print(param_RMSE_summary.T.to_string())
+
+    if latex:
+        param_ECP_summary.T.to_latex(
+            file_path + "_param_ECP_summary.tex",
+            index=True,
+            escape=False,
+            float_format=lambda x: f"{x:.3f}"
+        )
+
+        param_RMSE_summary.T.to_latex(
+            file_path + "_param_RMSE_summary.tex",
+            index=True,
+            escape=False,
+            float_format=lambda x: f"{x:.3f}"
+        )
+
 
     # --- Overall coverage by nominal level ---
     print("\n"+"="*70+"\n=== ECP: Overall \n"+"="*70)
@@ -125,7 +139,7 @@ def main():
     csv_path = sys.argv[1]
     print(f"Reading results from: {csv_path}")
 
-    results = summarize_empirical_coverage(csv_path)
+    results = summarize_empirical_coverage(csv_path, latex=True)
     # print(results)
 
 if __name__ == "__main__":
