@@ -131,12 +131,12 @@ def single_replication_ray(*args, **kwargs):
         print(f"[Ray worker error] {e}")
         theta_true = kwargs.get("theta_true", None)
         d = len(theta_true) if theta_true is not None else 1
-        return jnp.zeros(d, dtype=bool), jnp.full(d, jnp.nan), jnp.full(d, jnp.nan)
+        return jnp.zeros(d, dtype=bool), jnp.full(d, jnp.nan), jnp.full(d, jnp.nan), jnp.zeros(d, jnp.nan)
 
 # ===============================================================
 # === Main Monte Carlo driver ===================================
 # ===============================================================
-def empirical_coverage_rate(key, R, T, p, q, params_scale,
+def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
                             dist="normal", alpha=0.05,
                             algorithm="analytical_gradhess", USE_RAY=False):
     """
@@ -164,6 +164,15 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
     # === 2. Parallel execution with Ray or JAX =====================
     # ===============================================================
     subkeys = jax.random.split(key, R)
+    pkeys = jax.random.split(key, 5)
+    params_true = dict(
+        eta_a=params_dgp['eta_a'],
+        eta_b=params_dgp['eta_b'],
+        gamma_a=uniform(pkeys[1], (p,), minval=params_dgp['gamma_a']['minval'], maxval=params_dgp['gamma_a']['maxval']),
+        gamma_b=uniform(pkeys[2], (p,), minval=params_dgp['gamma_b']['minval'], maxval=params_dgp['gamma_b']['maxval']),
+        beta=uniform(pkeys[3], (p,), minval=params_dgp['beta']['minval'], maxval=params_dgp['beta']['maxval']),
+        sigma2=uniform(pkeys[4], (p,), minval=params_dgp['sigma2']['minval'], maxval=params_dgp['sigma2']['maxval'])
+    )
 
     # Submit tasks to Ray cluster/workers
     if USE_RAY:
@@ -189,9 +198,6 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
         results = [single_replication(
             subkeys[r], params_true, T, p, q, params_scale, dist, alpha, algorithm, update_idx)
                    for r in trange(R, desc="Monte Carlo replications", ncols=100)]
-
-
-
 
     inside, ci_length, theta_hat_all, status_all = zip(*results)
     inside = jnp.stack(inside)
@@ -242,8 +248,6 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
     print("\nRMSE (by parameter):")
     print(jnp.round(rmse, 4))
 
-    # ray.shutdown()  # Clean up Ray workers
-
     return coverage, avg_length, rmse, coverage_by_group, rmse_by_group
 
 
@@ -260,6 +264,7 @@ if __name__ == "__main__":
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
     # Settings
+    # USE_RAY = False
     USE_RAY = True
 
     # ===============================================================
@@ -270,11 +275,12 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(seed)
 
     R_list = [100, 200, 500, 1000]
-    p, q = 10, 10
+    p_list = [10, 20, 50]
+    q_list = [10, 20, 50]
     dist_list = ["normal", "t5"]
 
     # T_list = [50, 100, 200, 500, 1000]
-    T_list = [1000]
+    T_list = [100]
     alpha_list = [0.1]    # for 90% and 95% coverage
 
     algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
@@ -285,15 +291,13 @@ if __name__ == "__main__":
     # ===============================================================
     # === 2. True parameter vector from DGP =========================
     # ===============================================================
-    keys = jax.random.split(key, 10)
-    params_true = dict(
+    params_dgp = dict(
         eta_a=0.1,
         eta_b=0.2,
-        gamma_a=uniform(keys[1], (p,), minval=-0.2, maxval=0.2),
-        gamma_b=uniform(keys[2], (p,), minval=-0.2, maxval=0.2),
-        beta=uniform(keys[3], (p,), minval=-0.2, maxval=0.2),
-        sigma2=uniform(keys[4], (p,), minval=0.25, maxval=1.0),
-    )
+        gamma_a=dict(minval=-0.2, maxval=0.2),
+        gamma_b=dict(minval=-0.2, maxval=0.2),
+        beta=dict(minval=-0.2, maxval=0.2),
+        sigma2=dict(minval=0.25, maxval=1.0))
 
     # update_idx = [0, 1]
     update_idx = slice(None)  # Full updating
@@ -308,7 +312,8 @@ if __name__ == "__main__":
     # ===============================================================
     # Cartesian product of all (T, alpha) combinations
     header_written = False
-    for dist, R, T, alpha in itertools.product(dist_list, R_list, T_list, alpha_list):
+    for dist, R, T, p, q, alpha in itertools.product(
+            dist_list, R_list, T_list, p_list, q_list, alpha_list):
         print("\n" + "=" * 70 + f"Running Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
 
         # seed = random.randint(0, 10000)
@@ -320,8 +325,8 @@ if __name__ == "__main__":
 
         # Ray run simulation
         coverage, avg_len, rmse, cov_group, rmse_group = empirical_coverage_rate(
-            key, R=R, T=T, p=p, q=q, params_scale=params_scale, dist=dist, alpha=alpha,
-            algorithm=algorithm, USE_RAY=USE_RAY)
+            key, R=R, T=T, p=p, q=q, params_dgp=params_dgp, params_scale=params_scale,
+            dist=dist, alpha=alpha, algorithm=algorithm, USE_RAY=USE_RAY)
 
         # --- Record finish time ---
         finish_time = datetime.now()
