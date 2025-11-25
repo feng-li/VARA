@@ -314,7 +314,7 @@ if __name__ == "__main__":
     header_written = False
     for dist, R, T, p, q, alpha in itertools.product(
             dist_list, R_list, T_list, p_list, q_list, alpha_list):
-        print("\n" + "=" * 70 + f"Running Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
+        print("\n" + "=" * 70 + f"\nRunning Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
 
         # seed = random.randint(0, 10000)
 
