@@ -247,86 +247,11 @@ def empirical_coverage_rate(key, R, T, p, q, params_scale,
     return coverage, avg_length, rmse, coverage_by_group, rmse_by_group
 
 
-def summarize_empirical_coverage(file_path: str):
-    """
-    Summarize empirical coverage results across all parameters, sample sizes (T),
-    and nominal confidence levels.
-
-    Parameters
-    ----------
-    file_path : str
-        Path to the CSV file containing simulation results.
-        Expected columns: ["T", "nominal", "param", "coverage", "rmse", "avg_len"]
-
-    Returns
-    -------
-    dict
-        Dictionary with summary tables:
-        - summary_T_nominal
-        - param_summary
-        - grand_summary
-    """
-    # --- Load results ---
-    df = pd.read_csv(file_path)
-
-    # --- Convert numeric columns explicitly ---
-    numeric_cols = ["T", "nominal", "coverage", "rmse", "avg_len"]
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Drop rows with missing numeric values if any
-    df = df.dropna(subset=numeric_cols)
-
-    # --- Summary by T and nominal ---
-    summary_T_nominal = (
-        df.groupby(["T", "nominal"], as_index=False)
-        .agg(
-            mean_coverage=("coverage", "mean"),
-            std_coverage=("coverage", "std"),
-            mean_rmse=("rmse", "mean"),
-            mean_len=("avg_len", "mean")
-        )
-        .sort_values(["T", "nominal"])
-    )
-
-    print("\n=== Average Coverage, RMSE, and CI Length by T and Confidence Level ===")
-    print(summary_T_nominal.to_string(index=False, float_format=lambda x: f"{x:8.3f}"))
-
-    # --- Parameter-level coverage table ---
-    param_summary = (
-        df.pivot_table(
-            index="param",
-            columns=["T", "nominal"],
-            values="coverage",
-            aggfunc="mean"
-        )
-        .round(3)
-    )
-
-    print("\n=== Parameter-level Empirical Coverage (per T and Confidence Level) ===")
-    print(param_summary)
-
-    # --- Overall coverage by nominal level ---
-    grand_summary = (
-        df.groupby(["nominal"], as_index=False)
-        .agg(overall_mean_coverage=("coverage", "mean"))
-    )
-
-    print("\n=== Overall Average Coverage across all T and Parameters ===")
-    print(grand_summary.to_string(index=False, float_format=lambda x: f"{x:8.3f}"))
-
-    return {
-        "summary_T_nominal": summary_T_nominal,
-        "param_summary": param_summary,
-        "grand_summary": grand_summary
-    }
-
-
-
 if __name__ == "__main__":
     import itertools
     from datetime import datetime
-    import random
+
+    from summarize import summarize_empirical_coverage
 
     # ===============================================================
     # === 0. Parallelization     ====================================
@@ -344,7 +269,7 @@ if __name__ == "__main__":
     seed = 2025
     key = jax.random.PRNGKey(seed)
 
-    R = 1000
+    R_list = [100, 200, 500, 1000]
     p, q = 10, 10
     dist = "normal"
 
@@ -355,7 +280,7 @@ if __name__ == "__main__":
     algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
     # algorithm = "analytical_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
 
-    out_path = f"results_coverage_{datetime.now().strftime("%Y-%m-%d_%H.%M.%S")}.csv"
+    out_path = f"results_coverage_@{datetime.now().strftime("%Y-%m-%d_%H.%M.%S")}.csv"
 
     # ===============================================================
     # === 2. True parameter vector from DGP =========================
@@ -383,7 +308,7 @@ if __name__ == "__main__":
     # ===============================================================
     # Cartesian product of all (T, alpha) combinations
     header_written = False
-    for T, alpha in itertools.product(T_list, alpha_list):
+    for R, T, alpha in itertools.product(R_list, T_list, alpha_list):
         print("\n" + "=" * 70)
         print(f"Running Monte Carlo:  T={T},  nominal={(1-alpha):.2%}")
         print("=" * 70)
@@ -426,6 +351,7 @@ if __name__ == "__main__":
                 "T": T,
                 "alpha": alpha,
                 "nominal": 1 - alpha,
+                "param_group": name.split("[")[0],
                 "param": name,
                 "coverage": float(coverage[i]),
                 "rmse": float(rmse[i]),
