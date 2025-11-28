@@ -138,7 +138,8 @@ def single_replication_ray(*args, **kwargs):
 # ===============================================================
 def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
                             dist="normal", alpha=0.05,
-                            algorithm="analytical_gradhess", USE_RAY=False):
+                            algorithm="analytical_gradhess",
+                            USE_RAY=False, MAX_CPUS_PER_TASK=1):
     """
     Monte Carlo simulation to estimate empirical coverage probability,
     average CI length, and RMSE for QMLE-based confidence intervals.
@@ -178,10 +179,14 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     if USE_RAY:
         print("🔹 Running with Ray parallelization")
         print("JAX devices:", jax.devices())
+        print(f"\nNUM_CPUS_PER_TASK:  {MAX_CPUS_PER_TASK}\n")
 
         ray.init(ignore_reinit_error=True, include_dashboard=False)
+
+        # MODIFY THIS TO FIT THE SIMULATION INTO MEMORY
+
         futures = [
-            single_replication_ray.remote(
+            single_replication_ray.options(num_cpus=MAX_CPUS_PER_TASK).remote(
                 subkeys[r], params_true, T, p, q, params_scale, dist, alpha, algorithm, update_idx)
             for r in range(R)
         ]
@@ -274,13 +279,13 @@ if __name__ == "__main__":
     seed = 2025
     key = jax.random.PRNGKey(seed)
 
-    R_list = [100, 200, 500, 1000]
-    p_list = [50]
+    R_list = [1000]
+    p_list = [100, 200, 500, 1000]
     q_list = [50]
-    dist_list = ["normal", "t5"]
+    dist_list = ["normal"]
 
     # T_list = [50, 100, 200, 500, 1000]
-    T_list = [500]
+    T_list = [5000]
     alpha_list = [0.1]    # for 90% and 95% coverage
 
     algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
@@ -317,6 +322,7 @@ if __name__ == "__main__":
         print("\n" + "=" * 70 + f"\nRunning Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
 
         # seed = random.randint(0, 10000)
+        MAX_CPUS_PER_TASK = int(max(1, 2*jnp.sqrt(104 * p / max(p_list))))
 
         # --- Record start time ---
         start_time = datetime.now()
@@ -326,7 +332,8 @@ if __name__ == "__main__":
         # Ray run simulation
         coverage, avg_len, rmse, cov_group, rmse_group = empirical_coverage_rate(
             key, R=R, T=T, p=p, q=q, params_dgp=params_dgp, params_scale=params_scale,
-            dist=dist, alpha=alpha, algorithm=algorithm, USE_RAY=USE_RAY)
+            dist=dist, alpha=alpha, algorithm=algorithm,
+            USE_RAY=USE_RAY, MAX_CPUS_PER_TASK=MAX_CPUS_PER_TASK)
 
         # --- Record finish time ---
         finish_time = datetime.now()

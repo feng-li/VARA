@@ -143,7 +143,7 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
 # --------------------------------------------------------
 if __name__ == "__main__":
     # Example dimensions
-    T, p, q = 50, 4, 8
+    T, p, q = 10000, 5000, 50
     Y = jnp.ones((T, p))  # dummy time series data
     Z = jax.random.normal(jax.random.PRNGKey(0), (p, q))  # feature embeddings
 
@@ -163,11 +163,10 @@ if __name__ == "__main__":
     ll_val = loglik(theta0, Y, Z, params_scale)
     print("Log-likelihood:", ll_val)
 
-    # Gradient and Hessian
     grad_ll = grad(loglik)(theta0, Y, Z, params_scale)
-    hess_ll = hessian(loglik)(theta0, Y, Z, params_scale)
-
     print("Gradient shape:", grad_ll.shape)
     print(grad_ll)
-    print("Hessian shape:", hess_ll.shape)
-    print(hess_ll)
+
+    hess_ll = hessian(loglik)(theta0, Y, Z, params_scale)
+    # print("Hessian shape:", hess_ll.shape)
+    # print(hess_ll)

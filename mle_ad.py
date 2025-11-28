@@ -119,9 +119,19 @@ def mle_newton(Y, Z, theta_init, params_scale,
 
         # trust-region control
         step_norm = jnp.linalg.norm(step)
-        if step_norm > trust_radius:
-            step = step * (trust_radius / step_norm)
-            step_norm = trust_radius
+        step_ratio = trust_radius / (step_norm + 1e-12)
+        step = jax.lax.cond(
+            step_norm > trust_radius,
+            lambda _: step * step_ratio,
+            lambda _: step,
+            operand=None)
+
+        step_norm = jax.lax.cond(
+            step_norm > trust_radius,
+            lambda _: trust_radius,
+            lambda _: step_norm,
+            operand=None)
+
 
         old_ll = loglik_reparam(theta_full, Y, Z, params_scale, update_idx)
         theta_trial = theta + step
@@ -130,22 +140,57 @@ def mle_newton(Y, Z, theta_init, params_scale,
 
         predicted_gain = -(g.T @ step + 0.5 * step.T @ (H @ step))
         actual_gain = new_ll - old_ll
-        ratio = actual_gain / predicted_gain if predicted_gain > 0 else -jnp.inf
 
-        print(f"actual_gain: {actual_gain}")
+        ratio = jax.lax.cond(
+            predicted_gain > 0,
+            lambda _: actual_gain / predicted_gain,
+            lambda _: -jnp.inf,
+            operand=None)
+
+
+        # print("actual_gain:", float(actual_gain))
 
         # adjust trust radius
-        if ratio < accept_lower:
-            trust_radius *= shrink_factor
-        elif ratio > accept_upper and jnp.isclose(step_norm, trust_radius):
-            trust_radius = jnp.minimum(grow_factor * trust_radius, trust_radius_max)
+        # compute conditions
+        cond_shrink = ratio < accept_lower
+        cond_grow = jnp.logical_and(ratio > accept_upper,
+                                    jnp.isclose(step_norm, trust_radius))
+
+        # shrink or keep
+        trust_radius = jax.lax.cond(
+            cond_shrink,
+            lambda r: r * shrink_factor,
+            lambda r: r,
+            trust_radius)
+
+        # grow or keep
+        trust_radius = jax.lax.cond(
+            cond_grow,
+            lambda r: jnp.minimum(grow_factor * r, trust_radius_max),
+            lambda r: r,
+            trust_radius)
+
 
         # accept/reject
-        if ratio > 0:
-            theta = theta_trial
-            theta_full = theta_trial_full
+        accept = ratio > 0
+
+        theta = jax.lax.cond(
+            accept,
+            lambda _: theta_trial,
+            lambda _: theta,
+            operand=None)
+
+        theta_full = jax.lax.cond(
+            accept,
+            lambda _: theta_trial_full,
+            lambda _: theta_full,
+            operand=None)
+
+        # Python 控制流只处理小标量，不涉及 DeviceArray
+        if float(accept):
+            pass
         else:
-            print(f"Iter {it}: trust-region step rejected (ρ={ratio:.3f})")
+            # print("Iter", it, ": trust-region step rejected (ρ=", float(ratio), ")")
             trust_radius *= shrink_factor
 
             # Armijo fallback
@@ -158,7 +203,11 @@ def mle_newton(Y, Z, theta_init, params_scale,
                 theta_trial_full = theta_full.at[update_idx].set(theta_trial)
                 new_ll = loglik_reparam(theta_trial_full, Y, Z, params_scale, update_idx)
 
-                if (jnp.isfinite(new_ll) and new_ll >= old_ll + c1 * step_size * g.T @ step):
+                armijo_cond = jnp.logical_and(
+                    jnp.isfinite(new_ll),
+                    new_ll >= old_ll + c1 * step_size * (g.T @ step),
+                )
+                if bool(armijo_cond):
                     theta = theta_trial
                     theta_full = theta_trial_full
                     break
