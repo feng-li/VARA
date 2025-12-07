@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from cov import compute_sandwich_variance
 from mle_ad import mle_newton
+from yule_walker_ad import yule_walker
 # from mle_jaxopt import mle_bfgs # not maintained
 
 
@@ -51,8 +52,13 @@ def estimate(Y, Z, key, theta_init, params_scale, algorithm, update_idx=slice(No
         # print(theta_hat_reparam_update)
 
     elif algorithm == "bfgs":
-        theta_hat_reparam_update, grad_ll, hess_ll, res = mle_bfgs(
+        theta_hat_reparam_update, grad_ll, hess_ll, convergence = mle_bfgs(
             Y, Z, theta_init, params_scale=params_scale, algorithm="bfgs")
+
+    elif algorithm == "yule-walker":
+        theta_hat_reparam_update, grad_ll, hess_ll, convergence = yule_walker(
+            Y, Z, theta_init, params_scale=params_scale, update_idx=update_idx)
+
 
     else:
         raise Exception("No such algorithm implemented")
