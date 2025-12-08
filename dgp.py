@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 
 from loglik_attn import build_attention
 
-
 def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params_scale=dict(eta_a=1, eta_b=10)):
     """
     Simulate data from the VAR attention model.

@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from jax.random import uniform
 from tqdm import trange
 import ray
+import logging
 
 import pandas as pd
 
@@ -30,14 +31,12 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
     theta_true, param_slices = flatten_params(params_true, order)
 
-    # sigma2 reparameterisation
+    # sigma2 reparameterization
     sigma2_true = theta_true[2 + 3 * p : 2 + 4 * p]              # actual σ² values
     sigma2_tilde_true = jnp.log(jnp.expm1(sigma2_true))          # softplus inverse
     theta_true_reparam = jnp.concatenate(
         [theta_true[: 2 + 3 * p], sigma2_tilde_true]
     )
-
-    d = theta_true.shape[0]
 
     # Handle update_idx: if slice, use all parameters; otherwise convert to array
     if isinstance(update_idx, slice):
@@ -46,6 +45,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         update_idx_array = jnp.array(update_idx)
 
     # ---- Default "failure" outputs ----
+    d = theta_true.shape[0]
     last_inside = jnp.zeros(d, dtype=bool)
     last_ci_length = jnp.full(d, jnp.nan)
     last_theta_hat = jnp.full(d, jnp.nan)
@@ -110,7 +110,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         if status == 0:
             return inside, ci_length, theta_hat, status
         else:
-            print(f"{attempt} attempts failed to simulate proper data under this condition. Retrying.")
+            print(f"{attempt+1} attempts failed to simulate proper data under this condition. Retrying.")
 
 
     # If all attempts fail to reach status == 0, return last attempt (or NaNs)
@@ -123,7 +123,7 @@ single_replication_jit = jax.jit(single_replication,
 
 # Ray wrapper (wrap the same function)
 # @ray.remote(num_gpus=0.01)
-@ray.remote
+@ray.remote(num_cpus=1)
 def single_replication_ray(*args, **kwargs):
     try:
         return single_replication(*args, **kwargs)
@@ -156,7 +156,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     print(f"Distribution   : {dist}")
     print(f"Sample size    : {T}")
     print(f"Response dim p : {p}")
-    print(f"Feature dim q  : {q}")
+    print(f"Feature dim  q : {q}")
     print(f"Replications R : {R}")
     print(f"Random seed    : {seed}")
     print("=" * 70, "\n")
@@ -181,7 +181,9 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
         print("JAX devices:", jax.devices())
         print(f"\nNUM_CPUS_PER_TASK:  {MAX_CPUS_PER_TASK}\n")
 
-        ray.init(ignore_reinit_error=True, include_dashboard=False)
+        ray.init(ignore_reinit_error=True, include_dashboard=False,
+                 log_to_driver=False,
+                 logging_level=logging.ERROR)
 
         # MODIFY THIS TO FIT THE SIMULATION INTO MEMORY
 
@@ -280,15 +282,16 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(seed)
 
     R_list = [1000]
-    p_list = [100, 200, 500, 1000]
+    p_list = [100]
     q_list = [50]
     dist_list = ["normal"]
 
     # T_list = [50, 100, 200, 500, 1000]
-    T_list = [5000]
+    T_list = [1000, 2000, 5000, 8000, 10000]
     alpha_list = [0.1]    # for 90% and 95% coverage
 
-    algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
+    algorithm = "yule-walker"    # bfgs, analytical_gradhess, auto_gradhess, yule-walker
+    # algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
     # algorithm = "analytical_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
 
     out_path = f"results_coverage_@{datetime.now().strftime("%Y-%m-%d_%H.%M.%S")}.csv"
@@ -303,9 +306,6 @@ if __name__ == "__main__":
         gamma_b=dict(minval=-0.2, maxval=0.2),
         beta=dict(minval=-0.2, maxval=0.2),
         sigma2=dict(minval=0.25, maxval=1.0))
-
-    # update_idx = [0, 1]
-    update_idx = slice(None)  # Full updating
 
     params_scale = dict(
         eta_a=1,
@@ -322,7 +322,12 @@ if __name__ == "__main__":
         print("\n" + "=" * 70 + f"\nRunning Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
 
         # seed = random.randint(0, 10000)
-        MAX_CPUS_PER_TASK = int(max(1, 2*jnp.sqrt(104 * p / max(p_list))))
+        # MAX_CPUS_PER_TASK = int(max(1, 2*jnp.sqrt(104 * p / max(p_list)))) # Use this only when heavy Hessian is used.
+        MAX_CPUS_PER_TASK = 1
+
+        # update_idx = [0, 1]
+        update_idx = range(0, 3*p+2)
+        # update_idx = slice(None)  # Full updating
 
         # --- Record start time ---
         start_time = datetime.now()

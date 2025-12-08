@@ -186,7 +186,6 @@ def mle_newton(Y, Z, theta_init, params_scale,
             lambda _: theta_full,
             operand=None)
 
-        # Python 控制流只处理小标量，不涉及 DeviceArray
         if float(accept):
             pass
         else:
@@ -305,7 +304,10 @@ if __name__ == "__main__":
     theta_init = theta_init.at[update_idx].set(theta_init_update * (1 + 1 * jax.random.normal(key, theta_init_update.shape)))
 
     # Estimation
-    theta_hat_reparam, grad_ll, hess_ll, convergence = mle_newton(Y, Z, theta_init, params_scale, update_idx=update_idx, algorithm=algorithm)
+    theta_hat_reparam_short, grad_ll, hess_ll, convergence = mle_newton(Y, Z, theta_init, params_scale, update_idx=update_idx, algorithm=algorithm)
+
+    theta_hat_reparam = theta_true_reparam
+    theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_short)
 
     # Convert back to natural scale (with softplus)
     sigma2_tilde_hat = theta_hat_reparam[2+3*p:2+4*p]
@@ -359,3 +361,5 @@ if __name__ == "__main__":
 
     print("True theta:", theta_true_reparam)
     print("Estimated theta:", theta_hat_reparam)
+    # diff = jnp.stack([theta_true_reparam, theta_hat_reparam], axis=0)
+    # print("Diff:", diff)
