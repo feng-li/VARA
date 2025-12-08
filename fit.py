@@ -73,6 +73,8 @@ def estimate(Y, Z, key, theta_init, params_scale, algorithm, update_idx=slice(No
     theta_hat_reparam = theta_init
     theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_update)
 
+    # breakpoint()
+
     # Extract unconstrained variance parameter (σ̃²)
     sigma2_tilde = theta_hat_reparam[2 + 3 * p : 2 + 4 * p]
 
