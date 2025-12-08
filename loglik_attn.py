@@ -16,8 +16,8 @@ def build_attention(Z, eta, scale):
     scores = (Z @ Z.T) / jnp.sqrt(q)     # shape (p, p)
     scores = eta * scores
 
-    # Mask diagonal (no self-weighting) by replacing with -inf. This makes sure diag of W is zero.
-    mask = jnp.eye(p) * -1e12
+    # Mask diagonal (no or less self-weighting) by replacing with -inf. This makes sure diag of W is zero.
+    mask = jnp.eye(p) * -1e6
 
     scores = scores * scale + mask
 

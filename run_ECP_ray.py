@@ -101,16 +101,21 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         inside = (theta_true >= lower) & (theta_true <= upper)
         ci_length = upper - lower
 
-        status = int(convergence["status"])
-        # last_inside, last_ci_length, last_theta_hat, last_status = (
-        #     inside, ci_length, theta_hat, status
-        # )
+        # Extreme results checking. If the value is too far away from the 99% interval, indicating bad DGP
+        x_crit = jax.scipy.stats.norm.ppf(1 - 0.01 / 2.0)
+        x_idx = jnp.array([0, 1])
+        x_lower = theta_hat[x_idx] - x_crit * se[x_idx]
+        x_upper = theta_hat[x_idx] + x_crit * se[x_idx]
+        x_inside = (theta_true[x_idx] >= x_lower) & (theta_true[x_idx] <= x_upper)
 
-        # If converged, return immediately
-        if status == 0:
+        # Make sure optimization gives converging code.
+        status = int(convergence["status"])
+        # If converged and good optimization results, return immediately
+        if status == 0:  # and x_inside.all():
+            print(f"Successful for simulating proper data after {attempt+1} attempts.")
             return inside, ci_length, theta_hat, status
-        else:
-            print(f"{attempt+1} attempts failed to simulate proper data under this condition. Retrying.")
+        # else:
+            # print(f"{attempt+1} failed attempts to simulate proper data. Retrying.")
 
 
     # If all attempts fail to reach status == 0, return last attempt (or NaNs)
@@ -181,9 +186,11 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
         print("JAX devices:", jax.devices())
         print(f"\nNUM_CPUS_PER_TASK:  {MAX_CPUS_PER_TASK}\n")
 
-        ray.init(ignore_reinit_error=True, include_dashboard=False,
-                 log_to_driver=False,
-                 logging_level=logging.ERROR)
+        ray.init(ignore_reinit_error=True,
+                 include_dashboard=False,
+                 # log_to_driver=False,
+                 # logging_level=logging.ERROR
+                 )
 
         # MODIFY THIS TO FIT THE SIMULATION INTO MEMORY
 

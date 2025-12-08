@@ -5,6 +5,30 @@ import matplotlib.pyplot as plt
 
 from loglik_attn import build_attention
 
+
+def create_structured_features(key, p, q):
+    """
+    Create features with clear block structure for better identifiability.
+    """
+    Z = jax.random.normal(key, (p, q)) * 0.3
+
+    # Create 2-3 clear groups
+    n_groups = min(3, p // 2)
+    group_size = p // n_groups
+
+    for g in range(n_groups):
+        start_idx = g * group_size
+        end_idx = min((g + 1) * group_size, p)
+        feature_start = (g * q) // n_groups
+        feature_end = ((g + 1) * q) // n_groups
+
+        # Each group has high values in different feature dimensions
+        Z = Z.at[start_idx:end_idx, feature_start:feature_end].add(2.5)
+
+    # Normalize to unit norm
+    Z = Z / jnp.linalg.norm(Z, axis=1, keepdims=True)
+    return Z
+
 def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params_scale=dict(eta_a=1, eta_b=10)):
     """
     Simulate data from the VAR attention model.
@@ -21,10 +45,12 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
 
     # Step 1: Generate feature vectors Z ~ N(0, Σ_z) Use less-correlated features Z. Highly correlated Z makes the
     # attention mapping degenerate.
-    idx = jnp.arange(q)
-    Sigma_z = 0.1 ** jnp.abs(idx[:, None] - idx[None, :])
+    # idx = jnp.arange(q)
+    # Sigma_z = 0.25 ** jnp.abs(idx[:, None] - idx[None, :])
+    # Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
 
-    Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
+    # Create structured features
+    Z = create_structured_features(keys[0], p, q)
 
     # Step 2: Draw parameters
     eta_a = params["eta_a"]
@@ -42,7 +68,18 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
     # Step 4: Construct S, G
     S = jnp.eye(p) - jnp.diag(gamma_b) @ W_b
     G = jnp.diag(beta) + jnp.diag(gamma_a) @ W_a
-    S_inv = jnp.linalg.inv(S)
+
+    # Check invertibility and stationarity
+    try:
+        S_inv = jnp.linalg.inv(S)
+    except ValueError:
+        raise ValueError("S matrix is singular - reduce gamma_b or eta_b")
+
+    companion = S_inv @ G
+    max_eig = jnp.max(jnp.abs(jnp.linalg.eigvals(companion)))
+
+    if max_eig >= 0.99:
+        print(f"Warning: Process near non-stationary (max eig = {max_eig:.3f})")
 
 
     # Step 5: Random noise
