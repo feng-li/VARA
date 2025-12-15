@@ -45,12 +45,12 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
 
     # Step 1: Generate feature vectors Z ~ N(0, Σ_z) Use less-correlated features Z. Highly correlated Z makes the
     # attention mapping degenerate.
-    # idx = jnp.arange(q)
-    # Sigma_z = 0.25 ** jnp.abs(idx[:, None] - idx[None, :])
-    # Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
+    idx = jnp.arange(q)
+    Sigma_z = 0.9 ** jnp.abs(idx[:, None] - idx[None, :])
+    Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
 
     # Create structured features
-    Z = create_structured_features(keys[0], p, q)
+    # Z = create_structured_features(keys[0], p, q)
 
     # Step 2: Draw parameters
     eta_a = params["eta_a"]
@@ -81,7 +81,6 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
     if max_eig >= 0.99:
         print(f"Warning: Process near non-stationary (max eig = {max_eig:.3f})")
 
-
     # Step 5: Random noise
     if dist == "normal":
         eps_raw = normal(keys[5], (T, p))
@@ -103,9 +102,7 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
 
     params = dict(eta_a=eta_a, eta_b=eta_b, gamma_a=gamma_a, gamma_b=gamma_b, beta=beta, sigma2=sigma2)
 
-    # Add the attention checking.
-
-
+    # TODO: Add the attention checking.
     return Y, Z, W_a, W_b
 
 
@@ -179,7 +176,7 @@ if __name__ == "__main__":
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
     theta_tilde, _ = flatten_params(params_reparam, order)
 
-    print("Parameter vector θ̃ (reparameterized) length:", theta_tilde.shape[0])
+    print("Parameter vector θ (reparameterized) length:", theta_tilde.shape[0])
     print("First few σ̃²:", sigma2_tilde[:5])
 
     # ---------- Visualization ----------

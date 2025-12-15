@@ -345,9 +345,9 @@ if __name__ == "__main__":
         ax.axvline(theta_true_reparam[idx], color="red", linestyle="--", linewidth=2, label="True value")
         ax.axvline(theta_hat_reparam[idx], color="blue", linestyle="-.", linewidth=2, label="MLE estimate")
         ax.legend()
-        ax.set_xlabel(f"θ̃[{idx}] value")
+        ax.set_xlabel(f"θ[{idx}] value")
         ax.set_ylabel("Log-likelihood")
-        ax.set_title(f"Likelihood Profile for θ̃[{idx}]")
+        ax.set_title(f"Likelihood Profile for θ[{idx}]")
         ax.grid(True)
 
     # hide unused subplots

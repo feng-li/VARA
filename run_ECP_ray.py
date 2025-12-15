@@ -66,7 +66,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         # 2. Build initial values (perturb true values on update_idx)
         theta_init = theta_true_reparam
         perturb_scales = {"eta_a": 0.3,
-                          "eta_b": 0.3,
+                          "eta_b": 0.05,
                           "gamma_a": 0.8,
                           "gamma_b": 0.8,
                           "beta": 0.2,
@@ -154,12 +154,10 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     # ===============================================================
     # === 1. Print DGP setup summary ================================
     # ===============================================================
-    print("=" * 70)
-    print("QMLE Empirical Coverage Simulation with RMSE (Ray parallelized)")
-    print("=" * 70)
+    print("\n" + "=" * 70 + "\nEmpirical Simulation Setup\n" + "=" * 70)
     print(f"Algorithm      : {algorithm}")
     print(f"Distribution   : {dist}")
-    print(f"Sample size    : {T}")
+    print(f"Sample size  T : {T}")
     print(f"Response dim p : {p}")
     print(f"Feature dim  q : {q}")
     print(f"Replications R : {R}")
@@ -288,13 +286,14 @@ if __name__ == "__main__":
     seed = 2025
     key = jax.random.PRNGKey(seed)
 
-    R_list = [1000]
-    p_list = [100]
+    R_list = [500]
+    p_list = [300, 400, 500]
     q_list = [50]
     dist_list = ["normal"]
 
     # T_list = [50, 100, 200, 500, 1000]
-    T_list = [1000, 2000, 5000, 8000, 10000]
+    # T_list = [200]
+    T_list = [200]
     alpha_list = [0.1]    # for 90% and 95% coverage
 
     algorithm = "yule-walker"    # bfgs, analytical_gradhess, auto_gradhess, yule-walker
@@ -307,7 +306,7 @@ if __name__ == "__main__":
     # === 2. True parameter vector from DGP =========================
     # ===============================================================
     params_dgp = dict(
-        eta_a=0.1,
+        eta_a=0.2,
         eta_b=0.2,
         gamma_a=dict(minval=-0.2, maxval=0.2),
         gamma_b=dict(minval=-0.2, maxval=0.2),
@@ -329,11 +328,11 @@ if __name__ == "__main__":
         print("\n" + "=" * 70 + f"\nRunning Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
 
         # seed = random.randint(0, 10000)
-        # MAX_CPUS_PER_TASK = int(max(1, 2*jnp.sqrt(104 * p / max(p_list)))) # Use this only when heavy Hessian is used.
-        MAX_CPUS_PER_TASK = 1
+        MAX_CPUS_PER_TASK = int(max(1, 2*jnp.sqrt(104 * p / max(p_list)))) # Use this only when heavy Hessian is used.
+        # MAX_CPUS_PER_TASK = 2
 
-        # update_idx = [0, 1]
-        update_idx = range(0, 3*p+2)
+        update_idx = [0, 1]
+        # update_idx = range(0, 3*p+2)
         # update_idx = slice(None)  # Full updating
 
         # --- Record start time ---
