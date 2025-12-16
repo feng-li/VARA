@@ -1,6 +1,5 @@
 import jax
 import jax.numpy as jnp
-from jax.numpy.linalg import inv
 from jax.scipy.stats import norm
 
 from hess import compute_Wa_Wb_dots
@@ -97,21 +96,39 @@ def Gamma0_stationary_with_lyapunov_doubling(
     Gamma0 : (p, p) array
         Stationary covariance matrix
     """
-
-    # Inverse of S
-    Sinv = jnp.linalg.inv(S)
-
-    # Transition matrix
-    A = Sinv @ G
-
-    # Innovation covariance for Lyapunov equation
-    Q = Sinv @ Sigma_e @ Sinv.T
+    A = jnp.linalg.solve(S, G)
+    Q = jnp.linalg.solve(S, Sigma_e)
+    Q = jnp.linalg.solve(S, Q.T).T   # left + right solve => S^{-1} Σ_e S^{-T}
 
     # Solve Γ₀ = A Γ₀ Aᵀ + Q
     Gamma0 = lyapunov_doubling(A, Q, max_iter=max_iter, tol=tol)
 
     return Gamma0
 
+
+def ldiag_mul(gamma, X):
+    """
+    Compute diag(gamma) @ X without forming diag(gamma).
+
+    Parameters
+    ----------
+    gamma : (p,) array
+        Diagonal entries.
+    X : (p, q) array
+        Matrix to be left-multiplied.
+
+    Returns
+    -------
+    (p, q) array
+        diag(gamma) @ X
+    """
+    return gamma[:, None] * X
+
+def rsolve_S(S, M):
+    """
+    Compute M @ S^{-1} without forming inverse.
+    """
+    return jnp.linalg.solve(S.T, M.T).T
 
 # ===============================================================
 # === Assemble analytical V =====================================
@@ -127,66 +144,102 @@ def assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
     d = 4 * p + 2
     V = jnp.zeros((d, d))
 
-    S = jnp.eye(Wb.shape[0]) - jnp.diag(gamma_b) @ Wb
-    Sinv = jnp.linalg.inv(S)
+    S = jnp.eye(Wb.shape[0]) - ldiag_mul(gamma_b, Wb)
+    # Sinv = jnp.linalg.inv(S)
 
-    Sigma_inv = jnp.diag(1.0 / sigma2)  # explicit diag for clarity
+    gamma_b_x_Wb_dot = ldiag_mul(gamma_b, Wb_dot)
+    gamma_a_x_Wa_dot = ldiag_mul(gamma_a, Wa_dot)
+
+
+    # Sigma_inv = jnp.diag(1.0 / sigma2)  # explicit diag for clarity
+    sigma2_inv = 1.0 / sigma2
 
     # --- Diagonal blocks ---
-    V_eta_a_eta_a = T * jnp.trace(
-        (jnp.diag(gamma_a) @ Wa_dot).T @ Sigma_inv @
-        (jnp.diag(gamma_a) @ Wa_dot) @ Gamma0
+    # V_eta_a_eta_a0 = T * jnp.trace(
+    #     gamma_a_x_Wa_dot.T @ Sigma_inv @
+    #     gamma_a_x_Wa_dot @ Gamma0
+    # )
+
+    SA = (1.0 / sigma2)[:, None] * gamma_a_x_Wa_dot     # Σ⁻¹ A
+    AG = gamma_a_x_Wa_dot @ Gamma0                      # A Γ₀
+    V_eta_a_eta_a = T * jnp.sum(SA * AG)
+
+    WbS   = rsolve_S(S, Wb)
+    WbS_d = rsolve_S(S, Wb_dot)
+    GbS   = rsolve_S(S, gamma_b_x_Wb_dot)   # or X
+
+    # V_eta_b_eta_b0 = T * jnp.trace(gamma_b_x_Wb_dot.T @ Sigma_inv @ gamma_b_x_Wb_dot @ Gamma0 +
+    #                               (rsolve_S(S, gamma_b_x_Wb_dot)) @ (rsolve_S(S, gamma_b_x_Wb_dot)) +
+    #                               (kappa4 - 3.0) * (rsolve_S(S, gamma_b_x_Wb_dot)) * (rsolve_S(S, gamma_b_x_Wb_dot)))
+
+    V_eta_b_eta_b = T * (
+        # term1 = tr(gamma_b_x_Wb_dotᵀ Σ⁻¹ gamma_b_x_Wb_dot Γ0)
+        jnp.einsum(
+            "i,ik,kj,ij->",
+            1.0 / sigma2,              # Σ^{-1} diagonal
+            gamma_b_x_Wb_dot,
+            Gamma0,
+            gamma_b_x_Wb_dot
+        ) +
+        # term2 = tr(X @ X) = sum_{i,j} X_ij * X_ji
+        jnp.einsum("ij,ji->", GbS, GbS) +
+        # term3 = (kappa4-3) * tr(X * X) = (kappa4-3) * sum_i X_ii^2
+        (kappa4 - 3.0) * jnp.einsum("ii->", GbS * GbS)
     )
 
-    V_eta_b_eta_b = T * jnp.trace((jnp.diag(gamma_b) @ Wb_dot).T @ Sigma_inv @ (jnp.diag(gamma_b) @ Wb_dot) @ Gamma0 +
-                                  (jnp.diag(gamma_b) @ Wb_dot @ Sinv) @ (jnp.diag(gamma_b) @ Wb_dot @ Sinv) +
-                                  (kappa4 - 3.0) * (jnp.diag(gamma_b) @ Wb_dot @ Sinv) * (jnp.diag(gamma_b) @ Wb_dot @ Sinv))
-
-
-    V_gamma_a_gamma_a = T * (Sigma_inv * (Wa @ Gamma0 @ Wa.T))
+    V_gamma_a_gamma_a = T * (sigma2_inv[:, None] * (Wa @ Gamma0 @ Wa.T))
 
     V_gamma_b_gamma_b = T * (
-        Sigma_inv * (Wb @ Gamma0 @ Wb.T) +
-        (Wb @ Sinv) * (Wb @ Sinv).T +
-        (kappa4 - 3.0) * jnp.eye(p) * (Wb @ Sinv) * (Wb @ Sinv))
+        sigma2_inv[:, None] * (Wb @ Gamma0 @ Wb.T) +
+        (WbS) * (WbS).T +
+        (kappa4 - 3.0) * jnp.eye(p) * (WbS) * (WbS))
 
-    V_beta_beta = T * (Sigma_inv * Gamma0)
+    # V_beta_beta = T * (Sigma_inv * Gamma0)
+    V_beta_beta = T * (sigma2_inv[:, None] * Gamma0)
     V_sigma_sigma = T * (kappa4 - 1.0) / 4.0 * jnp.diag(1.0 / sigma2**2)
 
     # --- Cross-covariance examples ---
-    V_eta_b_eta_a = T * jnp.trace(
-        Wa_dot.T @ jnp.diag(gamma_a) @ Sigma_inv @
-        jnp.diag(gamma_b) @ Wb_dot @ Sinv @ G @ Gamma0
+    # V_eta_b_eta_a0 = T * jnp.trace(
+    #     Wa_dot.T @ jnp.diag(gamma_a) @ Sigma_inv @
+    #     rsolve_S(S, gamma_b_x_Wb_dot) @ G @ Gamma0
+    # )
+
+    V_eta_b_eta_a = T * jnp.einsum(
+        "i,ij,ij->",
+        gamma_a / sigma2,
+        Wa_dot,
+        GbS @ G @ Gamma0
     )
+
 
     V_gamma_a_eta_a = T * (gamma_a * (1.0 / sigma2) * jnp.diag(Wa @ Gamma0 @ Wa_dot.T))
     V_gamma_b_eta_a = T * (gamma_a * (1.0 / sigma2) *
-                           jnp.diag((Wb @ Sinv @ G) @ Gamma0 @ Wa_dot.T))
+                           jnp.diag((WbS @ G) @ Gamma0 @ Wa_dot.T))
     V_beta_eta_a = T * (gamma_a * (1.0 / sigma2) * jnp.diag(Gamma0 @ Wa_dot.T))
 
     V_sigma_eta_a = jnp.zeros((p, ))
 
     V_gamma_a_eta_b = T * (gamma_b * (1.0 / sigma2) *
-                           jnp.diag(Wa_dot @ Gamma0 @ (Wb_dot @ Sinv @ G).T))
+                           jnp.diag(Wa_dot @ Gamma0 @ (WbS_d @ G).T))
 
     V_gamma_b_eta_b = T * (
         gamma_b * (1.0 / sigma2) * jnp.diag(Wb @ Gamma0 @ Wb_dot) +
-        jnp.diag(Wb @ Sinv @ jnp.diag(gamma_b) @ Wb_dot @ Sinv) +
-        (kappa4 - 3.0) * gamma_b * jnp.diag(Wb @ Sinv) * jnp.diag(Wb_dot @ Sinv))
+        jnp.diag(WbS @ rsolve_S(S, gamma_b_x_Wb_dot)) +
+        (kappa4 - 3.0) * gamma_b * jnp.diag(WbS) * jnp.diag(WbS_d))
 
 
     V_beta_eta_b = T * (gamma_b * (1.0 / sigma2) *
-                        jnp.diag(Gamma0 @ (Wb_dot @ Sinv @ G).T))
+                        jnp.diag(Gamma0 @ (WbS_d @ G).T))
 
     V_sigma_eta_b = T * (kappa4 - 1.0) / 2.0 * (
-        (1.0 / sigma2) * jnp.diag(Wb_dot @ Sinv))
+        (1.0 / sigma2) * jnp.diag(WbS_d))
 
-    V_gamma_b_gamma_a = T * (Sigma_inv * ((Wb @ Sinv @ G) @ Gamma0 @ Wa.T))
-    V_beta_gamma_a = T * (Sigma_inv * (Gamma0 @ Wa.T))
+    V_gamma_b_gamma_a = T * sigma2_inv[:, None] * ((WbS @ G) @ Gamma0 @ Wa.T)
+    V_beta_gamma_a = T * sigma2_inv[:, None] * (Gamma0 @ Wa.T)
 
     V_sigma_gamma_a = jnp.zeros((p, p))
-    V_beta_gamma_b = T * (Sigma_inv * (Gamma0 @ (Wb @ Sinv @ G).T))
-    V_sigma_gamma_b = T * (kappa4 - 1.0) / 2.0 * (Sigma_inv * (Wb @ Sinv))
+    V_beta_gamma_b = T * (1.0 / sigma2)[:, None] * (Gamma0 @ (WbS @ G).T)
+    V_sigma_gamma_b = T * (kappa4 - 1.0) / 2.0 * (sigma2_inv[:, None] * WbS)
 
     V_sigma_beta    = jnp.zeros((p, p))
 
@@ -263,42 +316,56 @@ def assemble_H_full(Wa, Wb, Wa_dot, Wb_dot,
                         sigma2, T, kappa4)
     p = Wa.shape[0]
 
-    S = jnp.eye(Wb.shape[0]) - jnp.diag(gamma_b) @ Wb
-    Sinv = jnp.linalg.inv(S)
+    S = jnp.eye(Wb.shape[0]) - ldiag_mul(gamma_b, Wb)
+    # Sinv = jnp.linalg.inv(S)
+    WbS   = rsolve_S(S, Wb)
+    WbS_d = rsolve_S(S, Wb_dot)
 
-    Sigma_inv = jnp.diag(1.0 / sigma2)  # explicit diag
+    gamma_b_x_Wb_dot = ldiag_mul(gamma_b, Wb_dot)
+
+    # Sigma_inv = jnp.diag(1.0 / sigma2)  # explicit diag
     sigma_e_inv2 = 1.0 / sigma2
     sigma_e_inv4 = 1.0 / (sigma2 ** 2)
 
-    Delta_eta_b_eta_b = (kappa4 - 3) * jnp.trace(
-        (jnp.diag(gamma_b) @ Wb_dot @ Sinv) *
-        (jnp.diag(gamma_b) @ Wb_dot @ Sinv)
-    )
+    # Delta_eta_b_eta_b0 = (kappa4 - 3) * jnp.trace(
+    #     (rsolve_S(S, gamma_b_x_Wb_dot)) *
+    #     (rsolve_S(S, gamma_b_x_Wb_dot))
+    # )
 
-    Delta_gamma_b_gamma_b = (kappa4 - 3) * jnp.eye(p) * (Wb @ Sinv) * (Wb @ Sinv)
+    X = rsolve_S(S, gamma_b_x_Wb_dot)
+    Delta_eta_b_eta_b = (kappa4 - 3.0) * jnp.sum(jnp.square(jnp.diagonal(X)))
+
+    # breakpoint()
+
+    Delta_gamma_b_gamma_b = (kappa4 - 3) * jnp.eye(p) * (WbS) * (WbS)
 
     Delta_sigma_sigma = (kappa4 - 3) / 4.0 * jnp.diag(sigma_e_inv4)
 
     Delta_gamma_b_eta_b = (kappa4 - 3) * (
-        gamma_b * jnp.diag(Wb @ Sinv) * jnp.diag(Wb_dot @ Sinv)
+        gamma_b * jnp.diag(WbS) * jnp.diag(WbS_d)
     )
 
     Delta_sigma_eta_b = (kappa4 - 3) / 2.0 * (
-        gamma_b * sigma_e_inv2 * jnp.diag(Wb_dot @ Sinv)
+        gamma_b * sigma_e_inv2 * jnp.diag(WbS_d)
     )
 
-    Delta_sigma_gamma_b = (kappa4 - 3) / 2.0 * (Sigma_inv * (Wb @ Sinv))
+    Delta_sigma_gamma_b = (kappa4 - 3) / 2.0 * sigma_e_inv2[:, None] * WbS
 
     H = V.copy()
     H = H.at[1, 1].add(-Delta_eta_b_eta_b)
     H = H.at[2+p:2+2*p, 2+p:2+2*p].add(-Delta_gamma_b_gamma_b)
     H = H.at[2+3*p:2+4*p, 2+3*p:2+4*p].add(-Delta_sigma_sigma)
 
-    for i in range(p):
-        H = H.at[2+p+i, 1].add(-Delta_gamma_b_eta_b[i])
-        H = H.at[1, 2+p+i].add(-Delta_gamma_b_eta_b[i])
-        H = H.at[2+3*p+i, 1].add(-Delta_sigma_eta_b[i])
-        H = H.at[1, 2+3*p+i].add(-Delta_sigma_eta_b[i])
+    # for i in range(p):
+    #     H = H.at[2+p+i, 1].add(-Delta_gamma_b_eta_b[i])
+    #     H = H.at[1, 2+p+i].add(-Delta_gamma_b_eta_b[i])
+    #     H = H.at[2+3*p+i, 1].add(-Delta_sigma_eta_b[i])
+    #     H = H.at[1, 2+3*p+i].add(-Delta_sigma_eta_b[i])
+    idx = jnp.arange(p)
+    H = H.at[2+p+idx, 1].add(-Delta_gamma_b_eta_b)
+    H = H.at[1, 2+p+idx].add(-Delta_gamma_b_eta_b)
+    H = H.at[2+3*p+idx, 1].add(-Delta_sigma_eta_b)
+    H = H.at[1, 2+3*p+idx].add(-Delta_sigma_eta_b)
 
     H = H.at[2+3*p:2+4*p, 2+p:2+2*p].add(-Delta_sigma_gamma_b)
     H = H.at[2+p:2+2*p, 2+3*p:2+4*p].add(-Delta_sigma_gamma_b.T)
@@ -315,15 +382,19 @@ def compute_Avar(H, V, eps=1e-8):
     V = (V + V.T) / 2
 
     eigvals_H = jnp.linalg.eigvalsh(H)
-    min_eig_H = float(eigvals_H.min())
+    # min_eig_H = float(eigvals_H.min())
+    min_eig_H = jnp.min(eigvals_H)
 
     if min_eig_H <= 0:
         H_reg = H + eps * jnp.eye(H.shape[0])
     else:
         H_reg = H
 
-    H_inv = jnp.linalg.inv(H_reg)
-    Avar = H_inv @ V @ H_inv
+    # H_inv = jnp.linalg.inv(H_reg)
+    # Avar = H_inv @ V @ H_inv
+    HinvV = jnp.linalg.solve(H_reg, V)
+    Avar = jnp.linalg.solve(H_reg, HinvV.T).T
+
     Avar = (Avar + Avar.T) / 2
 
     # eigvals_A = jnp.linalg.eigvalsh(Avar)
@@ -353,12 +424,12 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     Wa, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale["eta_a"])
     Wb, Wb_dot, _ = compute_Wa_Wb_dots(Z, eta_b, params_scale["eta_b"])
 
-    S = jnp.eye(p) - jnp.diag(gamma_b) @ Wb
-    G = jnp.diag(beta) + jnp.diag(gamma_a) @ Wa
+    S = jnp.eye(p) - ldiag_mul(gamma_b, Wb)
+    G = jnp.diag(beta) + ldiag_mul(gamma_a, Wa)
 
     # Gamma0 = Gamma0_stationary(S, G, Sigma_e) # explicit form, slow
     Gamma0 = Gamma0_stationary_with_lyapunov_doubling(S, G, Sigma_e)
-    breakpoint()
+    # breakpoint()
 
     V = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
                         gamma_a, gamma_b,
@@ -386,10 +457,10 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 # ------------------------------------------------------------
 # Example
 # ------------------------------------------------------------
+
+
 if __name__ == "__main__":
-
     import random
-
     from dgp import simulate_VAR_attention
     from dgp import flatten_params
     from yule_walker_ad import yule_walker
@@ -432,7 +503,7 @@ if __name__ == "__main__":
     # --- Flatten parameters into reparameterized vector θ̃ ---
     order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
     theta_true_reparam, _ = flatten_params(params_reparam, order)
-    print("θ̃ length:", theta_true_reparam.size)
+    print("θ length:", theta_true_reparam.size)
 
     # Only initialize update_idx related initial values
     if isinstance(update_idx, slice):
