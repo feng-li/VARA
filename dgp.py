@@ -1,7 +1,14 @@
 import jax
 import jax.numpy as jnp
+import jax.lax as lax
 from jax.random import multivariate_normal, normal
 import matplotlib.pyplot as plt
+import psutil
+import os
+import gc
+
+def mem_gb():
+    return psutil.Process(os.getpid()).memory_info().rss / 1024**3
 
 from loglik_attn import build_attention
 
@@ -41,6 +48,8 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
 
     Returns: (Y, params, Z, W_a, W_b)
     """
+    mem_start = mem_gb()
+
     keys = jax.random.split(key, 7)
 
     # Step 1: Generate feature vectors Z ~ N(0, Σ_z) Use less-correlated features Z. Highly correlated Z makes the
@@ -66,16 +75,14 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
     W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     # Step 4: Construct S, G
-    S = jnp.eye(p) - jnp.diag(gamma_b) @ W_b
-    G = jnp.diag(beta) + jnp.diag(gamma_a) @ W_a
+    # S = jnp.eye(p) - jnp.diag(gamma_b) @ W_b
+    # G = jnp.diag(beta) + jnp.diag(gamma_a) @ W_a
+    S = jnp.eye(p) - (gamma_b[:, None] * W_b)
+    G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
 
-    # Check invertibility and stationarity
-    try:
-        S_inv = jnp.linalg.inv(S)
-    except ValueError:
-        raise ValueError("S matrix is singular - reduce gamma_b or eta_b")
+    # companion = S_inv @ G
+    companion = jnp.linalg.solve(S, G)
 
-    companion = S_inv @ G
     max_eig = jnp.max(jnp.abs(jnp.linalg.eigvals(companion)))
 
     if max_eig >= 0.99:
@@ -96,13 +103,24 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
     # Scale to Σ_e = diag(sigma2)
     eps = eps_raw * jnp.sqrt(sigma2)
 
-    Y = jnp.zeros((T, p))
-    for t in range(1, T):
-        Y = Y.at[t].set(S_inv @ (G @ Y[t - 1] + eps[t]))
+    # Y = jnp.zeros((T, p))
+    # for t in range(1, T):
+    #     Y = Y.at[t].set(jnp.linalg.solve(S, (G @ Y[t - 1] + eps[t])))
+    def step(y_prev, eps_t):
+        y_t = jnp.linalg.solve(S, (G @ y_prev + eps_t))
+        return y_t, y_t
+
+    y0 = jnp.zeros((p,))
+    _, Ys = lax.scan(step, y0, eps[1:])   # returns (T-1, p)
+    Y = jnp.vstack([y0[None, :], Ys])
+
 
     params = dict(eta_a=eta_a, eta_b=eta_b, gamma_a=gamma_a, gamma_b=gamma_b, beta=beta, sigma2=sigma2)
 
     # TODO: Add the attention checking.
+    mem_used = mem_gb() - mem_start
+    print(f"DGP RAM used: {mem_used:.3f} GB")
+
     return Y, Z, W_a, W_b
 
 
@@ -149,10 +167,10 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(0)
 
     # Example parameter dictionary (in natural scale)
-    p, q, T = 5, 5, 200
+    p, q, T = 300, 50, 200
     params = dict(
         eta_a=0.5,
-        eta_b=1.0,
+        eta_b=0.5,
         gamma_a=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
         gamma_b=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
         beta=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
@@ -161,7 +179,7 @@ if __name__ == "__main__":
 
     params_scale = dict(
         eta_a=1,
-        eta_b=10   )
+        eta_b=1)
 
     # Simulate dataset
     Y, Z, W_a, W_b = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal", params_scale=params_scale)
