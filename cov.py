@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 from jax.numpy.linalg import inv
 from jax.scipy.stats import norm
@@ -24,6 +25,8 @@ def Gamma0_stationary(S, G, Sigma_e):
     """
     Solve for the stationary covariance matrix Γ₀ of Yₜ in:
         Yₜ = S⁻¹ G Yₜ₋₁ + S⁻¹ εₜ ,   εₜ ∼ (0, Σₑ).
+
+    Note that this function is very memory consuming.
     """
     p = S.shape[0]
     Sinv = inv(S)
@@ -33,6 +36,81 @@ def Gamma0_stationary(S, G, Sigma_e):
     rhs = vec(Sinv @ Sigma_e @ Sinv.T)
     vecGamma = jnp.linalg.solve(I - kron_term, rhs)
     return unvec(vecGamma, (p, p))
+
+
+def lyapunov_doubling(A, Q, max_iter=30, tol=1e-6):
+    """
+    Solve Γ = A Γ Aᵀ + Q using the doubling (Smith) iteration.
+    JAX-compatible, O(p²) memory.
+    """
+    Ak = A
+    Qk = Q
+
+    for _ in range(max_iter):
+        Q_next = Qk + Ak @ Qk @ Ak.T
+        Ak = Ak @ Ak
+
+        if jnp.linalg.norm(Ak) < tol:
+            Qk = Q_next
+            break
+
+        Qk = Q_next
+
+    return Qk
+
+
+def Gamma0_stationary_with_lyapunov_doubling(
+    S,
+    G,
+    Sigma_e,
+    max_iter=30,
+    tol=1e-6,
+):
+    """
+    Compute stationary covariance Γ₀ using Lyapunov doubling.
+
+    Model:
+        Y_t = S^{-1} G Y_{t-1} + S^{-1} ε_t,
+        ε_t ~ (0, Σ_e)
+
+    Γ₀ solves:
+        Γ₀ = A Γ₀ Aᵀ + Q
+    where:
+        A = S^{-1} G
+        Q = S^{-1} Σ_e S^{-T}
+
+    Parameters
+    ----------
+    S : (p, p) array
+        Structural matrix (I - diag(gamma_b) @ Wb)
+    G : (p, p) array
+        Autoregressive matrix
+    Sigma_e : (p, p) array
+        Innovation covariance (typically diag(sigma2))
+    max_iter : int
+        Maximum doubling iterations
+    tol : float
+        Convergence tolerance for ||A_k||
+
+    Returns
+    -------
+    Gamma0 : (p, p) array
+        Stationary covariance matrix
+    """
+
+    # Inverse of S
+    Sinv = jnp.linalg.inv(S)
+
+    # Transition matrix
+    A = Sinv @ G
+
+    # Innovation covariance for Lyapunov equation
+    Q = Sinv @ Sigma_e @ Sinv.T
+
+    # Solve Γ₀ = A Γ₀ Aᵀ + Q
+    Gamma0 = lyapunov_doubling(A, Q, max_iter=max_iter, tol=tol)
+
+    return Gamma0
 
 
 # ===============================================================
@@ -278,8 +356,10 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     S = jnp.eye(p) - jnp.diag(gamma_b) @ Wb
     G = jnp.diag(beta) + jnp.diag(gamma_a) @ Wa
 
+    # Gamma0 = Gamma0_stationary(S, G, Sigma_e) # explicit form, slow
+    Gamma0 = Gamma0_stationary_with_lyapunov_doubling(S, G, Sigma_e)
+    breakpoint()
 
-    Gamma0 = Gamma0_stationary(S, G, Sigma_e)
     V = assemble_V_full(Wa, Wb, Wa_dot, Wb_dot,
                         gamma_a, gamma_b,
                         Sigma_e, G, Gamma0,
@@ -302,3 +382,79 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     # print(se)
 
     return dict(theta=theta_hat, Avar=Avar_theta, se=se, lower=lower, upper=upper)
+
+# ------------------------------------------------------------
+# Example
+# ------------------------------------------------------------
+if __name__ == "__main__":
+
+    import random
+
+    from dgp import simulate_VAR_attention
+    from dgp import flatten_params
+    from yule_walker_ad import yule_walker
+
+    # jax.config.update("jax_enable_x64", True)
+    jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
+
+    # --- Simulation settings ---
+    key = jax.random.PRNGKey(random.randint(0, 10000))
+    T, p, q = 1000, 3, 3
+
+    # --- True parameters (in natural scale) ---
+    params_true = dict(
+        eta_a=0.2,
+        eta_b=0.2,
+        gamma_a=jnp.linspace(-0.15, 0.15, p),
+        gamma_b=jnp.linspace(-0.20, 0.20, p),
+        beta=jnp.linspace(-0.20, 0.20, p),
+        sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
+    )
+
+    params_scale = dict(
+        eta_a=1,
+        eta_b=1)
+
+    algorithm = "auto_gradhess"
+    # algorithm = "analytical_gradhess"
+    # update_idx = [1]
+    update_idx = range(0, 3*p+2)
+    # update_idx = slice(None)
+    # --- Simulate data ---
+    Y, Z, W_a, W_b = simulate_VAR_attention(key, params_true, T=T, p=p, q=q, dist="normal")
+    print("Simulated Y shape:", Y.shape)
+
+    # --- Convert σ² → σ̃² (softplus inverse) ---
+    sigma2_tilde_true = jnp.log(jnp.expm1(params_true["sigma2"]))
+    params_reparam = params_true.copy()
+    params_reparam["sigma2"] = sigma2_tilde_true
+
+    # --- Flatten parameters into reparameterized vector θ̃ ---
+    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    theta_true_reparam, _ = flatten_params(params_reparam, order)
+    print("θ̃ length:", theta_true_reparam.size)
+
+    # Only initialize update_idx related initial values
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta_true_reparam.size)
+
+    update_idx = jnp.array(update_idx)
+    theta_init = theta_true_reparam
+    theta_init_update = theta_true_reparam[update_idx]
+    theta_init = theta_init.at[update_idx].set(theta_init_update * (1 + 1 * jax.random.normal(key, theta_init_update.shape)))
+
+    # Estimation
+    # breakpoint()
+    theta_hat_reparam_short, grad_ll, hess_ll, convergence = yule_walker(Y, Z, theta_init, params_scale, update_idx=update_idx)
+
+    theta_hat_reparam = theta_true_reparam
+    theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_short)
+
+    # Convert back to natural scale (with softplus)
+    sigma2_tilde_hat = theta_hat_reparam[2+3*p:2+4*p]
+    sigma2_hat = jax.nn.softplus(sigma2_tilde_hat)
+
+    theta_hat = jnp.concatenate([theta_hat_reparam[:2+3*p], sigma2_hat])
+
+    # Test sandwich variance
+    var_theta = compute_sandwich_variance(Y, Z, theta_hat, params_scale)
