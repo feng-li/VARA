@@ -50,13 +50,16 @@ def loglik(theta, Y, Z, params_scale):
     W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     # Diagonal matrices
-    D_beta = jnp.diag(beta)
-    D_ga = jnp.diag(gamma_a)
-    D_gb = jnp.diag(gamma_b)
+    # D_beta = jnp.diag(beta)
+    # D_ga = jnp.diag(gamma_a)
+    # D_gb = jnp.diag(gamma_b)
 
     # Model matrices
-    G = D_beta + D_ga @ W_a
-    S = jnp.eye(p) - D_gb @ W_b
+    # G = D_beta + D_ga @ W_a
+    # S = jnp.eye(p) - D_gb @ W_b
+
+    G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
+    S = jnp.eye(p) - (gamma_b[:, None] * W_b)
 
 
     # Covariance matrix of errors
@@ -66,7 +69,8 @@ def loglik(theta, Y, Z, params_scale):
     E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)   # shape (T-1, p)
 
     # Quadratic form
-    quad = jnp.sum((E @ inv_Sigma_e) * E)
+    # quad = jnp.sum((E @ inv_Sigma_e) * E)
+    quad = jnp.sum(E * E * (1.0 / sigma2)[None, :])
 
     # Log-likelihood
     val = (
@@ -116,16 +120,21 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
     W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
-    D_beta = jnp.diag(beta)
-    D_ga = jnp.diag(gamma_a)
-    D_gb = jnp.diag(gamma_b)
+    # D_beta = jnp.diag(beta)
+    # D_ga = jnp.diag(gamma_a)
+    # D_gb = jnp.diag(gamma_b)
 
-    G = D_beta + D_ga @ W_a
-    S = jnp.eye(p) - D_gb @ W_b
+    # G = D_beta + D_ga @ W_a
+    # S = jnp.eye(p) - D_gb @ W_b
+    G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
+    S = jnp.eye(p) - (gamma_b[:, None] * W_b)
 
     inv_Sigma_e = jnp.diag(1.0 / sigma2)
     E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)
-    quad = jnp.sum((E @ inv_Sigma_e) * E)
+
+    # quad = jnp.sum((E @ inv_Sigma_e) * E)
+    quad = jnp.sum(E * E * (1.0 / sigma2)[None, :])
+
 
     signS, logdetS = jnp.linalg.slogdet(S)
 
