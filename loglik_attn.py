@@ -63,14 +63,14 @@ def loglik(theta, Y, Z, params_scale):
 
 
     # Covariance matrix of errors
-    inv_Sigma_e = jnp.diag(1.0 / sigma2)
+    sigma2_inv = jnp.diag(1.0 / sigma2)
 
     # Transformed errors
     E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)   # shape (T-1, p)
 
     # Quadratic form
-    # quad = jnp.sum((E @ inv_Sigma_e) * E)
-    quad = jnp.sum(E * E * (1.0 / sigma2)[None, :])
+    # quad = jnp.sum((E @ sigma2_inv) * E)
+    quad = jnp.sum(E * E * sigma2_inv[None, :])
 
     # Log-likelihood
     val = (
@@ -129,10 +129,10 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
     G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
     S = jnp.eye(p) - (gamma_b[:, None] * W_b)
 
-    inv_Sigma_e = jnp.diag(1.0 / sigma2)
+    sigma2_inv = jnp.diag(1.0 / sigma2)
     E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)
 
-    # quad = jnp.sum((E @ inv_Sigma_e) * E)
+    # quad = jnp.sum((E @ sigma2_inv) * E)
     quad = jnp.sum(E * E * (1.0 / sigma2)[None, :])
 
 
