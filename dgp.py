@@ -5,7 +5,6 @@ from jax.random import multivariate_normal, normal
 import matplotlib.pyplot as plt
 import psutil
 import os
-import gc
 
 def mem_gb():
     return psutil.Process(os.getpid()).memory_info().rss / 1024**3
@@ -195,7 +194,7 @@ if __name__ == "__main__":
     theta_tilde, _ = flatten_params(params_reparam, order)
 
     print("Parameter vector θ (reparameterized) length:", theta_tilde.shape[0])
-    print("First few σ̃²:", sigma2_tilde[:5])
+    print("First few estimated σ²:", sigma2_tilde[:5])
 
     # ---------- Visualization ----------
     fig, axes = plt.subplots(10, 10, figsize=(20, 20), sharex=True)

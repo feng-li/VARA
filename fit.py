@@ -85,6 +85,9 @@ def estimate(Y, Z, key, theta_init, params_scale, algorithm, update_idx=slice(No
     theta_hat = jnp.concatenate([theta_hat_reparam[: 2 + 3 * p], sigma2_hat])
 
     # Compute sandwich variance at θ̂ (natural scale)
-    var_theta = compute_sandwich_variance(Y, Z, theta_hat, params_scale)
+    # var_theta = compute_sandwich_variance(Y, Z, theta_hat, params_scale)
+
+    # Do not update
+    var_theta =  dict(theta=theta_hat, Avar=jnp.zeros(4*p+2), se=jnp.zeros(4*p+2), lower=jnp.zeros(4*p+2), upper=jnp.zeros(4*p+2))
 
     return var_theta, convergence

@@ -1,12 +1,13 @@
-# jax_cpu = False
-# if jax_cpu:
 import os
 os.environ['JAX_PLATFORMS'] = 'cpu'
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # optional, prevent GPU mem alloc
+os.environ["RAY_memory_usage_threshold"] = "0.9"  # Killing processes to free up memory above the threshold
 
 import jax
 import jax.numpy as jnp
 from jax.random import uniform
+import time
+import random
 from tqdm import trange
 import ray
 import logging
@@ -21,7 +22,8 @@ from fit import estimate
 def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0.05,
                        algorithm="analytical_gradhess", update_idx=slice(None),
                        max_tries=10):
-    """Single Monte Carlo replication (runs on a Ray worker).
+    """
+    Single Monte Carlo replication (runs on a Ray worker).
 
     Re-runs simulation & estimation up to `max_tries` times until convergence
     status == 0. On complete failure, returns NaNs.
@@ -58,6 +60,11 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         noise_key = jax.random.fold_in(subkey, attempt + max_tries)
 
         # 1. Simulate one dataset
+
+        # sleep_sec = random.randint(1, 60)   # 1,2,3,4,5
+        # print(f"DGP: Random sleep for {sleep_sec}s to prevent memory heap.")
+        # time.sleep(sleep_sec)
+
         Y, Z, _, _ = simulate_VAR_attention(
             attempt_key, params_true, T=T, p=p, q=q,
             dist=dist, params_scale=params_scale
@@ -66,7 +73,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         # 2. Build initial values (perturb true values on update_idx)
         theta_init = theta_true_reparam
         perturb_scales = {"eta_a": 0.3,
-                          "eta_b": 0.05,
+                          "eta_b": 0.3,
                           "gamma_a": 0.8,
                           "gamma_b": 0.8,
                           "beta": 0.2,
@@ -128,15 +135,41 @@ single_replication_jit = jax.jit(single_replication,
 
 # Ray wrapper (wrap the same function)
 # @ray.remote(num_gpus=0.01)
-@ray.remote(num_cpus=1)
-def single_replication_ray(*args, **kwargs):
-    try:
-        return single_replication(*args, **kwargs)
-    except Exception as e:
-        print(f"[Ray worker error] {e}")
-        theta_true = kwargs.get("theta_true", None)
-        d = len(theta_true) if theta_true is not None else 1
-        return jnp.zeros(d, dtype=bool), jnp.full(d, jnp.nan), jnp.full(d, jnp.nan), jnp.zeros(d, jnp.nan)
+# @ray.remote(num_cpus=1)
+# def single_replication_ray(*args, **kwargs):
+#     try:
+#         return single_replication(*args, **kwargs)
+#     except Exception as e:
+#         print(f"[Ray worker error] {e}")
+#         theta_true = kwargs.get("theta_true", None)
+#         d = len(theta_true) if theta_true is not None else 1
+#         return jnp.zeros(d, dtype=bool), jnp.full(d, jnp.nan), jnp.full(d, jnp.nan), jnp.zeros(d, jnp.nan)
+@ray.remote
+class ReplicationActor:
+    def __init__(self):
+        self._cache = None  # placeholder to pin memory if needed
+
+    def run(self, *args, **kwargs):
+        """
+        One Monte Carlo replication. Memory-heavy DGP happens inside single_replication,
+        but we explicitly clean up before returning.
+        """
+        try:
+            result = single_replication(*args, **kwargs)
+
+            # ---- explicit memory cleanup ----
+            self._cache = None
+            import gc
+            gc.collect()
+
+            return result
+
+        except Exception as e:
+            print(f"[Ray actor error] {e}")
+            # d = len(theta_true) if theta_true is not None else 1
+            d = 1
+            return jnp.zeros(d, bool), jnp.full(d, jnp.nan), jnp.full(d, jnp.nan), -1
+
 
 # ===============================================================
 # === Main Monte Carlo driver ===================================
@@ -192,11 +225,32 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 
         # MODIFY THIS TO FIT THE SIMULATION INTO MEMORY
 
+        # futures = [
+        #     single_replication_ray.options(num_cpus=MAX_CPUS_PER_TASK).remote(
+        #         subkeys[r], params_true, T, p, q, params_scale, dist, alpha, algorithm, update_idx)
+        #     for r in range(R)
+        # ]
+
+        # Create a small pool of actors
+        N_ACTORS = max(1, int(os.cpu_count() / MAX_CPUS_PER_TASK))
+        print(f"Ray actors using {N_ACTORS} actors...")
+        actors = [
+            ReplicationActor.options(num_cpus=MAX_CPUS_PER_TASK,
+                                     # memory=80 * 1024**3   # RAM required for each replication
+                                     ).remote()
+            for _ in range(N_ACTORS)
+        ]
+
+        # Round-robin submission
         futures = [
-            single_replication_ray.options(num_cpus=MAX_CPUS_PER_TASK).remote(
-                subkeys[r], params_true, T, p, q, params_scale, dist, alpha, algorithm, update_idx)
+            actors[r % N_ACTORS].run.remote(
+                subkeys[r], params_true, T, p, q,
+                params_scale, dist, alpha,
+                algorithm, update_idx
+            )
             for r in range(R)
         ]
+
 
         results = []
         for result in trange(R, desc="Monte Carlo replications", ncols=100):
@@ -269,6 +323,9 @@ if __name__ == "__main__":
 
     from summarize import summarize_empirical_coverage
 
+    # import tracemalloc
+    # tracemalloc.start()
+
     # ===============================================================
     # === 0. Parallelization     ====================================
     # ===============================================================
@@ -286,8 +343,8 @@ if __name__ == "__main__":
     seed = 2025
     key = jax.random.PRNGKey(seed)
 
-    R_list = [500]
-    p_list = [300, 400, 500]
+    R_list = [1000]
+    p_list = [200, 300, 500, 800, 1000, 2000]
     q_list = [50]
     dist_list = ["normal"]
 
@@ -328,8 +385,8 @@ if __name__ == "__main__":
         print("\n" + "=" * 70 + f"\nRunning Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
 
         # seed = random.randint(0, 10000)
-        MAX_CPUS_PER_TASK = int(max(1, 2*jnp.sqrt(104 * p / max(p_list)))) # Use this only when heavy Hessian is used.
-        # MAX_CPUS_PER_TASK = 2
+        # MAX_CPUS_PER_TASK = int(max(1, 1*jnp.sqrt(os.cpu_count() * p / max(p_list)))) # Use this only when heavy Hessian is used.
+        MAX_CPUS_PER_TASK = 1
 
         update_idx = [0, 1]
         # update_idx = range(0, 3*p+2)
@@ -392,3 +449,9 @@ if __name__ == "__main__":
 
     # --- Summary by T and nominal level ---
     summarize_empirical_coverage(out_path, latex=False)
+
+    # memory profiling
+    # snapshot = tracemalloc.take_snapshot()
+    # top_stats = snapshot.statistics("lineno")
+    # for stat in top_stats[:10]:
+    #     print(stat)
