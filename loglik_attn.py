@@ -39,15 +39,18 @@ def loglik(theta, Y, Z, params_scale):
 
     # S, G, sigma2 = construct_matrices(theta, Z, p)
     eta_a = theta[0]
-    eta_b = theta[1]
-    gamma_a = theta[2:2+p]
-    gamma_b = theta[2+p:2+2*p]
-    beta = theta[2+2*p:2+3*p]
-    sigma2 = theta[2+3*p:2+4*p]
+    # eta_b = theta[1]
+    # gamma_a = theta[2:2+p]
+    gamma_a = theta[1:1+p]
+    # gamma_b = theta[2+p:2+2*p]
+    # beta = theta[2+2*p:2+3*p]
+    beta = theta[1+p:1+2*p]
+    # sigma2 = theta[2+3*p:2+4*p]
+    sigma2 = theta[1+2*p:1+3*p]
 
     # Build attention weights
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
-    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
+    # W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     # Diagonal matrices
     # D_beta = jnp.diag(beta)
@@ -59,14 +62,14 @@ def loglik(theta, Y, Z, params_scale):
     # S = jnp.eye(p) - D_gb @ W_b
 
     G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
-    S = jnp.eye(p) - (gamma_b[:, None] * W_b)
-
+    # S = jnp.eye(p) - (gamma_b[:, None] * W_b)
 
     # Covariance matrix of errors
     sigma2_inv = jnp.diag(1.0 / sigma2)
 
     # Transformed errors
-    E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)   # shape (T-1, p)
+    # E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)   # shape (T-1, p)
+    E = Y[1:] - (Y[:-1] @ G.T)   # shape (T-1, p)
 
     # Quadratic form
     # quad = jnp.sum((E @ sigma2_inv) * E)
@@ -76,8 +79,7 @@ def loglik(theta, Y, Z, params_scale):
     val = (
         -(T-1) * p / 2 * jnp.log(2 * jnp.pi)
         - (T-1) / 2 * jnp.sum(jnp.log(sigma2))
-        + (T-1) * jnp.linalg.slogdet(S)[1]   # log|S|
-        - 0.5 * quad
+        - 1/2 * quad
     )
     return val
 
@@ -109,16 +111,20 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
 
     T, p = Y.shape
     eta_a = theta[0]
-    eta_b = theta[1]
-    gamma_a = theta[2:2+p]
-    gamma_b = theta[2+p:2+2*p]
-    beta    = theta[2+2*p:2+3*p]
-    sigma2_tilde = theta[2+3*p:2+4*p]
+    # eta_b = theta[1]
+    # gamma_a = theta[2:2+p]
+    gamma_a = theta[1:1+p]
+    # gamma_b = theta[2+p:2+2*p]
+    # beta = theta[2+2*p:2+3*p]
+    beta = theta[1+p:1+2*p]
+    # sigma2 = theta[2+3*p:2+4*p]
+    sigma2_tilde = theta[1+2*p:1+3*p]
+
     sigma2 = jax.nn.softplus(sigma2_tilde)   # Replace σ̃² with σ²
     log_sigma2 = jnp.log(sigma2)
 
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
-    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
+    # W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     # D_beta = jnp.diag(beta)
     # D_ga = jnp.diag(gamma_a)
@@ -127,22 +133,21 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
     # G = D_beta + D_ga @ W_a
     # S = jnp.eye(p) - D_gb @ W_b
     G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
-    S = jnp.eye(p) - (gamma_b[:, None] * W_b)
+    # S = jnp.eye(p) - (gamma_b[:, None] * W_b)
 
-    sigma2_inv = jnp.diag(1.0 / sigma2)
-    E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)
+    # sigma2_inv = jnp.diag(1.0 / sigma2)
+    # E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)
+    E = Y[1:] - (Y[:-1] @ G.T)
 
     # quad = jnp.sum((E @ sigma2_inv) * E)
     quad = jnp.sum(E * E * (1.0 / sigma2)[None, :])
 
-
-    signS, logdetS = jnp.linalg.slogdet(S)
+    # signS, logdetS = jnp.linalg.slogdet(S)
 
     val = (
         -(T-1) * p / 2 * jnp.log(2 * jnp.pi)
         - (T-1) / 2 * jnp.sum(log_sigma2)
-        + (T-1) * logdetS
-        - 0.5 * quad
+        - 1/2 * quad
     )
     return val / (T-1)
 
@@ -158,15 +163,13 @@ if __name__ == "__main__":
 
     # Parameter vector: (eta_a, eta_b, gamma_a, gamma_b, beta, sigma2)
     theta0 = jnp.concatenate([
-        jnp.array([2, 2]),        # eta_a, eta_b
+        jnp.array([2]),        # eta_a, eta_b
         jnp.ones(p) * 0.1,            # gamma_a
-        jnp.ones(p) * 0.1,            # gamma_b
         jnp.ones(p) * 0.5,            # beta
         jnp.ones(p) * 1.0             # sigma2
     ])
     params_scale = dict(
-        eta_a=1,
-        eta_b=10   )
+        eta_a=1)
 
     # Compute log-likelihood
     ll_val = loglik(theta0, Y, Z, params_scale)
