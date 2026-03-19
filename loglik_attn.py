@@ -29,7 +29,7 @@ def build_attention(Z, eta, scale):
 
 def loglik(theta, Y, Z, params_scale):
     """
-    Log-quasi-likelihood function with attention-based W_a, W_b.
+    Log-quasi-likelihood (avg) function with attention-based W_a, W_b.
 
     Y: (T, p) time series data
     Z: (p, q) feature embeddings
@@ -52,41 +52,32 @@ def loglik(theta, Y, Z, params_scale):
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
     # W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
-    # Diagonal matrices
-    # D_beta = jnp.diag(beta)
-    # D_ga = jnp.diag(gamma_a)
-    # D_gb = jnp.diag(gamma_b)
-
-    # Model matrices
-    # G = D_beta + D_ga @ W_a
-    # S = jnp.eye(p) - D_gb @ W_b
-
     G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
     # S = jnp.eye(p) - (gamma_b[:, None] * W_b)
-
-    # Covariance matrix of errors
-    sigma2_inv = jnp.diag(1.0 / sigma2)
 
     # Transformed errors
     # E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)   # shape (T-1, p)
     E = Y[1:] - (Y[:-1] @ G.T)   # shape (T-1, p)
 
     # Quadratic form
+    # Covariance matrix of errors
+    # sigma2_inv = jnp.diag(1.0 / sigma2)
     # quad = jnp.sum((E @ sigma2_inv) * E)
-    quad = jnp.sum(E * E * sigma2_inv[None, :])
+    sigma2_inv = 1.0 / sigma2    # shape (p, ) == (1, p) implicitly
+
+    quad = jnp.sum(E ** 2 * sigma2_inv)/(T-1)
 
     # Log-likelihood
     val = (
-        -(T-1) * p / 2 * jnp.log(2 * jnp.pi)
-        - (T-1) / 2 * jnp.sum(jnp.log(sigma2))
+        - p / 2 * jnp.log(2 * jnp.pi)
+        - 1 / 2 * jnp.sum(jnp.log(sigma2))
         - 1/2 * quad
     )
-    return val
 
 
 def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
     """
-    Compute log-likelihood with gradient only for selected parameters.
+    Compute log-likelihood (avg) with only for selected parameters.
 
     Args:
         theta: full parameter vector (1D array)
@@ -126,12 +117,6 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
     # W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
-    # D_beta = jnp.diag(beta)
-    # D_ga = jnp.diag(gamma_a)
-    # D_gb = jnp.diag(gamma_b)
-
-    # G = D_beta + D_ga @ W_a
-    # S = jnp.eye(p) - D_gb @ W_b
     G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
     # S = jnp.eye(p) - (gamma_b[:, None] * W_b)
 
@@ -140,24 +125,23 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
     E = Y[1:] - (Y[:-1] @ G.T)
 
     # quad = jnp.sum((E @ sigma2_inv) * E)
-    quad = jnp.sum(E * E * (1.0 / sigma2)[None, :])
-
-    # signS, logdetS = jnp.linalg.slogdet(S)
+    quad = jnp.sum(E **2 * (1.0 / sigma2))/(T-1)
 
     val = (
-        -(T-1) * p / 2 * jnp.log(2 * jnp.pi)
-        - (T-1) / 2 * jnp.sum(log_sigma2)
+        - p / 2 * jnp.log(2 * jnp.pi)
+        - 1 / 2 * jnp.sum(log_sigma2)
         - 1/2 * quad
     )
-    return val / (T-1)
 
+    return val
 
 # --------------------------------------------------------
 # Example usage
 # --------------------------------------------------------
 if __name__ == "__main__":
     # Example dimensions
-    T, p, q = 10000, 5000, 50
+    # breakpoint()
+    T, p, q = 10000, 20, 10
     Y = jnp.ones((T, p))  # dummy time series data
     Z = jax.random.normal(jax.random.PRNGKey(0), (p, q))  # feature embeddings
 
@@ -182,3 +166,14 @@ if __name__ == "__main__":
     hess_ll = hessian(loglik)(theta0, Y, Z, params_scale)
     # print("Hessian shape:", hess_ll.shape)
     # print(hess_ll)
+
+
+    # Compute log-likelihood
+    ll_rep = loglik_reparam(theta0, Y, Z, params_scale)
+    print("Log-likelihood:", ll_rep)
+
+    grad_rep = grad(loglik_reparam)(theta0, Y, Z, params_scale)
+    print("Gradient shape:", grad_rep.shape)
+    print(grad_rep)
+
+    hess_rep = hessian(loglik_reparam)(theta0, Y, Z, params_scale)
