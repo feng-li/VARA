@@ -310,16 +310,12 @@ if __name__ == "__main__":
     # --- True parameters (in natural scale) ---
     params_true = dict(
         eta_a=0.5,
-        eta_b=0.1,
         gamma_a=jnp.linspace(-0.15, 0.15, p),
-        gamma_b=jnp.linspace(-0.10, 0.10, p),
         beta=jnp.linspace(-0.20, 0.20, p),
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
-    params_scale = dict(
-        eta_a=1,
-        eta_b=1)
+    params_scale = dict(eta_a=1)
 
     algorithm = "auto_gradhess"
     # algorithm = "analytical_gradhess"
@@ -336,7 +332,7 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde_true
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
-    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    order = ["eta_a", "gamma_a", "beta", "sigma2"]
     theta_true_reparam, _ = flatten_params(params_reparam, order)
     print("θ̃ length:", theta_true_reparam.size)
 
@@ -356,10 +352,10 @@ if __name__ == "__main__":
     theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_short)
 
     # Convert back to natural scale (with softplus)
-    sigma2_tilde_hat = theta_hat_reparam[2+3*p:2+4*p]
+    sigma2_tilde_hat = theta_hat_reparam[1+2*p:]
     sigma2_hat = jax.nn.softplus(sigma2_tilde_hat)
 
-    theta_hat = jnp.concatenate([theta_hat_reparam[:2+3*p], sigma2_hat])
+    theta_hat = jnp.concatenate([theta_hat_reparam[:1+2*p], sigma2_hat])
 
 
     # --- Plot log-likelihood profile for update_idx parameters ---
