@@ -6,10 +6,10 @@ import matplotlib.pyplot as plt
 import psutil
 import os
 
+from loglik_attn import build_attention
+
 def mem_gb():
     return psutil.Process(os.getpid()).memory_info().rss / 1024**3
-
-from loglik_attn import build_attention
 
 
 def create_structured_features(key, p, q):
@@ -35,9 +35,11 @@ def create_structured_features(key, p, q):
     Z = Z / jnp.linalg.norm(Z, axis=1, keepdims=True)
     return Z
 
-def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params_scale=dict(eta_a=1, eta_b=10)):
+
+def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params_scale=dict(eta_a=1)):
     """
     Simulate data from the VAR attention model.
+
 
     key: JAX PRNGKey
     T: sample size
@@ -62,30 +64,16 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
 
     # Step 2: Draw parameters
     eta_a = params["eta_a"]
-    eta_b = params["eta_b"]
     gamma_a = params["gamma_a"]
-    gamma_b = params["gamma_b"]
     beta = params["beta"]
     sigma2 = params["sigma2"]
 
 
     # Step 3: Construct W_a, W_b
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
-    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     # Step 4: Construct S, G
-    # S = jnp.eye(p) - jnp.diag(gamma_b) @ W_b
-    # G = jnp.diag(beta) + jnp.diag(gamma_a) @ W_a
-    S = jnp.eye(p) - (gamma_b[:, None] * W_b)
     G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
-
-    # companion = S_inv @ G
-    companion = jnp.linalg.solve(S, G)
-
-    max_eig = jnp.max(jnp.abs(jnp.linalg.eigvals(companion)))
-
-    if max_eig >= 0.99:
-        print(f"Warning: Process near non-stationary (max eig = {max_eig:.3f})")
 
     # Step 5: Random noise
     if dist == "normal":
@@ -106,21 +94,20 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
     # for t in range(1, T):
     #     Y = Y.at[t].set(jnp.linalg.solve(S, (G @ Y[t - 1] + eps[t])))
     def step(y_prev, eps_t):
-        y_t = jnp.linalg.solve(S, (G @ y_prev + eps_t))
-        return y_t, y_t
+        y_t = G @ y_prev + eps_t
+        return y_t, y_t  # the carry passed to the next step and the output collected across time.
 
     y0 = jnp.zeros((p,))
     _, Ys = lax.scan(step, y0, eps[1:])   # returns (T-1, p)
     Y = jnp.vstack([y0[None, :], Ys])
 
-
-    params = dict(eta_a=eta_a, eta_b=eta_b, gamma_a=gamma_a, gamma_b=gamma_b, beta=beta, sigma2=sigma2)
+    params = dict(eta_a=eta_a, gamma_a=gamma_a, beta=beta, sigma2=sigma2)
 
     # TODO: Add the attention checking.
     mem_used = mem_gb() - mem_start
     print(f"DGP RAM used: {mem_used:.3f} GB")
 
-    return Y, Z, W_a, W_b
+    return Y, Z, W_a
 
 
 def flatten_params(params: dict, order: list[str]):
@@ -169,19 +156,15 @@ if __name__ == "__main__":
     p, q, T = 300, 50, 200
     params = dict(
         eta_a=0.5,
-        eta_b=0.5,
         gamma_a=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
-        gamma_b=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
         beta=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
-    params_scale = dict(
-        eta_a=1,
-        eta_b=1)
+    params_scale = dict(eta_a=1)
 
     # Simulate dataset
-    Y, Z, W_a, W_b = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal", params_scale=params_scale)
+    Y, Z, W_a = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal", params_scale=params_scale)
     print("Simulated Y shape:", Y.shape)
 
     # Convert σ² → σ̃² for reparameterized estimation
