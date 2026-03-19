@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from loglik_attn import build_attention
 
 
-def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=1), update_idx=slice(None)):
+def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1), update_idx=slice(None)):
     """
     Compute the analytical gradient of the log-likelihood ℓ(θ̃)
     for the attention-based QMLE model with softplus-reparameterized variances.
@@ -65,33 +65,28 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=1), upd
     print(params_scale)
     T, p = Y.shape
     eta_a = theta[0]
-    eta_b = theta[1]
-    gamma_a = theta[2:2+p]
-    gamma_b = theta[2+p:2+2*p]
-    beta    = theta[2+2*p:2+3*p]
+    gamma_a = theta[1:1+p]
+    beta = theta[1+p:1+2*p]
 
-    sigma2_tilde  = theta[2+3*p:2+4*p]  # Replace σ̃² with σ²
+    sigma2_tilde = theta[1+2*p:1+3*p]  # Replace σ̃² with σ²
     sigma2 = jax.nn.softplus(sigma2_tilde)
 
     # Build weights
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
-    W_b = build_attention(Z, eta_b, params_scale['eta_b'])
+    # W_b = build_attention(Z, eta_b, params_scale['eta_b'])
 
     D_beta = jnp.diag(beta)
     D_ga = jnp.diag(gamma_a)
-    D_gb = jnp.diag(gamma_b)
 
     G = D_beta + D_ga @ W_a
-    S = jnp.eye(p) - D_gb @ W_b
-    S_inv = jnp.linalg.inv(S)
 
     # Inverse Sigma_e
     Sigma_inv = jnp.diag(1.0 / sigma2)
 
     # Errors
-    E = (Y[1:] @ S.T) - (Y[:-1] @ G.T)
+    E = Y[1:] - Y[:-1] @ G.T
 
-    grad = jnp.zeros(2 + 4*p)
+    grad = jnp.zeros(1 + 3*p)
 
     # Common similarity matrix
     S_mat = (Z @ Z.T) / jnp.sqrt(Z.shape[1])
@@ -105,33 +100,20 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1, eta_b=1), upd
     )
     grad = grad.at[0].set(grad_eta_a)
 
-    # === ∂ℓ/∂η_b ===
-    row_means_b = jnp.sum(W_b * S_mat, axis=1, keepdims=True)
-    Wb_dot = W_b * (S_mat - row_means_b) * params_scale['eta_b']
-    term1 = -T * jnp.trace(S_inv @ (D_gb @ Wb_dot))
-    term2 = jnp.sum(
-        (E @ Sigma_inv) * (Y[1:] @ (D_gb @ Wb_dot).T)
-    )
-    grad = grad.at[1].set(term1 + term2)
-
     # === ∂ℓ/∂γ_a ===
     grad_gamma_a = jnp.sum((E @ Sigma_inv) * (W_a @ Y[:-1].T).T, axis=0)
-    grad = grad.at[2:2+p].set(grad_gamma_a)
-
-    # === ∂ℓ/∂γ_b ===
-    grad_gamma_b = -T * jnp.diag(W_b @ S_inv) \
-        + jnp.sum((E @ Sigma_inv) * (W_b @ Y[1:].T).T, axis=0)
-    grad = grad.at[2+p:2+2*p].set(grad_gamma_b)
+    grad = grad.at[1:1+p].set(grad_gamma_a)
 
     # === ∂ℓ/∂β ===
     grad_beta = jnp.sum((E @ Sigma_inv) * Y[:-1], axis=0)
-    grad = grad.at[2+2*p:2+3*p].set(grad_beta)
+    grad = grad.at[1+p:1+2*p].set(grad_beta)
 
     # === ∂ℓ/∂σ² (softplus reparameterization) ===
-    grad_sigma2 = -0.5 * (T-1) * (1.0 / sigma2) \
-        + 0.5 * (1.0 / sigma2**2) * jnp.sum(E**2, axis=0)
+    grad_sigma2 = (-0.5 * (T-1) * (1.0 / sigma2)
+                   + 0.5 * (1.0 / sigma2**2) * jnp.sum(E**2, axis=0)
+                   )
     grad_sigma2_tilde = grad_sigma2 * jax.nn.sigmoid(sigma2_tilde)  # chain rule correction
-    grad = grad.at[2+3*p:2+4*p].set(grad_sigma2_tilde)
+    grad = grad.at[1+2*p:1+3*p].set(grad_sigma2_tilde)
 
     # slice(None) means update all parameters
     if isinstance(update_idx, slice):
@@ -154,22 +136,18 @@ if __name__ == "__main__":
     # --- True parameters (in natural scale) ---
     params_true = dict(
         eta_a=0.5,
-        eta_b=1.0,
         gamma_a=jnp.linspace(-0.15, 0.15, p),
-        gamma_b=jnp.linspace(-0.10, 0.10, p),
         beta=jnp.linspace(-0.20, 0.20, p),
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
-    params_scale = dict(
-        eta_a=1,
-        eta_b=1)
+    params_scale = dict(eta_a=1)
 
     update_idx = slice(None)
 
     # --- Simulate data ---
-    Y, Z, W_a, W_b = simulate_VAR_attention(key, params_true, T=T, p=p, q=q,
-                                            dist="normal", params_scale=params_scale)
+    Y, Z, W_a = simulate_VAR_attention(key, params_true, T=T, p=p, q=q,
+                                       dist="normal", params_scale=params_scale)
     print("Simulated Y shape:", Y.shape)
 
     # --- Convert σ² → σ̃² (softplus inverse) ---
@@ -178,9 +156,9 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde_true
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
-    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
-    theta_true_reparam = flatten_params(params_reparam, order)
-    print("θ̃ length:", theta_true_reparam.size)
+    order = ["eta_a", "gamma_a", "beta", "sigma2"]
+    theta_true_reparam, _ = flatten_params(params_reparam, order)
+    print("θ tilde length:", theta_true_reparam.size)
 
     # =====================================================
     # Gradient test
@@ -198,9 +176,7 @@ if __name__ == "__main__":
 
     names = []
     names.append("eta_a")
-    names.append("eta_b")
     names.extend([f"gamma_a[{i}]" for i in range(p)])
-    names.extend([f"gamma_b[{i}]" for i in range(p)])
     names.extend([f"beta[{i}]" for i in range(p)])
     names.extend([f"sigma2[{i}]" for i in range(p)])
 
