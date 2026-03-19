@@ -39,13 +39,8 @@ def loglik(theta, Y, Z, params_scale):
 
     # S, G, sigma2 = construct_matrices(theta, Z, p)
     eta_a = theta[0]
-    # eta_b = theta[1]
-    # gamma_a = theta[2:2+p]
     gamma_a = theta[1:1+p]
-    # gamma_b = theta[2+p:2+2*p]
-    # beta = theta[2+2*p:2+3*p]
     beta = theta[1+p:1+2*p]
-    # sigma2 = theta[2+3*p:2+4*p]
     sigma2 = theta[1+2*p:1+3*p]
 
     # Build attention weights

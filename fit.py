@@ -76,18 +76,19 @@ def estimate(Y, Z, key, theta_init, params_scale, algorithm, update_idx=slice(No
     # breakpoint()
 
     # Extract unconstrained variance parameter (σ̃²)
-    sigma2_tilde = theta_hat_reparam[2 + 3 * p : 2 + 4 * p]
+    sigma2_tilde = theta_hat_reparam[1+2*p:]
 
     # Convert back to natural scale σ² = softplus(σ̃²)
     sigma2_hat = jax.nn.softplus(sigma2_tilde)
 
     # Replace σ̃² with σ² in final θ̂
-    theta_hat = jnp.concatenate([theta_hat_reparam[: 2 + 3 * p], sigma2_hat])
+    theta_hat = jnp.concatenate([theta_hat_reparam[: 1 + 2 * p], sigma2_hat])
 
     # Compute sandwich variance at θ̂ (natural scale)
     # var_theta = compute_sandwich_variance(Y, Z, theta_hat, params_scale)
 
     # Do not update
-    var_theta =  dict(theta=theta_hat, Avar=jnp.zeros(4*p+2), se=jnp.zeros(4*p+2), lower=jnp.zeros(4*p+2), upper=jnp.zeros(4*p+2))
+    var_theta =  dict(theta=theta_hat, Avar=jnp.zeros(1+3*p), se=jnp.zeros(1+3*p),
+                      lower=jnp.zeros(1+3*p), upper=jnp.zeros(1+4*p))
 
     return var_theta, convergence
