@@ -194,11 +194,11 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
         V = jnp.zeros((d, d))
         V = V.at[0, 0].set(V_eta_a_eta_a)
 
-        V = V.at[2:2+p, 2:2+p].set(jnp.diag(V_gamma_a_gamma_a))
+        V = V.at[1:1+p, 1:1+p].set(jnp.diag(V_gamma_a_gamma_a))
 
-        V = V.at[2+2*p:2+3*p, 2+2*p:2+3*p].set(jnp.diag(V_beta_beta))
+        V = V.at[1+p:1+2*p, 1+p:1+2*p].set(jnp.diag(V_beta_beta))
 
-        V = V.at[2+3*p:2+4*p, 2+3*p:2+4*p].set(jnp.diag(V_sigma_sigma))
+        V = V.at[1+2*p:1+3*p, 1+2*p:1+3*p].set(jnp.diag(V_sigma_sigma))
 
         # --- Cross-block for vector symmetric filling ---
         V = V.at[2:2+p, 0].set(V_gamma_a_eta_a)
@@ -214,16 +214,16 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
         i = jnp.arange(p)
 
         # beta × gamma_a
-        V = V.at[2+2*p + i, 2 + i].set(V_beta_gamma_a)
-        V = V.at[2 + i, 2+2*p + i].set(V_beta_gamma_a)
+        V = V.at[1+p + i, 1+i].set(V_beta_gamma_a)
+        V = V.at[1+i, 1+p+i].set(V_beta_gamma_a)
 
         # sigma × gamma_a
-        V = V.at[2+3*p + i, 2 + i].set(V_sigma_gamma_a)
-        V = V.at[2 + i, 2+3*p + i].set(V_sigma_gamma_a)
+        V = V.at[1+2*p+i, 1+i].set(V_sigma_gamma_a)
+        V = V.at[1+i, 1+2*p+i].set(V_sigma_gamma_a)
 
         # sigma × beta
-        V = V.at[2+3*p + i, 2+2*p + i].set(V_sigma_beta)
-        V = V.at[2+2*p + i, 2+3*p + i].set(V_sigma_beta)
+        V = V.at[1+2*p + i, 1+p+i].set(V_sigma_beta)
+        V = V.at[1+p + i, 1+2*p + i].set(V_sigma_beta)
 
 
     else:
@@ -240,9 +240,9 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
         V["beta_gamma_a"] = V_beta_gamma_a
         V["sigma_gamma_a"] = V_sigma_gamma_a
 
-        V["beta_beta"]       = V_beta_beta
-        V["sigma_beta"]      = V_sigma_beta
-        V["sigma_sigma"]     = V_sigma_sigma
+        V["beta_beta"] = V_beta_beta
+        V["sigma_beta"] = V_sigma_beta
+        V["sigma_sigma"] = V_sigma_sigma
 
     return V
 
@@ -283,7 +283,7 @@ def apply_block_operator(x, M, p):
     x: (d,) where d=2+4p
     returns: (d,) = (full_matrix(M) @ x)  but never materializes the matrix
     """
-    xa, xb = x[0], x[1]
+    xa = x[0]
     x_ga = x[2:2+p]
     x_gb = x[2+p:2+2*p]
     x_b  = x[2+2*p:2+3*p]
@@ -462,9 +462,9 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     T, p = Y.shape
 
     eta_a = theta_hat[0]
-    gamma_a = theta_hat[2:2+p]
-    beta = theta_hat[2+2*p:2+3*p]
-    sigma2 = theta_hat[2+3*p:2+4*p]
+    gamma_a = theta_hat[1:1+p]
+    beta = theta_hat[1+p:1+2*p]
+    sigma2 = theta_hat[1+2*p:1+3*p]
 
     # use consistent attention derivatives
     Wa, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale["eta_a"])
@@ -575,10 +575,10 @@ if __name__ == "__main__":
     theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_short)
 
     # Convert back to natural scale (with softplus)
-    sigma2_tilde_hat = theta_hat_reparam[2+3*p:2+4*p]
+    sigma2_tilde_hat = theta_hat_reparam[1+2*p:1+3*p]
     sigma2_hat = jax.nn.softplus(sigma2_tilde_hat)
 
-    theta_hat = jnp.concatenate([theta_hat_reparam[:2+3*p], sigma2_hat])
+    theta_hat = jnp.concatenate([theta_hat_reparam[:1+2*p], sigma2_hat])
 
     # Test sandwich variance
     var_theta = compute_sandwich_variance(Y, Z, theta_hat, params_scale)
