@@ -142,7 +142,7 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
     Assemble analytical covariance matrix V(θ) = E[s_t s_tᵀ].
     """
     p = Wa.shape[0]
-    d = 4 * p + 2
+    d = 1+3*p
 
     gamma_a_x_Wa_dot = ldiag_mul(gamma_a, Wa_dot)
 
@@ -150,10 +150,6 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
     sigma2_inv = 1.0 / sigma2
 
     # --- Diagonal blocks ---
-    # V_eta_a_eta_a0 = T * jnp.trace(
-    #     gamma_a_x_Wa_dot.T @ Sigma_inv @
-    #     gamma_a_x_Wa_dot @ Gamma0
-    # )
 
     SA = ldiag_mul(sigma2_inv, gamma_a_x_Wa_dot)     # Σ⁻¹ A
     AG = gamma_a_x_Wa_dot @ Gamma0                      # A Γ₀
@@ -201,14 +197,14 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
         V = V.at[1+2*p:1+3*p, 1+2*p:1+3*p].set(jnp.diag(V_sigma_sigma))
 
         # --- Cross-block for vector symmetric filling ---
-        V = V.at[2:2+p, 0].set(V_gamma_a_eta_a)
-        V = V.at[0, 2:2+p].set(V_gamma_a_eta_a)
+        V = V.at[1:1+p, 0].set(V_gamma_a_eta_a)
+        V = V.at[0, 1:1+p].set(V_gamma_a_eta_a)
 
-        V = V.at[2+2*p:2+3*p, 0].set(V_beta_eta_a)
-        V = V.at[0, 2+2*p:2+3*p].set(V_beta_eta_a)
+        V = V.at[1+p:1+2*p, 0].set(V_beta_eta_a)
+        V = V.at[0, 1+p:1+2*p].set(V_beta_eta_a)
 
-        V = V.at[2+3*p:2+4*p, 0].set(V_sigma_eta_a)
-        V = V.at[0, 2+3*p:2+4*p].set(V_sigma_eta_a)
+        V = V.at[1+2*p:1+3*p, 0].set(V_sigma_eta_a)
+        V = V.at[0, 1+2*p:1+3*p].set(V_sigma_eta_a)
 
         # --- Cross-block diag symmetric filling ---
         i = jnp.arange(p)
@@ -253,7 +249,6 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
 def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True):
     V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
 
-    sigma2_inv = 1 / sigma2
     sigma_inv4 = 1.0 / (sigma2 ** 2)
 
     Delta_sigma_sigma = (kappa4 - 3) / 4.0 * sigma_inv4  # vector p
@@ -263,9 +258,8 @@ def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
         i = jnp.arange(p)
 
         # scalar–scalar
-
         # sigma – sigma  (DIAGONAL VECTOR)
-        H = H.at[2+3*p + i, 2+3*p + i].add(-Delta_sigma_sigma)
+        H = H.at[1+2*p + i, 1+2*p + i].add(-Delta_sigma_sigma)
 
     else:
         H["sigma_sigma"] = H["sigma_sigma"] - Delta_sigma_sigma
@@ -286,8 +280,8 @@ def apply_block_operator(x, M, p):
     xa = x[0]
     x_ga = x[2:2+p]
     x_gb = x[2+p:2+2*p]
-    x_b  = x[2+2*p:2+3*p]
-    x_s  = x[2+3*p:2+4*p]
+    x_b = x[2+2*p:2+3*p]
+    x_s = x[2+3*p:2+4*p]
 
     out = jnp.zeros_like(x)
 
@@ -305,7 +299,7 @@ def apply_block_operator(x, M, p):
     y_ga = y_ga + M["gamma_b_gamma_a"] * x_gb
     y_ga = y_ga + M["beta_gamma_a"]    * x_b
     y_ga = y_ga + M["sigma_gamma_a"]   * x_s
-    out = out.at[2:2+p].set(y_ga)
+    out = out.at[1:1+p].set(y_ga)
 
     # --- beta block ---
     y_b = M["beta_eta_a"] * xa + M["beta_eta_b"] * xb
@@ -313,7 +307,7 @@ def apply_block_operator(x, M, p):
     y_b = y_b + M["beta_gamma_b"] * x_gb
     y_b = y_b + M["beta_beta"]    * x_b
     y_b = y_b + M["sigma_beta"]   * x_s
-    out = out.at[2+2*p:2+3*p].set(y_b)
+    out = out.at[1+p:1+2*p].set(y_b)
 
     # --- sigma block ---
     y_s = M["sigma_eta_a"] * xa + M["sigma_eta_b"] * xb
@@ -321,9 +315,10 @@ def apply_block_operator(x, M, p):
     y_s = y_s + M["sigma_gamma_b"] * x_gb
     y_s = y_s + M["sigma_beta"]    * x_b
     y_s = y_s + M["sigma_sigma"]   * x_s
-    out = out.at[2+3*p:2+4*p].set(y_s)
+    out = out.at[1+2*p:1+3*p].set(y_s)
 
     return out
+
 
 def estimate_diag_sandwich_rademacher(
     H, V,
@@ -348,7 +343,7 @@ def estimate_diag_sandwich_rademacher(
         Dimension of each vector block.
     """
 
-    d = 2 + 4 * p
+    d = 1 + 3 * p
 
     # ============================================================
     # 1. Block-Jacobi preconditioner Minv
@@ -362,15 +357,8 @@ def estimate_diag_sandwich_rademacher(
 
     # diagonal vector blocks
     inv_gamma_a = 1.0 / H["gamma_a_gamma_a"]
-    inv_beta    = 1.0 / H["beta_beta"]
-    inv_sigma   = 1.0 / H["sigma_sigma"]
-
-    # full gamma_b block
-    Lb = jnp.linalg.cholesky(H["gamma_b_gamma_b"])
-
-    def solve_gamma_b(v):
-        # solves H_gb x = v
-        return cho_solve((Lb, True), v)
+    inv_beta = 1.0 / H["beta_beta"]
+    inv_sigma = 1.0 / H["sigma_sigma"]
 
     def Minv(x):
         xa, xb = x[0], x[1]
@@ -382,7 +370,6 @@ def estimate_diag_sandwich_rademacher(
         ya = inv_eta[0] * xa
         yb = inv_eta[1] * xb
         y_ga = inv_gamma_a * x_ga
-        y_gb = solve_gamma_b(x_gb)
         y_b  = inv_beta * x_b
         y_s  = inv_sigma * x_s
 
@@ -432,7 +419,7 @@ def estimate_Avar_explicit(H, V, apply_H, apply_V, p,):
     Explicitly compute A = H^{-1} V H^{-1}.
     WARNING: O(d^3), only feasible for small p.
     """
-    d = 2 + 4 * p
+    d = 1 + 3 * p
     A = jnp.zeros((d, d))
 
     # Solve H X = I column by column
@@ -450,12 +437,14 @@ def estimate_Avar_explicit(H, V, apply_H, apply_V, p,):
 
     return A
 
+
 def compute_Avar(H, V):
 
     HinvV = jnp.linalg.solve(H, V)
     Avar = jnp.linalg.solve(H, HinvV.T).T
 
     return Avar
+
 
 def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0.05, verbose=False):
 
@@ -471,7 +460,6 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 
     G = jnp.diag(beta) + ldiag_mul(gamma_a, Wa)
 
-    # Gamma0 = Gamma0_stationary(S, G, sigma2) # explicit form, slow
     Gamma0 = Gamma0_stationary_with_lyapunov_doubling(S, G, sigma2)
 
     # full = False
@@ -545,7 +533,7 @@ if __name__ == "__main__":
     update_idx = range(0, 3*p+2)
     # update_idx = slice(None)
     # --- Simulate data ---
-    Y, Z, W_a, W_b = simulate_VAR_attention(key, params_true, T=T, p=p, q=q, dist="normal")
+    Y, Z, W_a = simulate_VAR_attention(key, params_true, T=T, p=p, q=q, dist="normal")
     print("Simulated Y shape:", Y.shape)
 
     # --- Convert σ² → σ̃² (softplus inverse) ---
