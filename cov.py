@@ -290,7 +290,7 @@ def estimate_diag_sandwich_rademacher(
         Dimension of each vector block.
     """
 
-    d = H.shape[0]
+    d = 1 + 3 * p
 
     inv_eta = 1.0 / H["eta_a_eta_a"]
     inv_gamma_a = 1.0 / H["gamma_a_gamma_a"]

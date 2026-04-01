@@ -69,6 +69,8 @@ def loglik(theta, Y, Z, params_scale):
         - 1/2 * quad
     )
 
+    return val
+
 
 def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
     """

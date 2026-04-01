@@ -13,7 +13,7 @@ def Sigma_inv_from_sigma2(sigma2):
 
 def softplus_sigma2(theta, p):
     """Extract σ² = softplus(σ̃²) and its derivatives wrt σ̃²."""
-    sigma2_tilde = theta[2 + 3 * p : 2 + 4 * p]
+    sigma2_tilde = theta[1 + 2 * p : 1 + 3 * p]
     sigma2 = jax.nn.softplus(sigma2_tilde)
     d_sigma2 = jax.nn.sigmoid(sigma2_tilde)          # ∂σ²/∂σ̃²
     dd_sigma2 = d_sigma2 * (1.0 - d_sigma2)          # ∂²σ²/∂σ̃²²
@@ -22,7 +22,7 @@ def softplus_sigma2(theta, p):
 
 def Sigma_inv_from_tilde(theta, p):
     """Convenience helper: compute Σ⁻¹ given θ with σ̃²."""
-    sigma2_tilde = theta[2 + 3 * p : 2 + 4 * p]
+    sigma2_tilde = theta[1 + 2 * p : 1 + 3 * p]
     sigma2 = jax.nn.softplus(sigma2_tilde)
     return jnp.diag(1.0 / sigma2)
 
@@ -93,11 +93,8 @@ def hess_block_eta_a_gamma_a(theta, Y, Z, params_scale):
     """∂²ℓ / ∂η_a ∂γ_aᵀ — interaction between attention strength η_a and γ_a."""
     T, p = Y.shape
     eta_a = theta[0]
-    eta_b = theta[1]
     gamma_a = theta[1:1+p]
-
-
-    beta = theta[2+2*p:2+3*p]
+    beta = theta[1+p:1+2*p]
     sigma2 = jax.nn.softplus(theta[1+2*p:1+3*p])
 
     W_a, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale['eta_a'])
@@ -331,7 +328,7 @@ def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(N
 
     # Off diagonal blocks
     H = H.at[0:1, 1+p:1+2*p].set(hess_block_eta_a_beta(theta, Y, Z, params_scale))
-    H = H.at[1+p:+2*p, 0:1].set(hess_block_eta_a_beta(theta, Y, Z, params_scale).T)
+    H = H.at[1+p:1+2*p, 0:1].set(hess_block_eta_a_beta(theta, Y, Z, params_scale).T)
 
     H = H.at[0:1, 1:1+p].set(hess_block_eta_a_gamma_a(theta, Y, Z, params_scale))
     H = H.at[1:1+p, 0:1].set(hess_block_eta_a_gamma_a(theta, Y, Z, params_scale).T)
@@ -340,7 +337,7 @@ def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(N
     H = H.at[1+2*p:1+3*p, 0:1].set(hess_block_eta_a_sigma2(theta, Y, Z, params_scale).T)
 
     H = H.at[1:1+p, 1+p:1+2*p].set(hess_block_gamma_a_beta(theta, Y, Z, params_scale))
-    H = H.at[1+p:+2*p, 1:1+p].set(hess_block_gamma_a_beta(theta, Y, Z, params_scale).T)
+    H = H.at[1+p:1+2*p, 1:1+p].set(hess_block_gamma_a_beta(theta, Y, Z, params_scale).T)
 
     H = H.at[1:1+p, 1+2*p:1+3*p].set(hess_block_gamma_a_sigma2(theta, Y, Z, params_scale))
     H = H.at[1+2*p:1+3*p, 1:1+p].set(hess_block_gamma_a_sigma2(theta, Y, Z, params_scale).T)
