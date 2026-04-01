@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.stats import norm
 from jax.scipy.sparse.linalg import cg
-from jax.scipy.linalg import cho_solve
 
 from hess import compute_Wa_Wb_dots
 
@@ -10,13 +9,13 @@ from hess import compute_Wa_Wb_dots
 # === Utility functions =========================================
 # ===============================================================
 def vec(X):
-    """Vectorize matrix X (column-major flatten)."""
-    return X.reshape(-1, 1)
+    """Vectorize matrix X in column-major order."""
+    return X.T.reshape(-1, 1)
 
 
 def unvec(v, shape):
     """Inverse of vec() — reshape vector to given shape."""
-    return v.reshape(shape)
+    return v.reshape((shape[1], shape[0])).T
 
 # ===============================================================
 # === Stationary covariance =====================================
@@ -91,12 +90,6 @@ def ldiag_mul(gamma, X):
     return gamma[:, None] * X
 
 
-def rsolve_S(S, M):
-    """
-    Compute M @ S^{-1} without forming inverse.
-    """
-    return jnp.linalg.solve(S.T, M.T).T
-
 
 # ===============================================================
 # === Assemble analytical V =====================================
@@ -154,10 +147,8 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
         V = V.at[0, 0].set(V_eta_a_eta_a)
 
         V = V.at[jnp.arange(1, 1 + p), jnp.arange(1, 1 + p)].set(V_gamma_a_gamma_a)
-
-        V = V.at[jnp.arrange(1+p,1+2*p), jnp.arrange(1+p,1+2*p)].set(V_beta_beta)
-
-        V = V.at[jnp.arrange(1+2*p,1+3*p), jnp.arrange(1+2*p,1+3*p)].set(V_sigma_sigma)
+        V = V.at[jnp.arange(1+p, 1+2*p), jnp.arange(1+p, 1+2*p)].set(V_beta_beta)
+        V = V.at[jnp.arange(1+2*p, 1+3*p), jnp.arange(1+2*p, 1+3*p)].set(V_sigma_sigma)
 
         # --- Cross-block for vector symmetric filling ---
         V = V.at[1:1+p, 0].set(V_gamma_a_eta_a)
@@ -219,8 +210,6 @@ def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
     H = V.copy()
     if full:
         i = jnp.arange(p)
-
-        # scalar–scalar
         # sigma – sigma  (DIAGONAL VECTOR)
         H = H.at[1+2*p + i, 1+2*p + i].add(-Delta_sigma_sigma)
 
@@ -234,52 +223,46 @@ def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
 # ===============================================================
 # === Sandwich variance =========================================
 # ===============================================================
-
 def apply_block_operator(x, M, p):
     """
     M: dict like V or H (same structure), storing scalars and diag vectors.
-    x: (d,) where d=2+4p
+    x: (d,) where d = 1 + 3p
 
-    returns: (d,) = (full_matrix(M) @ x)  but never materializes the matrix
+    returns: (d,) = full_matrix(M) @ x, without materializing the matrix
     """
     xa = x[0]
-    x_ga = x[2:2+p]
-    x_gb = x[2+p:2+2*p]
-    x_b = x[2+2*p:2+3*p]
-    x_s = x[2+3*p:2+4*p]
+    x_ga = x[1:1+p]
+    x_b = x[1+p:1+2*p]
+    x_s = x[1+2*p:1+3*p]
 
     out = jnp.zeros_like(x)
 
     # --- eta_a row ---
-    out0 = M["eta_a_eta_a"] * xa + M["eta_b_eta_a"] * xb
+    out0 = M["eta_a_eta_a"] * xa
     out0 = out0 + jnp.dot(M["gamma_a_eta_a"], x_ga)
-    out0 = out0 + jnp.dot(M["gamma_b_eta_a"], x_gb)
-    out0 = out0 + jnp.dot(M["beta_eta_a"],    x_b)
-    out0 = out0 + jnp.dot(M["sigma_eta_a"],   x_s)
+    out0 = out0 + jnp.dot(M["beta_eta_a"], x_b)
+    out0 = out0 + jnp.dot(M["sigma_eta_a"], x_s)
     out = out.at[0].set(out0)
 
-    # --- gamma_a block (diag-only vector–vector) ---
-    y_ga = M["gamma_a_eta_a"] * xa + M["gamma_a_eta_b"] * xb
+    # --- gamma_a block ---
+    y_ga = M["gamma_a_eta_a"] * xa
     y_ga = y_ga + M["gamma_a_gamma_a"] * x_ga
-    y_ga = y_ga + M["gamma_b_gamma_a"] * x_gb
-    y_ga = y_ga + M["beta_gamma_a"]    * x_b
-    y_ga = y_ga + M["sigma_gamma_a"]   * x_s
+    y_ga = y_ga + M["beta_gamma_a"] * x_b
+    y_ga = y_ga + M["sigma_gamma_a"] * x_s
     out = out.at[1:1+p].set(y_ga)
 
     # --- beta block ---
-    y_b = M["beta_eta_a"] * xa + M["beta_eta_b"] * xb
+    y_b = M["beta_eta_a"] * xa
     y_b = y_b + M["beta_gamma_a"] * x_ga
-    y_b = y_b + M["beta_gamma_b"] * x_gb
-    y_b = y_b + M["beta_beta"]    * x_b
-    y_b = y_b + M["sigma_beta"]   * x_s
+    y_b = y_b + M["beta_beta"] * x_b
+    y_b = y_b + M["sigma_beta"] * x_s
     out = out.at[1+p:1+2*p].set(y_b)
 
     # --- sigma block ---
-    y_s = M["sigma_eta_a"] * xa + M["sigma_eta_b"] * xb
+    y_s = M["sigma_eta_a"] * xa
     y_s = y_s + M["sigma_gamma_a"] * x_ga
-    y_s = y_s + M["sigma_gamma_b"] * x_gb
-    y_s = y_s + M["sigma_beta"]    * x_b
-    y_s = y_s + M["sigma_sigma"]   * x_s
+    y_s = y_s + M["sigma_beta"] * x_b
+    y_s = y_s + M["sigma_sigma"] * x_s
     out = out.at[1+2*p:1+3*p].set(y_s)
 
     return out
@@ -307,47 +290,30 @@ def estimate_diag_sandwich_rademacher(
         Dimension of each vector block.
     """
 
-    d = 1 + 3 * p
+    d = H.shape[0]
 
-    # ============================================================
-    # 1. Block-Jacobi preconditioner Minv
-    # ============================================================
-
-    # scalar blocks
-    inv_eta = jnp.array([
-        1.0 / H["eta_a_eta_a"],
-        1.0 / H["eta_b_eta_b"],
-    ])
-
-    # diagonal vector blocks
+    inv_eta = 1.0 / H["eta_a_eta_a"]
     inv_gamma_a = 1.0 / H["gamma_a_gamma_a"]
     inv_beta = 1.0 / H["beta_beta"]
     inv_sigma = 1.0 / H["sigma_sigma"]
 
     def Minv(x):
-        xa, xb = x[0], x[1]
-        x_ga = x[2:2+p]
-        x_gb = x[2+p:2+2*p]
-        x_b  = x[2+2*p:2+3*p]
-        x_s  = x[2+3*p:2+4*p]
+        xa = x[0]
+        x_ga = x[1:1+p]
+        x_b  = x[1+p:1+2*p]
+        x_s  = x[1+2*p:1+3*p]
 
-        ya = inv_eta[0] * xa
-        yb = inv_eta[1] * xb
+        ya = inv_eta * xa
         y_ga = inv_gamma_a * x_ga
         y_b  = inv_beta * x_b
         y_s  = inv_sigma * x_s
 
         return jnp.concatenate([
-            jnp.array([ya, yb]),
+            jnp.array([ya]),
             y_ga,
-            y_gb,
             y_b,
             y_s
         ])
-
-    # ============================================================
-    # 2. Linear solve helper: H x = b
-    # ============================================================
 
     def solve_H(b):
         x, _ = cg(
@@ -359,19 +325,15 @@ def estimate_diag_sandwich_rademacher(
         )
         return x
 
-    # ============================================================
-    # 3. Rademacher (Hutchinson) estimator
-    # ============================================================
-
     diag_est = jnp.zeros((d,))
 
     for _ in range(num_mc):
         key, sub = jax.random.split(key)
         z = jax.random.rademacher(sub, (d,), dtype=jnp.float32)
 
-        u = solve_H(z)        # H^{-1} z
-        w = apply_V(u)        # V H^{-1} z
-        v = solve_H(w)        # H^{-1} V H^{-1} z
+        u = solve_H(z)
+        w = apply_V(u)
+        v = solve_H(w)
 
         diag_est = diag_est + z * v
 
@@ -424,7 +386,7 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 
     G = jnp.diag(beta) + ldiag_mul(gamma_a, Wa)
 
-    Gamma0 = ???
+    Gamma0 = Gamma0_stationary_with_lyapunov_doubling(G, sigma2)
     # full = False
     # V = assemble_V(Wa, Wb, Wa_dot, Wb_dot,
     #                     gamma_a, gamma_b,

@@ -320,7 +320,7 @@ def hess_block_beta(theta, Y, Z):
 def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(None)):
     """Assemble full analytical Hessian H(θ̃)."""
     T, p = Y.shape
-    d2 = 3*p + 1
+    d2 = len(theta)
     H = jnp.zeros((d2, d2))
 
     # Diagonal blocks
