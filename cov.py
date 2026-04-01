@@ -153,11 +153,11 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
         V = jnp.zeros((d, d))
         V = V.at[0, 0].set(V_eta_a_eta_a)
 
-        V = V.at[1:1+p, 1:1+p].set(jnp.diag(V_gamma_a_gamma_a))
+        V = V.at[jnp.arange(1, 1 + p), jnp.arange(1, 1 + p)].set(V_gamma_a_gamma_a)
 
-        V = V.at[1+p:1+2*p, 1+p:1+2*p].set(jnp.diag(V_beta_beta))
+        V = V.at[jnp.arrange(1+p,1+2*p), jnp.arrange(1+p,1+2*p)].set(V_beta_beta)
 
-        V = V.at[1+2*p:1+3*p, 1+2*p:1+3*p].set(jnp.diag(V_sigma_sigma))
+        V = V.at[jnp.arrange(1+2*p,1+3*p), jnp.arrange(1+2*p,1+3*p)].set(V_sigma_sigma)
 
         # --- Cross-block for vector symmetric filling ---
         V = V.at[1:1+p, 0].set(V_gamma_a_eta_a)
