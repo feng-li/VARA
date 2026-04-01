@@ -158,9 +158,8 @@ def hess_block_eta_a_sigma2(theta, Y, Z, params_scale):
     D_ga = jnp.diag(gamma_a)
 
     # residuals
-    D_beta = jnp.diag(theta[2+2*p:2+3*p])
+    D_beta = jnp.diag(theta[1+p:1+2*p])
     G = D_beta + D_ga @ W_a
-
 
     E = Y[1:] - Y[:-1] @ G.T        # (T-1)×p
 

@@ -305,10 +305,10 @@ if __name__ == "__main__":
     theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_short)
 
     # Convert back to natural scale (with softplus)
-    sigma2_tilde_hat = theta_hat_reparam[2+3*p:2+4*p]
+    sigma2_tilde_hat = theta_hat_reparam[1+2*p:1+3*p]
     sigma2_hat = jax.nn.softplus(sigma2_tilde_hat)
 
-    theta_hat = jnp.concatenate([theta_hat_reparam[:2+3*p], sigma2_hat])
+    theta_hat = jnp.concatenate([theta_hat_reparam[:1+2*p], sigma2_hat])
 
 
     # --- Plot log-likelihood profile for update_idx parameters ---

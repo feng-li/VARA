@@ -173,7 +173,7 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde
 
     # Flatten parameter vector θ̃ (for estimation/Hessian functions)
-    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    order = ["eta_a", "gamma_a", "beta", "sigma2"]
     theta_tilde, _ = flatten_params(params_reparam, order)
 
     print("Parameter vector θ (reparameterized) length:", theta_tilde.shape[0])
