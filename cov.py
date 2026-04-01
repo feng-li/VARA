@@ -18,27 +18,25 @@ def unvec(v, shape):
     """Inverse of vec() — reshape vector to given shape."""
     return v.reshape(shape)
 
-
 # ===============================================================
 # === Stationary covariance =====================================
 # ===============================================================
-def Gamma0_stationary(S, G, sigma2):
+
+def Gamma0_stationary(G, sigma2):
     """
     Solve for the stationary covariance matrix Γ₀ of Yₜ in:
-        Yₜ = S⁻¹ G Yₜ₋₁ + S⁻¹ εₜ ,   εₜ ∼ (0, Σₑ).
+        Yₜ = G Yₜ₋₁ + εₜ ,   εₜ ∼ (0, Σₑ).
 
     Note that this function is very memory consuming.
     """
-    p = S.shape[0]
-    Sinv = jnp.linalg.inv(S)
-    A = Sinv @ G
-    kron_term = jnp.kron(A, A)
-    I = jnp.eye(p * p)
     Sigma_e = jnp.diag(sigma2)
-    rhs = vec(Sinv @ Sigma_e @ Sinv.T)
-    vecGamma = jnp.linalg.solve(I - kron_term, rhs)
+    vecGamma = jnp.linalg.solve(
+        jnp.eye(G.shape[0] ** 2) - jnp.kron(G, G),
+        vec(Sigma_e)
+    )
+    return unvec(vecGamma, G.shape)
 
-    return unvec(vecGamma, (p, p))
+
 
 def lyapunov_doubling(A, Q, max_iter=30, tol=1e-6):
     """
@@ -61,52 +59,16 @@ def lyapunov_doubling(A, Q, max_iter=30, tol=1e-6):
     return Qk
 
 
-def Gamma0_stationary_with_lyapunov_doubling(
-    S,
-    G,
-    sigma2,
-    max_iter=30,
-    tol=1e-6,
-):
+def Gamma0_stationary_with_lyapunov_doubling(G, sigma2, max_iter=30, tol=1e-6,):
     """
-    Compute stationary covariance Γ₀ using Lyapunov doubling.
+    Compute stationary covariance Γ₀ for
+        Y_t = G Y_{t-1} + ε_t,
+        ε_t ~ (0, diag(sigma2))
 
-    Model:
-        Y_t = S^{-1} G Y_{t-1} + S^{-1} ε_t,
-        ε_t ~ (0, Σ_e)
-
-    Γ₀ solves:
-        Γ₀ = A Γ₀ Aᵀ + Q
-    where:
-        A = S^{-1} G
-        Q = S^{-1} Σ_e S^{-T}
-
-    Parameters
-    ----------
-    S : (p, p) array
-        Structural matrix (I - diag(gamma_b) @ Wb)
-    G : (p, p) array
-        Autoregressive matrix
-    Sigma_e : (p, p) array
-        Innovation covariance (typically diag(sigma2))
-    max_iter : int
-        Maximum doubling iterations
-    tol : float
-        Convergence tolerance for ||A_k||
-
-    Returns
-    -------
-    Gamma0 : (p, p) array
-        Stationary covariance matrix
+    using Lyapunov doubling.
     """
-    A = jnp.linalg.solve(S, G)
-    # Q = jnp.linalg.solve(S, jnp.diag(sigma2))
-    Q = rsolve_S(S, jnp.eye(S.shape[0])) * sigma2[None, :]
-    Q = jnp.linalg.solve(S, Q.T).T   # left + right solve => S^{-1} Σ_e S^{-T}
-
-    # Solve Γ₀ = A Γ₀ Aᵀ + Q
-    Gamma0 = lyapunov_doubling(A, Q, max_iter=max_iter, tol=tol)
-
+    Q = jnp.diag(sigma2)
+    Gamma0 = lyapunov_doubling(G, Q, max_iter=max_iter, tol=tol)
     return Gamma0
 
 
@@ -128,19 +90,20 @@ def ldiag_mul(gamma, X):
     """
     return gamma[:, None] * X
 
+
 def rsolve_S(S, M):
     """
     Compute M @ S^{-1} without forming inverse.
     """
     return jnp.linalg.solve(S.T, M.T).T
 
+
 # ===============================================================
 # === Assemble analytical V =====================================
 # ===============================================================
 def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True):
-    """
-    Assemble analytical covariance matrix V(θ) = E[s_t s_tᵀ].
-    """
+    """Assemble analytical covariance matrix V(θ) = E[s_t s_tᵀ]."""
+
     p = Wa.shape[0]
     d = 1+3*p
 
@@ -247,8 +210,8 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
 # === Assemble analytical H =====================================
 # ===============================================================
 def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True):
-    V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
 
+    V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
     sigma_inv4 = 1.0 / (sigma2 ** 2)
 
     Delta_sigma_sigma = (kappa4 - 3) / 4.0 * sigma_inv4  # vector p
@@ -271,10 +234,12 @@ def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
 # ===============================================================
 # === Sandwich variance =========================================
 # ===============================================================
+
 def apply_block_operator(x, M, p):
     """
     M: dict like V or H (same structure), storing scalars and diag vectors.
     x: (d,) where d=2+4p
+
     returns: (d,) = (full_matrix(M) @ x)  but never materializes the matrix
     """
     xa = x[0]
@@ -330,8 +295,7 @@ def estimate_diag_sandwich_rademacher(
     key=jax.random.PRNGKey(0),
 ):
     """
-    Estimate diag(H^{-1} V H^{-1}) using
-    Rademacher (Hutchinson) + CG + block-Jacobi preconditioner.
+    Estimate diag(H^{-1} V H^{-1}) using Rademacher (Hutchinson) + CG + block-Jacobi preconditioner.
 
     Parameters
     ----------
@@ -415,8 +379,8 @@ def estimate_diag_sandwich_rademacher(
 
 
 def estimate_Avar_explicit(H, V, apply_H, apply_V, p,):
-    """
-    Explicitly compute A = H^{-1} V H^{-1}.
+    """Explicitly compute A = H^{-1} V H^{-1}.
+
     WARNING: O(d^3), only feasible for small p.
     """
     d = 1 + 3 * p
@@ -460,8 +424,7 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 
     G = jnp.diag(beta) + ldiag_mul(gamma_a, Wa)
 
-    Gamma0 = Gamma0_stationary_with_lyapunov_doubling(S, G, sigma2)
-
+    Gamma0 = ???
     # full = False
     # V = assemble_V(Wa, Wb, Wa_dot, Wb_dot,
     #                     gamma_a, gamma_b,
@@ -530,7 +493,7 @@ if __name__ == "__main__":
     algorithm = "auto_gradhess"
     # algorithm = "analytical_gradhess"
     # update_idx = [1]
-    update_idx = range(0, 3*p+2)
+    update_idx = range(0, 1+2*p)
     # update_idx = slice(None)
     # --- Simulate data ---
     Y, Z, W_a = simulate_VAR_attention(key, params_true, T=T, p=p, q=q, dist="normal")
