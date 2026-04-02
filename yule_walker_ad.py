@@ -292,7 +292,7 @@ if __name__ == "__main__":
     Wa_vals = jnp.array(Wa_vals)
 
     # --- Save two separate plots into ONE pdf ---
-    with PdfPages("Wa_Wb_profiles.pdf") as pdf:
+    with PdfPages("Yule_Walker_Wa_profiles.pdf") as pdf:
 
         # -------- Plot 1: W_a(eta_a) --------
         plt.figure(figsize=(7,5))
@@ -307,7 +307,7 @@ if __name__ == "__main__":
         pdf.savefig()
         plt.close()
 
-    print("Saved two attention profiles in one file: Wa_Wb_profiles.pdf")
+    print("Saved two attention profiles in one file: Yule_Walker_Wa_profiles.pdf")
 
     # breakpoint()
     # diff = jnp.stack([theta_true_reparam, theta_hat_reparam], axis=0)
