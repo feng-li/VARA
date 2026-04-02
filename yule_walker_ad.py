@@ -265,8 +265,8 @@ if __name__ == "__main__":
         ax.axis("off")
 
     plt.tight_layout()
-    plt.savefig(os.path.expanduser("yule_walker_profiles.pdf"), bbox_inches="tight")
-    print("✅ Saved all Yule Walker profiles to yule_walker_profiles.pdf")
+    plt.savefig(os.path.expanduser("Yule_Walker_profiles.pdf"), bbox_inches="tight")
+    print("Saved all Yule Walker profiles to Yule_Walker_profiles.pdf")
 
 
     print("True theta:", theta_true_reparam)
