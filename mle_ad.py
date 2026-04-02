@@ -272,8 +272,8 @@ if __name__ == "__main__":
 
     algorithm = "auto_gradhess"
     # algorithm = "analytical_gradhess"
-    update_idx = [0, 1+p]
-    # update_idx = slice(None)
+    # update_idx = [0, 1+p]
+    update_idx = slice(None)
 
     # --- Simulate data ---
     Y, Z, W_a = simulate_VAR_attention(key, params_true, T=T, p=p, q=q, dist="normal")
@@ -351,8 +351,7 @@ if __name__ == "__main__":
 
     plt.tight_layout()
     plt.savefig(os.path.expanduser("likelihood_profiles.pdf"), bbox_inches="tight")
-    print("✅ Saved all likelihood profiles to 'likelihood_profiles.pdf'")
-
+    print("Saved all likelihood profiles to 'likelihood_profiles.pdf'")
 
     print("True theta:", theta_true_reparam)
     print("Estimated theta:", theta_hat_reparam)
