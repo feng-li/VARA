@@ -109,68 +109,68 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
         status = int(convergence["status"])
 
-       if status == 0:
-           try:
-               z_eta, _ = compute_z_stat_from_theta_hat(
-                   Y=Y,
-                   Z=Z,
-                   theta_hat=theta_hat,
-                   theta_true=theta_true,
-                   A=make_A(p=p, kind="eta_a"),
-                   rate=jnp.sqrt(T * p),
-                   params_scale=params_scale,
-                   kappa4=kappa4,
-                   scaling="theory",
-               )
+        if status == 0:
+            try:
+                z_eta, _ = compute_z_stat_from_theta_hat(
+                    Y=Y,
+                    Z=Z,
+                    theta_hat=theta_hat,
+                    theta_true=theta_true,
+                    A=make_A(p=p, kind="eta_a"),
+                    rate=jnp.sqrt(T * p),
+                    params_scale=params_scale,
+                    kappa4=kappa4,
+                    scaling="theory",
+                )
 
-               z_gamma1, _ = compute_z_stat_from_theta_hat(
-                   Y=Y,
-                   Z=Z,
-                   theta_hat=theta_hat,
-                   theta_true=theta_true,
-                   A=make_A(p=p, kind="gamma_a", j=1),
-                   rate=jnp.sqrt(T),
-                   params_scale=params_scale,
-                   kappa4=kappa4,
-                   scaling="theory",
-               )
+                z_gamma1, _ = compute_z_stat_from_theta_hat(
+                    Y=Y,
+                    Z=Z,
+                    theta_hat=theta_hat,
+                    theta_true=theta_true,
+                    A=make_A(p=p, kind="gamma_a", j=1),
+                    rate=jnp.sqrt(T),
+                    params_scale=params_scale,
+                    kappa4=kappa4,
+                    scaling="theory",
+                )
 
-               z_beta1, _ = compute_z_stat_from_theta_hat(
-                   Y=Y,
-                   Z=Z,
-                   theta_hat=theta_hat,
-                   theta_true=theta_true,
-                   A=make_A(p=p, kind="beta", j=1),
-                   rate=jnp.sqrt(T),
-                   params_scale=params_scale,
-                   kappa4=kappa4,
-                   scaling="theory",
-               )
+                z_beta1, _ = compute_z_stat_from_theta_hat(
+                    Y=Y,
+                    Z=Z,
+                    theta_hat=theta_hat,
+                    theta_true=theta_true,
+                    A=make_A(p=p, kind="beta", j=1),
+                    rate=jnp.sqrt(T),
+                    params_scale=params_scale,
+                    kappa4=kappa4,
+                    scaling="theory",
+                )
 
-               z_sigma1, _ = compute_z_stat_from_theta_hat(
-                   Y=Y,
-                   Z=Z,
-                   theta_hat=theta_hat,
-                   theta_true=theta_true,
-                   A=make_A(p=p, kind="sigma2", j=1),
-                   rate=jnp.sqrt(T),
-                   params_scale=params_scale,
-                   kappa4=kappa4,
-                   scaling="theory",
-               )
+                z_sigma1, _ = compute_z_stat_from_theta_hat(
+                    Y=Y,
+                    Z=Z,
+                    theta_hat=theta_hat,
+                    theta_true=theta_true,
+                    A=make_A(p=p, kind="sigma2", j=1),
+                    rate=jnp.sqrt(T),
+                    params_scale=params_scale,
+                    kappa4=kappa4,
+                    scaling="theory",
+                )
 
-               z_stats = jnp.array([
-                   z_eta[0],
-                   z_gamma1[0],
-                   z_beta1[0],
-                   z_sigma1[0],
-               ])
+                z_stats = jnp.array([
+                    z_eta[0],
+                    z_gamma1[0],
+                    z_beta1[0],
+                    z_sigma1[0],
+                ])
 
-           except Exception as e:
-               print(f"[single_replication theorem verification error] {e}")
-               z_stats = jnp.full((4,), jnp.nan)
+            except Exception as e:
+                print(f"[single_replication theorem verification error] {e}")
+                z_stats = jnp.full((4,), jnp.nan)
 
-           return inside, ci_length, theta_hat, status, z_stats
+            return inside, ci_length, theta_hat, status, z_stats
 
     return last_inside, last_ci_length, last_theta_hat, last_status, last_z_stats
 
