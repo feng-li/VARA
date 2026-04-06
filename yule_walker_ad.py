@@ -268,7 +268,6 @@ if __name__ == "__main__":
     plt.savefig(os.path.expanduser("Yule_Walker_profiles.pdf"), bbox_inches="tight")
     print("Saved all Yule Walker profiles to Yule_Walker_profiles.pdf")
 
-
     print("True theta:", theta_true_reparam)
     print("Estimated theta:", theta_hat_reparam)
 

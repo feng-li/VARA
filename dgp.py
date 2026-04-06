@@ -36,6 +36,47 @@ def create_structured_features(key, p, q):
     return Z
 
 
+def ensure_stationarity(beta, gamma_a, margin=0.98, eps=1e-6):
+    """
+    Ensure the old-model stationarity condition:
+        ||beta||_inf + ||gamma_a||_inf < 1
+
+    If violated, jointly rescale beta and gamma_a so that the sum is below `margin`.
+
+    Args:
+        beta: jnp.ndarray, shape (p,)
+        gamma_a: jnp.ndarray, shape (p,)
+        margin: float, target upper bound after rescaling, should be < 1
+        eps: float, small number to avoid division by zero
+
+    Returns:
+        beta_new: rescaled beta
+        gamma_a_new: rescaled gamma_a
+        info: dict with diagnostics
+    """
+    beta_max = jnp.max(jnp.abs(beta))
+    gamma_max = jnp.max(jnp.abs(gamma_a))
+    lhs = beta_max + gamma_max
+
+    needs_rescale = lhs >= margin
+    scale = jnp.where(needs_rescale, margin / (lhs + eps), 1.0)
+
+    beta_new = beta * scale
+    gamma_a_new = gamma_a * scale
+
+    info = {
+        "beta_max": beta_max,
+        "gamma_max": gamma_max,
+        "lhs_before": lhs,
+        "scale": scale,
+        "lhs_after": jnp.max(jnp.abs(beta_new)) + jnp.max(jnp.abs(gamma_a_new)),
+        "was_stationary": lhs < 1.0,
+        "rescaled": needs_rescale,
+    }
+
+    return beta_new, gamma_a_new, info
+
+
 def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params_scale=dict(eta_a=1)):
     """
     Simulate data from the VAR attention model.
@@ -68,6 +109,9 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
     beta = params["beta"]
     sigma2 = params["sigma2"]
 
+    # Ensure stationarity
+    beta, gamma_a, stat_info = ensure_stationarity(beta, gamma_a, margin=0.98)
+    print("Stationarity check:", stat_info)
 
     # Step 3: Construct W_a, W_b
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
