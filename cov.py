@@ -220,6 +220,105 @@ def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
 
 
 
+def build_Kp(p, dtype=jnp.float32):
+    """
+    K_p = diag(p^{-1/2}, 1, ..., 1) in R^{(3p+1)x(3p+1)}
+    """
+    d = 1 + 3 * p
+    diag_entries = jnp.ones((d,), dtype=dtype)
+    diag_entries = diag_entries.at[0].set(1.0 / jnp.sqrt(p))
+    return jnp.diag(diag_entries)
+
+
+def build_Kp_adaptive_from_diag(V, H, eps=1e-8, mode="max"):
+    """
+    Build a simple diagonal scaling matrix Kp from the diagonal magnitudes of V and H.
+
+    Parameters
+    ----------
+    V, H : (d, d) arrays
+        Full covariance/sensitivity matrices.
+    eps : float
+        Numerical floor to avoid division by zero.
+    mode : str
+        "max"  -> use max(|diag(V)|, |diag(H)|)
+        "avg"  -> use 0.5 * (|diag(V)| + |diag(H)|)
+
+    Returns
+    -------
+    Kp : (d, d) array
+        Diagonal scaling matrix.
+    scale_vec : (d,) array
+        Diagonal entries of Kp.
+    """
+    diag_V = jnp.abs(jnp.diag(V))
+    diag_H = jnp.abs(jnp.diag(H))
+
+    if mode == "max":
+        d = jnp.maximum(diag_V, diag_H)
+    elif mode == "avg":
+        d = 0.5 * (diag_V + diag_H)
+    else:
+        raise ValueError("mode must be 'max' or 'avg'")
+
+    d = jnp.maximum(d, eps)
+    scale_vec = 1.0 / jnp.sqrt(d)
+    Kp = jnp.diag(scale_vec)
+    return Kp, scale_vec
+
+
+def scale_V_H(V, H, p=None, method="theory", eps=1e-8):
+    """
+    Compute scaled matrices V_tilde and H_tilde.
+
+    Parameters
+    ----------
+    V, H : full matrices
+    p : int or None
+        Needed only if method == "theory"
+    method : str
+        "theory"   -> Kp = diag(p^{-1/2}, 1, ..., 1)
+        "adaptive" -> diagonal scaling from diag(V), diag(H)
+    """
+    if method == "theory":
+        if p is None:
+            raise ValueError("p must be provided when method='theory'")
+        Kp = build_Kp(p, dtype=V.dtype)
+        scale_vec = jnp.diag(Kp)
+    elif method == "adaptive":
+        Kp, scale_vec = build_Kp_adaptive_from_diag(V, H, eps=eps, mode="max")
+    else:
+        raise ValueError("method must be 'theory' or 'adaptive'")
+
+    V_tilde = Kp @ V @ Kp
+    H_tilde = Kp @ H @ Kp
+    return V_tilde, H_tilde, Kp, scale_vec
+
+
+def check_positive_definite_scaled(V_tilde, H_tilde, tol=1e-8):
+    """
+    Check whether V_tilde and H_tilde are numerically positive definite.
+
+    Returns
+    -------
+    info : dict
+        eigenvalue summaries and boolean flags
+    """
+    evals_V = jnp.linalg.eigvalsh(V_tilde)
+    evals_H = jnp.linalg.eigvalsh(H_tilde)
+
+    info = {
+        "evals_V": evals_V,
+        "evals_H": evals_H,
+        "V_min_eig": jnp.min(evals_V),
+        "V_max_eig": jnp.max(evals_V),
+        "H_min_eig": jnp.min(evals_H),
+        "H_max_eig": jnp.max(evals_H),
+        "V_is_pd": jnp.min(evals_V) > tol,
+        "H_is_pd": jnp.min(evals_H) > tol,
+    }
+    return info
+
 # ===============================================================
 # === Sandwich variance =========================================
 # ===============================================================
@@ -415,6 +514,17 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     full = True
     V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
     H = assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
+
+    V_tilde, H_tilde, Kp = scale_V_H(V, H, p)
+    pd_info = check_positive_definite_scaled(V_tilde, H_tilde)
+
+    if verbose:
+        print("Scaled V/H eigenvalue check:")
+        print(f"V_tilde min eig = {pd_info['V_min_eig']:.6e}, max eig = {pd_info['V_max_eig']:.6e}")
+        print(f"H_tilde min eig = {pd_info['H_min_eig']:.6e}, max eig = {pd_info['H_max_eig']:.6e}")
+        print(f"V_tilde PD? {pd_info['V_is_pd']}")
+        print(f"H_tilde PD? {pd_info['H_is_pd']}")
+
     Avar = compute_Avar(H, V)
 
     se = jnp.sqrt(jnp.maximum(jnp.diag(Avar), 0.0))
@@ -424,10 +534,197 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 
     return dict(theta=theta_hat, se=se, lower=lower, upper=upper)
 
+
+
+import jax.numpy as jnp
+
+def make_A_old_model(p, kind, j=None, indices=None, j1=None, j2=None):
+    """
+    Build projection matrix A for the old parameter map:
+
+        theta = (eta_a, gamma_a[1:p], beta[1:p], sigma2[1:p])
+              in R^{3p+1}
+
+    Parameter order in Python indexing:
+        eta_a      -> 0
+        gamma_a[j] -> 1 + (j-1),          j = 1,...,p
+        beta[j]    -> 1 + p + (j-1),      j = 1,...,p
+        sigma2[j]  -> 1 + 2*p + (j-1),    j = 1,...,p
+
+    Parameters
+    ----------
+    p : int
+        Dimension of each vector block.
+    kind : str
+        Type of projection. Supported values:
+            "eta_a"
+            "gamma_a"
+            "beta"
+            "sigma2"
+            "pair"
+            "mean_beta"
+            "mean_gamma_a"
+            "diff_beta"
+            "sum_gamma_beta"
+    j : int or list[int], optional
+        1-based component index, used for:
+            "gamma_a", "beta", "sigma2", "sum_gamma_beta"
+        For "pair", use `indices` instead.
+    indices : list[int], optional
+        List of raw 0-based parameter positions in theta, used for "pair".
+    j1, j2 : int, optional
+        1-based component indices used for "diff_beta".
+
+    Returns
+    -------
+    A : jnp.ndarray
+        Projection matrix of shape (L, 1 + 3*p).
+    """
+    d = 1 + 3 * p
+
+    def idx_gamma_a(j):
+        if not (1 <= j <= p):
+            raise ValueError(f"j must be in 1,...,{p}")
+        return 1 + (j - 1)
+
+    def idx_beta(j):
+        if not (1 <= j <= p):
+            raise ValueError(f"j must be in 1,...,{p}")
+        return 1 + p + (j - 1)
+
+    def idx_sigma2(j):
+        if not (1 <= j <= p):
+            raise ValueError(f"j must be in 1,...,{p}")
+        return 1 + 2 * p + (j - 1)
+
+    if kind == "eta_a":
+        A = jnp.zeros((1, d))
+        A = A.at[0, 0].set(1.0)
+        return A
+
+    elif kind == "gamma_a":
+        if j is None:
+            raise ValueError("j must be provided for kind='gamma_a'")
+        A = jnp.zeros((1, d))
+        A = A.at[0, idx_gamma_a(j)].set(1.0)
+        return A
+
+    elif kind == "beta":
+        if j is None:
+            raise ValueError("j must be provided for kind='beta'")
+        A = jnp.zeros((1, d))
+        A = A.at[0, idx_beta(j)].set(1.0)
+        return A
+
+    elif kind == "sigma2":
+        if j is None:
+            raise ValueError("j must be provided for kind='sigma2'")
+        A = jnp.zeros((1, d))
+        A = A.at[0, idx_sigma2(j)].set(1.0)
+        return A
+
+    elif kind == "pair":
+        if indices is None or len(indices) == 0:
+            raise ValueError("indices must be a non-empty list for kind='pair'")
+        A = jnp.zeros((len(indices), d))
+        for r, idx in enumerate(indices):
+            if not (0 <= idx < d):
+                raise ValueError(f"index {idx} out of range for theta dimension {d}")
+            A = A.at[r, idx].set(1.0)
+        return A
+
+    elif kind == "mean_beta":
+        A = jnp.zeros((1, d))
+        beta_idx = jnp.arange(1 + p, 1 + 2 * p)
+        A = A.at[0, beta_idx].set(1.0 / p)
+        return A
+
+    elif kind == "mean_gamma_a":
+        A = jnp.zeros((1, d))
+        gamma_idx = jnp.arange(1, 1 + p)
+        A = A.at[0, gamma_idx].set(1.0 / p)
+        return A
+
+    elif kind == "diff_beta":
+        if j1 is None or j2 is None:
+            raise ValueError("j1 and j2 must be provided for kind='diff_beta'")
+        A = jnp.zeros((1, d))
+        A = A.at[0, idx_beta(j1)].set(1.0)
+        A = A.at[0, idx_beta(j2)].set(-1.0)
+        return A
+
+    elif kind == "sum_gamma_beta":
+        if j is None:
+            raise ValueError("j must be provided for kind='sum_gamma_beta'")
+        A = jnp.zeros((1, d))
+        A = A.at[0, idx_gamma_a(j)].set(1.0)
+        A = A.at[0, idx_beta(j)].add(1.0)
+        return A
+
+    else:
+        raise ValueError(
+            "Unsupported kind. Choose from "
+            "{'eta_a', 'gamma_a', 'beta', 'sigma2', 'pair', "
+            "'mean_beta', 'mean_gamma_a', 'diff_beta', 'sum_gamma_beta'}"
+        )
+
+def compute_projected_asymptotic_covariance(A, V, H, p, scaling="theory", eps=1e-8):
+    """
+    Compute the projected asymptotic covariance
+        J_T = A H_tilde^{-1} V_tilde H_tilde^{-1} A^T
+
+    Parameters
+    ----------
+    A : (L, d) array
+        Projection matrix, where d = 1 + 3p in the current code.
+        For a single parameter, A can be a row vector reshaped to (1, d).
+    V, H : (d, d) arrays
+        Full covariance/sensitivity matrices.
+    p : int
+        Dimension of the time series.
+    scaling : str
+        "theory"   -> use K_p = diag(p^{-1/2}, 1, ..., 1)
+        "adaptive" -> use your adaptive scaling from diag(V), diag(H)
+    eps : float
+        Numerical floor used only if scaling="adaptive".
+
+    Returns
+    -------
+    J_T : (L, L) array
+        Projected asymptotic covariance.
+    extras : dict
+        Useful intermediate objects for debugging.
+    """
+    A = jnp.atleast_2d(A)
+    d = 1 + 3 * p
+
+    if A.shape[1] != d:
+        raise ValueError(f"A must have shape (L, {d}), got {A.shape}")
+
+    if scaling == "theory":
+        V_tilde, H_tilde, Kp = scale_V_H(V, H, p=p)
+        scale_vec = jnp.diag(Kp)
+    elif scaling == "adaptive":
+        Kp, scale_vec = build_Kp_adaptive_from_diag(V, H, eps=eps, mode="max")
+        V_tilde = Kp @ V @ Kp
+        H_tilde = Kp @ H @ Kp
+    else:
+        raise ValueError("scaling must be either 'theory' or 'adaptive'")
+
+    H_tilde_inv = jnp.linalg.inv(H_tilde)
+    J_T = A @ H_tilde_inv @ V_tilde @ H_tilde_inv @ A.T
+
+    return J_T, {
+        "Kp": Kp,
+        "scale_vec": scale_vec,
+        "V_tilde": V_tilde,
+        "H_tilde": H_tilde,
+        "H_tilde_inv": H_tilde_inv,
+    }
+
 # ------------------------------------------------------------
 # Example
 # ------------------------------------------------------------
-
 
 if __name__ == "__main__":
     import random

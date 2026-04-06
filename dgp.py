@@ -205,6 +205,12 @@ if __name__ == "__main__":
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
+    # Ensure stationarity
+    beta, gamma_a, stat_info = ensure_stationarity(params['beta'], params['gamma_a'], margin=0.98)
+    params['beta'] = beta
+    params['gamma_a'] = gamma_a
+    print("Stationarity check:", stat_info)
+
     params_scale = dict(eta_a=1)
 
     # Simulate dataset
