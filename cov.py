@@ -535,12 +535,9 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     return dict(theta=theta_hat, se=se, lower=lower, upper=upper)
 
 
-
-import jax.numpy as jnp
-
-def make_A_old_model(p, kind, j=None, indices=None, j1=None, j2=None):
+def make_A(p, kind, j=None, indices=None, j1=None, j2=None):
     """
-    Build projection matrix A for the old parameter map:
+    Build projection matrix A for the old parameter map.
 
         theta = (eta_a, gamma_a[1:p], beta[1:p], sigma2[1:p])
               in R^{3p+1}
@@ -668,9 +665,11 @@ def make_A_old_model(p, kind, j=None, indices=None, j1=None, j2=None):
             "'mean_beta', 'mean_gamma_a', 'diff_beta', 'sum_gamma_beta'}"
         )
 
+
 def compute_projected_asymptotic_covariance(A, V, H, p, scaling="theory", eps=1e-8):
     """
-    Compute the projected asymptotic covariance
+    Compute the projected asymptotic covariance.
+
         J_T = A H_tilde^{-1} V_tilde H_tilde^{-1} A^T
 
     Parameters
@@ -721,6 +720,45 @@ def compute_projected_asymptotic_covariance(A, V, H, p, scaling="theory", eps=1e
         "H_tilde": H_tilde,
         "H_tilde_inv": H_tilde_inv,
     }
+
+
+def build_VH_from_theta_hat(Y, Z, theta_hat, params_scale, kappa4=3.0):
+    T, p = Y.shape
+
+    eta_a = theta_hat[0]
+    gamma_a = theta_hat[1:1+p]
+    beta = theta_hat[1+p:1+2*p]
+    sigma2 = theta_hat[1+2*p:1+3*p]
+
+    Wa, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale["eta_a"])
+    G = jnp.diag(beta) + ldiag_mul(gamma_a, Wa)
+    Gamma0 = Gamma0_stationary_with_lyapunov_doubling(G, sigma2)
+
+    V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=kappa4, full=True)
+    H = assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=kappa4, full=True)
+    return V, H
+
+
+def compute_projected_asymptotic_covariance_from_theta_hat(Y, Z, theta_hat, A, params_scale,
+                                                           kappa4=3.0, scaling="theory", eps=1e-8):
+    T, p = Y.shape
+    V, H = build_VH_from_theta_hat(Y, Z, theta_hat, params_scale, kappa4=kappa4)
+    J_T, extras = compute_projected_asymptotic_covariance(
+        A=A, V=V, H=H, p=p, scaling=scaling, eps=eps
+    )
+    return J_T, {"V": V, "H": H, **extras}
+
+
+def compute_z_stat_from_theta_hat(Y, Z, theta_hat, theta_true, A, rate, params_scale,
+                                  kappa4=3.0, scaling="theory"):
+
+    J_T, extras = compute_projected_asymptotic_covariance_from_theta_hat(
+        Y, Z, theta_hat, A, params_scale, kappa4=kappa4, scaling=scaling
+    )
+
+    diff = A @ (theta_hat - theta_true)
+    z_val = rate * diff / jnp.sqrt(jnp.maximum(jnp.diag(J_T), 1e-12))
+    return z_val, {"J_T": J_T, **extras}
 
 # ------------------------------------------------------------
 # Example

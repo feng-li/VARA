@@ -18,74 +18,10 @@ from dgp import simulate_VAR_attention, flatten_params
 from fit import estimate
 from hess import compute_Wa_Wb_dots
 from cov import (
-    assemble_V,
-    assemble_H,
-    Gamma0_stationary_with_lyapunov_doubling,
-    ldiag_mul,
-    compute_projected_asymptotic_covariance,
+    compute_projected_asymptotic_covariance_from_theta_hat,
+    compute_z_stat_from_theta_hat,
     make_A,
 )
-
-# ===============================================================
-# === Helpers ===================================================
-# ===============================================================
-
-def build_full_matrices_from_theta_hat(Y, Z, theta_hat, params_scale, kappa4=3.0):
-    """
-    Rebuild full V and H from theta_hat under the current old-model map:
-        theta = (eta_a, gamma_a, beta, sigma2)
-
-    theta_hat must be on natural scale for sigma2.
-    """
-    T, p = Y.shape
-
-    eta_a = theta_hat[0]
-    gamma_a = theta_hat[1:1+p]
-    beta = theta_hat[1+p:1+2*p]
-    sigma2 = theta_hat[1+2*p:1+3*p]
-
-    Wa, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale["eta_a"])
-    G = jnp.diag(beta) + ldiag_mul(gamma_a, Wa)
-    Gamma0 = Gamma0_stationary_with_lyapunov_doubling(G, sigma2)
-
-    V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=kappa4, full=True)
-    H = assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=kappa4, full=True)
-    return V, H
-
-
-def get_z_stats(theta_hat, theta_true, V, H, T, p):
-    """
-    Construct theorem-verification Z statistics for:
-        eta_a, gamma_a[1], beta[1], sigma2[1]
-
-    Shared parameter eta_a uses sqrt(Tp).
-    Component-specific parameters use sqrt(T).
-    """
-    # eta_a
-    A_eta = make_A(p=p, kind="eta_a")
-    J_eta, _ = compute_projected_asymptotic_covariance(A_eta, V, H, p, scaling="theory")
-    z_eta = jnp.sqrt(T * p) * (theta_hat[0] - theta_true[0]) / jnp.sqrt(jnp.maximum(J_eta[0, 0], 1e-12))
-
-    # gamma_a[1]
-    A_gamma1 = make_A(p=p, kind="gamma_a", j=1)
-    J_gamma1, _ = compute_projected_asymptotic_covariance(A_gamma1, V, H, p, scaling="theory")
-    idx_gamma1 = 1
-    z_gamma1 = jnp.sqrt(T) * (theta_hat[idx_gamma1] - theta_true[idx_gamma1]) / jnp.sqrt(jnp.maximum(J_gamma1[0, 0], 1e-12))
-
-    # beta[1]
-    A_beta1 = make_A(p=p, kind="beta", j=1)
-    J_beta1, _ = compute_projected_asymptotic_covariance(A_beta1, V, H, p, scaling="theory")
-    idx_beta1 = 1 + p
-    z_beta1 = jnp.sqrt(T) * (theta_hat[idx_beta1] - theta_true[idx_beta1]) / jnp.sqrt(jnp.maximum(J_beta1[0, 0], 1e-12))
-
-    # sigma2[1]
-    A_sigma1 = make_A(p=p, kind="sigma2", j=1)
-    J_sigma1, _ = compute_projected_asymptotic_covariance(A_sigma1, V, H, p, scaling="theory")
-    idx_sigma1 = 1 + 2 * p
-    z_sigma1 = jnp.sqrt(T) * (theta_hat[idx_sigma1] - theta_true[idx_sigma1]) / jnp.sqrt(jnp.maximum(J_sigma1[0, 0], 1e-12))
-
-    return jnp.array([z_eta, z_gamma1, z_beta1, z_sigma1])
-
 
 # ===============================================================
 # === Single replication ========================================
@@ -173,26 +109,68 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
         status = int(convergence["status"])
 
-        if status == 0:
-            try:
-                # rebuild V,H from theta_hat
-                V, H = build_full_matrices_from_theta_hat(
-                    Y, Z, theta_hat, params_scale=params_scale, kappa4=kappa4
-                )
+       if status == 0:
+           try:
+               z_eta, _ = compute_z_stat_from_theta_hat(
+                   Y=Y,
+                   Z=Z,
+                   theta_hat=theta_hat,
+                   theta_true=theta_true,
+                   A=make_A(p=p, kind="eta_a"),
+                   rate=jnp.sqrt(T * p),
+                   params_scale=params_scale,
+                   kappa4=kappa4,
+                   scaling="theory",
+               )
 
-                z_stats = get_z_stats(
-                    theta_hat=theta_hat,
-                    theta_true=theta_true,
-                    V=V,
-                    H=H,
-                    T=T,
-                    p=p,
-                )
-            except Exception as e:
-                print(f"[single_replication V/H rebuild error] {e}")
-                z_stats = jnp.full((4,), jnp.nan)
+               z_gamma1, _ = compute_z_stat_from_theta_hat(
+                   Y=Y,
+                   Z=Z,
+                   theta_hat=theta_hat,
+                   theta_true=theta_true,
+                   A=make_A(p=p, kind="gamma_a", j=1),
+                   rate=jnp.sqrt(T),
+                   params_scale=params_scale,
+                   kappa4=kappa4,
+                   scaling="theory",
+               )
 
-            return inside, ci_length, theta_hat, status, z_stats
+               z_beta1, _ = compute_z_stat_from_theta_hat(
+                   Y=Y,
+                   Z=Z,
+                   theta_hat=theta_hat,
+                   theta_true=theta_true,
+                   A=make_A(p=p, kind="beta", j=1),
+                   rate=jnp.sqrt(T),
+                   params_scale=params_scale,
+                   kappa4=kappa4,
+                   scaling="theory",
+               )
+
+               z_sigma1, _ = compute_z_stat_from_theta_hat(
+                   Y=Y,
+                   Z=Z,
+                   theta_hat=theta_hat,
+                   theta_true=theta_true,
+                   A=make_A(p=p, kind="sigma2", j=1),
+                   rate=jnp.sqrt(T),
+                   params_scale=params_scale,
+                   kappa4=kappa4,
+                   scaling="theory",
+               )
+
+               z_stats = jnp.array([
+                   z_eta[0],
+                   z_gamma1[0],
+                   z_beta1[0],
+                   z_sigma1[0],
+               ])
+
+           except Exception as e:
+               print(f"[single_replication theorem verification error] {e}")
+               z_stats = jnp.full((4,), jnp.nan)
+
+           return inside, ci_length, theta_hat, status, z_stats
 
     return last_inside, last_ci_length, last_theta_hat, last_status, last_z_stats
 
@@ -390,13 +368,13 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(seed)
 
     R_list = [100]
-    p_list = [200]
-    q_list = [50]
+    p_list = [10]
+    q_list = [5]
     T_list = [200]
     alpha_list = [0.1]
     dist_list = ["normal"]
 
-    algorithm = "yule-walker"   # or "auto_gradhess", "analytical_gradhess"
+    algorithm = "auto_gradhess"   # "auto_gradhess", "analytical_gradhess"
     out_path = f"results_coverage_@{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
 
     params_dgp = dict(
@@ -406,14 +384,12 @@ if __name__ == "__main__":
         sigma2=dict(minval=0.25, maxval=1.0),
     )
 
-    params_scale = dict(
-        eta_a=1,
-    )
+    params_scale = dict(eta_a=1)
 
     header_written = False
 
     for dist, R, T, p, q, alpha in itertools.product(
-        dist_list, R_list, T_list, p_list, q_list, alpha_list
+            dist_list, R_list, T_list, p_list, q_list, alpha_list
     ):
         print("\n" + "=" * 70 + f"\nRunning Monte Carlo: T={T}, nominal={(1-alpha):.2%}\n" + "=" * 70)
 
