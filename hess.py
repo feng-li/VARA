@@ -351,7 +351,7 @@ def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(N
 
     H_partial = H[jnp.ix_(update_idx, update_idx)]
 
-    return H_partial  / (T-1)**2 # wrt likelihood loss (log likelihood/N)
+    return H_partial/(T-1)  # wrt likelihood loss (log likelihood/N)
 
 # =====================================================
 # Test harness
@@ -418,8 +418,14 @@ if __name__ == "__main__":
     # --- Full-matrix comparison ---
     diff_full = jnp.max(jnp.abs(H_analytical - H_auto))
     print(f"\nMax abs diff (full Hessian, reparameterized): {diff_full:.4f}")
+
+    print("\nHessian (Analytical, reparameterized):")
     print(H_analytical)
+
+    print("\nHessian (JAX autodiff, reparameterized):")
     print(H_auto)
+
+    print("\nHessian diff (Analytical - Autodiff, reparameterized):")
     print(H_analytical - H_auto)
 
     # --- Diagonal block-by-block comparison ---
