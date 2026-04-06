@@ -1,95 +1,158 @@
 import os
-os.environ['JAX_PLATFORMS'] = 'cpu'
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # optional, prevent GPU mem alloc
-os.environ["RAY_memory_usage_threshold"] = "0.9"  # Killing processes to free up memory above the threshold
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["RAY_memory_usage_threshold"] = "0.9"
 
+import gc
+import ray
 import jax
 import jax.numpy as jnp
 from jax.random import uniform
-import time
-import random
 from tqdm import trange
-import ray
-import logging
-
 import pandas as pd
+from datetime import datetime
+import itertools
+import random
 
 from dgp import simulate_VAR_attention, flatten_params
 from fit import estimate
-# from mle_jaxopt import mle_bfgs
+from hess import compute_Wa_Wb_dots
+from cov import (
+    assemble_V,
+    assemble_H,
+    Gamma0_stationary_with_lyapunov_doubling,
+    ldiag_mul,
+    compute_projected_asymptotic_covariance,
+    make_A,
+)
 
+# ===============================================================
+# === Helpers ===================================================
+# ===============================================================
+
+def build_full_matrices_from_theta_hat(Y, Z, theta_hat, params_scale, kappa4=3.0):
+    """
+    Rebuild full V and H from theta_hat under the current old-model map:
+        theta = (eta_a, gamma_a, beta, sigma2)
+
+    theta_hat must be on natural scale for sigma2.
+    """
+    T, p = Y.shape
+
+    eta_a = theta_hat[0]
+    gamma_a = theta_hat[1:1+p]
+    beta = theta_hat[1+p:1+2*p]
+    sigma2 = theta_hat[1+2*p:1+3*p]
+
+    Wa, Wa_dot, _ = compute_Wa_Wb_dots(Z, eta_a, params_scale["eta_a"])
+    G = jnp.diag(beta) + ldiag_mul(gamma_a, Wa)
+    Gamma0 = Gamma0_stationary_with_lyapunov_doubling(G, sigma2)
+
+    V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=kappa4, full=True)
+    H = assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=kappa4, full=True)
+    return V, H
+
+
+def get_z_stats(theta_hat, theta_true, V, H, T, p):
+    """
+    Construct theorem-verification Z statistics for:
+        eta_a, gamma_a[1], beta[1], sigma2[1]
+
+    Shared parameter eta_a uses sqrt(Tp).
+    Component-specific parameters use sqrt(T).
+    """
+    # eta_a
+    A_eta = make_A(p=p, kind="eta_a")
+    J_eta, _ = compute_projected_asymptotic_covariance(A_eta, V, H, p, scaling="theory")
+    z_eta = jnp.sqrt(T * p) * (theta_hat[0] - theta_true[0]) / jnp.sqrt(jnp.maximum(J_eta[0, 0], 1e-12))
+
+    # gamma_a[1]
+    A_gamma1 = make_A(p=p, kind="gamma_a", j=1)
+    J_gamma1, _ = compute_projected_asymptotic_covariance(A_gamma1, V, H, p, scaling="theory")
+    idx_gamma1 = 1
+    z_gamma1 = jnp.sqrt(T) * (theta_hat[idx_gamma1] - theta_true[idx_gamma1]) / jnp.sqrt(jnp.maximum(J_gamma1[0, 0], 1e-12))
+
+    # beta[1]
+    A_beta1 = make_A(p=p, kind="beta", j=1)
+    J_beta1, _ = compute_projected_asymptotic_covariance(A_beta1, V, H, p, scaling="theory")
+    idx_beta1 = 1 + p
+    z_beta1 = jnp.sqrt(T) * (theta_hat[idx_beta1] - theta_true[idx_beta1]) / jnp.sqrt(jnp.maximum(J_beta1[0, 0], 1e-12))
+
+    # sigma2[1]
+    A_sigma1 = make_A(p=p, kind="sigma2", j=1)
+    J_sigma1, _ = compute_projected_asymptotic_covariance(A_sigma1, V, H, p, scaling="theory")
+    idx_sigma1 = 1 + 2 * p
+    z_sigma1 = jnp.sqrt(T) * (theta_hat[idx_sigma1] - theta_true[idx_sigma1]) / jnp.sqrt(jnp.maximum(J_sigma1[0, 0], 1e-12))
+
+    return jnp.array([z_eta, z_gamma1, z_beta1, z_sigma1])
+
+
+# ===============================================================
+# === Single replication ========================================
+# ===============================================================
 
 def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0.05,
                        algorithm="analytical_gradhess", update_idx=slice(None),
-                       max_tries=10):
+                       max_tries=10, kappa4=3.0):
     """
-    Single Monte Carlo replication (runs on a Ray worker).
+    One Monte Carlo replication under the current 4-block old model:
+        theta = (eta_a, gamma_a, beta, sigma2)
 
-    Re-runs simulation & estimation up to `max_tries` times until convergence
-    status == 0. On complete failure, returns NaNs.
+    Returns
+    -------
+    inside : (d,) bool
+    ci_length : (d,) float
+    theta_hat : (d,) float
+    status : int
+    z_stats : (4,) float
+        standardized stats for eta_a, gamma_a[1], beta[1], sigma2[1]
     """
-
-    # ---- Pre-compute true parameters (independent of attempts) ----
-    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    # ---- True theta ----
+    order = ["eta_a", "gamma_a", "beta", "sigma2"]
     theta_true, param_slices = flatten_params(params_true, order)
 
-    # sigma2 reparameterization
-    sigma2_true = theta_true[2 + 3 * p : 2 + 4 * p]              # actual σ² values
-    sigma2_tilde_true = jnp.log(jnp.expm1(sigma2_true))          # softplus inverse
-    theta_true_reparam = jnp.concatenate(
-        [theta_true[: 2 + 3 * p], sigma2_tilde_true]
-    )
-
-    # Handle update_idx: if slice, use all parameters; otherwise convert to array
     if isinstance(update_idx, slice):
-        update_idx_array = jnp.arange(theta_true_reparam.size)
+        update_idx_array = jnp.arange(theta_true.size)
     else:
         update_idx_array = jnp.array(update_idx)
 
-    # ---- Default "failure" outputs ----
     d = theta_true.shape[0]
+
     last_inside = jnp.zeros(d, dtype=bool)
     last_ci_length = jnp.full(d, jnp.nan)
     last_theta_hat = jnp.full(d, jnp.nan)
-    last_status = -1  # non-zero meaning "no success"
+    last_z_stats = jnp.full((4,), jnp.nan)
+    last_status = -1
 
-    # ---- Try up to max_tries times ----
     for attempt in range(max_tries):
-        # Make attempt-specific keys so each try is different but reproducible
         attempt_key = jax.random.fold_in(subkey, attempt)
         noise_key = jax.random.fold_in(subkey, attempt + max_tries)
 
-        # 1. Simulate one dataset
-
-        # sleep_sec = random.randint(1, 60)   # 1,2,3,4,5
-        # print(f"DGP: Random sleep for {sleep_sec}s to prevent memory heap.")
-        # time.sleep(sleep_sec)
-
-        Y, Z, _, _ = simulate_VAR_attention(
+        # 1. Simulate data
+        Y, Z, W_a = simulate_VAR_attention(
             attempt_key, params_true, T=T, p=p, q=q,
             dist=dist, params_scale=params_scale
         )
 
-        # 2. Build initial values (perturb true values on update_idx)
-        theta_init = theta_true_reparam
-        perturb_scales = {"eta_a": 0.3,
-                          "eta_b": 0.3,
-                          "gamma_a": 0.8,
-                          "gamma_b": 0.8,
-                          "beta": 0.2,
-                          "sigma2": 0.10
-                          }
+        # 2. Initial values
+        theta_init = theta_true
+        perturb_scales = {
+            "eta_a": 0.3,
+            "gamma_a": 0.8,
+            "beta": 0.2,
+            "sigma2": 0.1,
+        }
 
         for name, sl in param_slices.items():
             key, noise_key = jax.random.split(noise_key)
             scale = perturb_scales[name]
-            idx = jnp.intersect1d(jnp.arange(len(theta_true_reparam))[sl], update_idx_array)
+            idx_all = jnp.arange(theta_true.size)[sl]
+            idx = jnp.intersect1d(idx_all, update_idx_array)
             if idx.size > 0:
                 noise = 1.0 + scale * jax.random.normal(key, shape=(len(idx),))
-                theta_init = theta_init.at[idx].set(theta_true_reparam[idx] * noise)
+                theta_init = theta_init.at[idx].set(theta_true[idx] * noise)
 
-
-        # 3. Estimation
+        # 3. Estimate
         result, convergence = estimate(
             Y, Z, attempt_key, theta_init,
             params_scale=params_scale,
@@ -98,9 +161,9 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         )
 
         theta_hat = jnp.asarray(result["theta"])
-        se = jnp.asarray(result["se"])  # standard errors from sandwich variance
+        se = jnp.asarray(result["se"])
 
-        # 4. Confidence intervals
+        # 4. CI
         z_crit = jax.scipy.stats.norm.ppf(1 - alpha / 2.0)
         lower = theta_hat - z_crit * se
         upper = theta_hat + z_crit * se
@@ -108,85 +171,75 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         inside = (theta_true >= lower) & (theta_true <= upper)
         ci_length = upper - lower
 
-        # Extreme results checking. If the value is too far away from the 99% interval, indicating bad DGP
-        x_crit = jax.scipy.stats.norm.ppf(1 - 0.01 / 2.0)
-        x_idx = jnp.array([0, 1])
-        x_lower = theta_hat[x_idx] - x_crit * se[x_idx]
-        x_upper = theta_hat[x_idx] + x_crit * se[x_idx]
-        x_inside = (theta_true[x_idx] >= x_lower) & (theta_true[x_idx] <= x_upper)
-
-        # Make sure optimization gives converging code.
         status = int(convergence["status"])
-        # If converged and good optimization results, return immediately
-        if status == 0:  # and x_inside.all():
-            print(f"Successful for simulating proper data after {attempt+1} attempts.")
-            return inside, ci_length, theta_hat, status
-        # else:
-            # print(f"{attempt+1} failed attempts to simulate proper data. Retrying.")
+
+        if status == 0:
+            try:
+                # rebuild V,H from theta_hat
+                V, H = build_full_matrices_from_theta_hat(
+                    Y, Z, theta_hat, params_scale=params_scale, kappa4=kappa4
+                )
+
+                z_stats = get_z_stats(
+                    theta_hat=theta_hat,
+                    theta_true=theta_true,
+                    V=V,
+                    H=H,
+                    T=T,
+                    p=p,
+                )
+            except Exception as e:
+                print(f"[single_replication V/H rebuild error] {e}")
+                z_stats = jnp.full((4,), jnp.nan)
+
+            return inside, ci_length, theta_hat, status, z_stats
+
+    return last_inside, last_ci_length, last_theta_hat, last_status, last_z_stats
 
 
-    # If all attempts fail to reach status == 0, return last attempt (or NaNs)
-    return last_inside, last_ci_length, last_theta_hat, last_status
+# ===============================================================
+# === Ray Actor =================================================
+# ===============================================================
 
-
-# JAX JIT wrapper
-single_replication_jit = jax.jit(single_replication,
-                                 static_argnames=["params_scale", "dist", "algorithm"])
-
-# Ray wrapper (wrap the same function)
-# @ray.remote(num_gpus=0.01)
-# @ray.remote(num_cpus=1)
-# def single_replication_ray(*args, **kwargs):
-#     try:
-#         return single_replication(*args, **kwargs)
-#     except Exception as e:
-#         print(f"[Ray worker error] {e}")
-#         theta_true = kwargs.get("theta_true", None)
-#         d = len(theta_true) if theta_true is not None else 1
-#         return jnp.zeros(d, dtype=bool), jnp.full(d, jnp.nan), jnp.full(d, jnp.nan), jnp.zeros(d, jnp.nan)
 @ray.remote
 class ReplicationActor:
     def __init__(self):
-        self._cache = None  # placeholder to pin memory if needed
+        self._cache = None
 
     def run(self, *args, **kwargs):
-        """
-        One Monte Carlo replication. Memory-heavy DGP happens inside single_replication,
-        but we explicitly clean up before returning.
-        """
         try:
             result = single_replication(*args, **kwargs)
-
-            # ---- explicit memory cleanup ----
             self._cache = None
-            import gc
             gc.collect()
-
             return result
-
         except Exception as e:
             print(f"[Ray actor error] {e}")
-            # d = len(theta_true) if theta_true is not None else 1
-            d = 1
-            return jnp.zeros(d, bool), jnp.full(d, jnp.nan), jnp.full(d, jnp.nan), -1
+            return (
+                jnp.zeros(1, bool),
+                jnp.full(1, jnp.nan),
+                jnp.full(1, jnp.nan),
+                -1,
+                jnp.full((4,), jnp.nan),
+            )
 
 
 # ===============================================================
 # === Main Monte Carlo driver ===================================
 # ===============================================================
+
 def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
                             dist="normal", alpha=0.05,
                             algorithm="analytical_gradhess",
-                            USE_RAY=False, MAX_CPUS_PER_TASK=1):
+                            USE_RAY=False, MAX_CPUS_PER_TASK=1,
+                            kappa4=3.0):
     """
-    Monte Carlo simulation to estimate empirical coverage probability,
-    average CI length, and RMSE for QMLE-based confidence intervals.
-    Now parallelized with ray or jax.jit.
+    Monte Carlo simulation to estimate:
+        - empirical coverage
+        - average CI length
+        - RMSE
+        - theorem verification Z statistics
     """
 
-    # ===============================================================
-    # === 1. Print DGP setup summary ================================
-    # ===============================================================
     print("\n" + "=" * 70 + "\nEmpirical Simulation Setup\n" + "=" * 70)
     print(f"Algorithm      : {algorithm}")
     print(f"Distribution   : {dist}")
@@ -197,114 +250,96 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     print(f"Random seed    : {seed}")
     print("=" * 70, "\n")
 
-    # ===============================================================
-    # === 2. Parallel execution with Ray or JAX =====================
-    # ===============================================================
     subkeys = jax.random.split(key, R)
-    pkeys = jax.random.split(key, 5)
+    pkeys = jax.random.split(key, 4)
+
     params_true = dict(
-        eta_a=params_dgp['eta_a'],
-        eta_b=params_dgp['eta_b'],
-        gamma_a=uniform(pkeys[1], (p,), minval=params_dgp['gamma_a']['minval'], maxval=params_dgp['gamma_a']['maxval']),
-        gamma_b=uniform(pkeys[2], (p,), minval=params_dgp['gamma_b']['minval'], maxval=params_dgp['gamma_b']['maxval']),
-        beta=uniform(pkeys[3], (p,), minval=params_dgp['beta']['minval'], maxval=params_dgp['beta']['maxval']),
-        sigma2=uniform(pkeys[4], (p,), minval=params_dgp['sigma2']['minval'], maxval=params_dgp['sigma2']['maxval'])
+        eta_a=params_dgp["eta_a"],
+        gamma_a=uniform(
+            pkeys[1], (p,),
+            minval=params_dgp["gamma_a"]["minval"],
+            maxval=params_dgp["gamma_a"]["maxval"]
+        ),
+        beta=uniform(
+            pkeys[2], (p,),
+            minval=params_dgp["beta"]["minval"],
+            maxval=params_dgp["beta"]["maxval"]
+        ),
+        sigma2=uniform(
+            pkeys[3], (p,),
+            minval=params_dgp["sigma2"]["minval"],
+            maxval=params_dgp["sigma2"]["maxval"]
+        ),
     )
 
-    # Submit tasks to Ray cluster/workers
+    # update all by default
+    update_idx = slice(None)
+
     if USE_RAY:
         print("🔹 Running with Ray parallelization")
         print("JAX devices:", jax.devices())
-        print(f"\nNUM_CPUS_PER_TASK:  {MAX_CPUS_PER_TASK}\n")
+        print(f"\nNUM_CPUS_PER_TASK: {MAX_CPUS_PER_TASK}\n")
 
-        ray.init(ignore_reinit_error=True,
-                 include_dashboard=False,
-                 # log_to_driver=False,
-                 # logging_level=logging.ERROR
-                 )
+        ray.init(ignore_reinit_error=True, include_dashboard=False)
 
-        # MODIFY THIS TO FIT THE SIMULATION INTO MEMORY
-
-        # futures = [
-        #     single_replication_ray.options(num_cpus=MAX_CPUS_PER_TASK).remote(
-        #         subkeys[r], params_true, T, p, q, params_scale, dist, alpha, algorithm, update_idx)
-        #     for r in range(R)
-        # ]
-
-        # Create a small pool of actors
         N_ACTORS = max(1, int(os.cpu_count() / MAX_CPUS_PER_TASK))
         print(f"Ray actors using {N_ACTORS} actors...")
+
         actors = [
-            ReplicationActor.options(num_cpus=MAX_CPUS_PER_TASK,
-                                     # memory=80 * 1024**3   # RAM required for each replication
-                                     ).remote()
+            ReplicationActor.options(num_cpus=MAX_CPUS_PER_TASK).remote()
             for _ in range(N_ACTORS)
         ]
 
-        # Round-robin submission
         futures = [
             actors[r % N_ACTORS].run.remote(
                 subkeys[r], params_true, T, p, q,
                 params_scale, dist, alpha,
-                algorithm, update_idx
+                algorithm, update_idx, 10, kappa4
             )
             for r in range(R)
         ]
 
-
         results = []
-        for result in trange(R, desc="Monte Carlo replications", ncols=100):
-            results.append(ray.get(futures[result]))
+        for r in trange(R, desc="Monte Carlo replications", ncols=100):
+            results.append(ray.get(futures[r]))
 
         ray.shutdown()
     else:
         print("🔹 Running locally with JAX")
+        results = [
+            single_replication(
+                subkeys[r], params_true, T, p, q,
+                params_scale, dist, alpha,
+                algorithm, update_idx, 10, kappa4
+            )
+            for r in trange(R, desc="Monte Carlo replications", ncols=100)
+        ]
 
-        # You can also switch this to jax.jit/vmap if memory allows
-        results = [single_replication(
-            subkeys[r], params_true, T, p, q, params_scale, dist, alpha, algorithm, update_idx)
-                   for r in trange(R, desc="Monte Carlo replications", ncols=100)]
-
-    inside, ci_length, theta_hat_all, status_all = zip(*results)
+    inside, ci_length, theta_hat_all, status_all, z_stats_all = zip(*results)
     inside = jnp.stack(inside)
     ci_length = jnp.stack(ci_length)
     theta_hat_all = jnp.stack(theta_hat_all)
     status_all = jnp.stack(status_all)
+    z_stats_all = jnp.stack(z_stats_all)
 
-    # ===============================================================
-    # === 3. Summarize results =====================================
-    # ===============================================================
     valid_mask = jnp.isfinite(theta_hat_all).all(axis=1)
-
     inside = inside[valid_mask]
     ci_length = ci_length[valid_mask]
     theta_hat_all = theta_hat_all[valid_mask]
+    z_stats_all = z_stats_all[valid_mask]
 
-    order = ["eta_a", "eta_b", "gamma_a", "gamma_b", "beta", "sigma2"]
+    order = ["eta_a", "gamma_a", "beta", "sigma2"]
     theta_true, idx = flatten_params(params_true, order)
 
-    # take the mean along an axis (e.g., axis=0) while skipping NaNs,
     coverage = jnp.nanmean(inside, axis=0)
     avg_length = jnp.nanmean(ci_length, axis=0)
     rmse = jnp.sqrt(jnp.nanmean((theta_hat_all - theta_true) ** 2, axis=0))
 
-    # Group indices for summary
-    # idx = {
-    #     "eta_a": slice(0, 1),
-    #     "eta_b": slice(1, 2),
-    #     "gamma_a": slice(2, 2 + p),
-    #     "gamma_b": slice(2 + p, 2 + 2 * p),
-    #     "beta": slice(2 + 2 * p, 2 + 3 * p),
-    #     "sigma2": slice(2 + 3 * p, 2 + 4 * p),
-    # }
     coverage_by_group = {name: float(jnp.nanmean(coverage[s])) for name, s in idx.items()}
     rmse_by_group = {name: float(jnp.nanmean(rmse[s])) for name, s in idx.items()}
 
-    # ===============================================================
-    # === 4. Print summary =========================================
-    # ===============================================================
     print("\n=== Empirical Coverage and RMSE Summary ===")
-    print(f"nominal = {(1-alpha):.2%}")
+    print(f"nominal = {(1 - alpha):.2%}")
     print(f"Overall average coverage: {jnp.nanmean(coverage):.4f}\n")
     for name in idx.keys():
         print(f"{name:<8s}: coverage={coverage_by_group[name]:.3f}, RMSE={rmse_by_group[name]:.4f}")
@@ -314,107 +349,113 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     print("\nRMSE (by parameter):")
     print(jnp.round(rmse, 4))
 
-    return coverage, avg_length, rmse, coverage_by_group, rmse_by_group
+    # theorem verification summary
+    z_names = ["eta_a", "gamma_a[1]", "beta[1]", "sigma2[1]"]
+    z_mean = jnp.nanmean(z_stats_all, axis=0)
+    z_var = jnp.nanvar(z_stats_all, axis=0)
+    z_reject_5 = jnp.nanmean(jnp.abs(z_stats_all) > 1.959963984540054, axis=0)
 
+    print("\n=== Theorem 1 verification (standardized Z statistics) ===")
+    for i, name in enumerate(z_names):
+        print(
+            f"{name:<12s}: mean={float(z_mean[i]): .4f}, "
+            f"var={float(z_var[i]): .4f}, "
+            f"P(|Z|>1.96)={float(z_reject_5[i]): .4f}"
+        )
+
+    return (
+        coverage,
+        avg_length,
+        rmse,
+        coverage_by_group,
+        rmse_by_group,
+        z_stats_all,
+        z_mean,
+        z_var,
+        z_reject_5,
+    )
+
+
+# ===============================================================
+# === Main ======================================================
+# ===============================================================
 
 if __name__ == "__main__":
-    import itertools
-    from datetime import datetime
-
     from summarize import summarize_empirical_coverage
 
-    # import tracemalloc
-    # tracemalloc.start()
-
-    # ===============================================================
-    # === 0. Parallelization     ====================================
-    # ===============================================================
-    # jax.config.update("jax_enable_x64", True)
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
-    # Settings
-    # USE_RAY = False
     USE_RAY = True
-
-    # ===============================================================
-    # === 1. Simulation from DGP ====================================
-    # ===============================================================
-    # seed = random.randint(0, 1000)
     seed = 2025
     key = jax.random.PRNGKey(seed)
 
-    R_list = [1000]
-    p_list = [200, 300, 500, 800, 1000, 2000]
+    R_list = [100]
+    p_list = [200]
     q_list = [50]
+    T_list = [200]
+    alpha_list = [0.1]
     dist_list = ["normal"]
 
-    # T_list = [50, 100, 200, 500, 1000]
-    # T_list = [200]
-    T_list = [200]
-    alpha_list = [0.1]    # for 90% and 95% coverage
+    algorithm = "yule-walker"   # or "auto_gradhess", "analytical_gradhess"
+    out_path = f"results_coverage_@{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
 
-    algorithm = "yule-walker"    # bfgs, analytical_gradhess, auto_gradhess, yule-walker
-    # algorithm = "auto_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
-    # algorithm = "analytical_gradhess"    # bfgs, analytical_gradhess, auto_gradhess
-
-    out_path = f"results_coverage_@{datetime.now().strftime("%Y-%m-%d_%H.%M.%S")}.csv"
-
-    # ===============================================================
-    # === 2. True parameter vector from DGP =========================
-    # ===============================================================
     params_dgp = dict(
         eta_a=0.2,
-        eta_b=0.2,
         gamma_a=dict(minval=-0.2, maxval=0.2),
-        gamma_b=dict(minval=-0.2, maxval=0.2),
         beta=dict(minval=-0.2, maxval=0.2),
-        sigma2=dict(minval=0.25, maxval=1.0))
+        sigma2=dict(minval=0.25, maxval=1.0),
+    )
 
     params_scale = dict(
         eta_a=1,
-        eta_b=1)
+    )
 
-
-    # ===============================================================
-    # === 3. Loop over all simulation combinations ==================
-    # ===============================================================
-    # Cartesian product of all (T, alpha) combinations
     header_written = False
-    for dist, R, T, p, q, alpha in itertools.product(
-            dist_list, R_list, T_list, p_list, q_list, alpha_list):
-        print("\n" + "=" * 70 + f"\nRunning Monte Carlo:  T={T},  nominal={(1-alpha):.2%}\n"+"=" * 70)
 
-        # seed = random.randint(0, 10000)
-        # MAX_CPUS_PER_TASK = int(max(1, 1*jnp.sqrt(os.cpu_count() * p / max(p_list)))) # Use this only when heavy Hessian is used.
+    for dist, R, T, p, q, alpha in itertools.product(
+        dist_list, R_list, T_list, p_list, q_list, alpha_list
+    ):
+        print("\n" + "=" * 70 + f"\nRunning Monte Carlo: T={T}, nominal={(1-alpha):.2%}\n" + "=" * 70)
+
         MAX_CPUS_PER_TASK = 1
 
-        update_idx = [0, 1]
-        # update_idx = range(0, 3*p+2)
-        # update_idx = slice(None)  # Full updating
-
-        # --- Record start time ---
         start_time = datetime.now()
         start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
-        print(f"⏱  Started at {start_ts}")
+        print(f"⏱ Started at {start_ts}")
 
-        # Ray run simulation
-        coverage, avg_len, rmse, cov_group, rmse_group = empirical_coverage_rate(
-            key, R=R, T=T, p=p, q=q, params_dgp=params_dgp, params_scale=params_scale,
-            dist=dist, alpha=alpha, algorithm=algorithm,
-            USE_RAY=USE_RAY, MAX_CPUS_PER_TASK=MAX_CPUS_PER_TASK)
+        (
+            coverage,
+            avg_len,
+            rmse,
+            cov_group,
+            rmse_group,
+            z_stats_all,
+            z_mean,
+            z_var,
+            z_reject_5,
+        ) = empirical_coverage_rate(
+            key,
+            R=R,
+            T=T,
+            p=p,
+            q=q,
+            params_dgp=params_dgp,
+            params_scale=params_scale,
+            dist=dist,
+            alpha=alpha,
+            algorithm=algorithm,
+            USE_RAY=USE_RAY,
+            MAX_CPUS_PER_TASK=MAX_CPUS_PER_TASK,
+        )
 
-        # --- Record finish time ---
         finish_time = datetime.now()
         finish_ts = finish_time.strftime("%Y-%m-%d %H:%M:%S")
         elapsed = (finish_time - start_time).total_seconds() / 60
         print(f"✅ Finished at {finish_ts} (elapsed {elapsed:.2f} min)")
 
-        # Collect records for this run. Report each parameter element
         param_names = []
         param_names.append("eta_a")
-        param_names.append("eta_b")
         param_names.extend([f"gamma_a[{i}]" for i in range(p)])
-        param_names.extend([f"gamma_b[{i}]" for i in range(p)])
         param_names.extend([f"beta[{i}]" for i in range(p)])
         param_names.extend([f"sigma2[{i}]" for i in range(p)])
 
@@ -436,22 +477,37 @@ if __name__ == "__main__":
                 "avg_len": float(avg_len[i]),
                 "start_time": start_ts,
                 "finish_time": finish_ts,
-                "elapsed_min": round(elapsed, 2)
+                "elapsed_min": round(elapsed, 2),
+            })
+
+        z_names = ["eta_a", "gamma_a[1]", "beta[1]", "sigma2[1]"]
+        for i, name in enumerate(z_names):
+            records.append({
+                "R": R,
+                "p": p,
+                "q": q,
+                "dist": dist,
+                "seed": seed,
+                "T": T,
+                "alpha": alpha,
+                "nominal": 1 - alpha,
+                "param_group": "theorem_verification",
+                "param": name,
+                "coverage": float("nan"),
+                "rmse": float("nan"),
+                "avg_len": float("nan"),
+                "z_mean": float(z_mean[i]),
+                "z_var": float(z_var[i]),
+                "z_reject_5": float(z_reject_5[i]),
+                "start_time": start_ts,
+                "finish_time": finish_ts,
+                "elapsed_min": round(elapsed, 2),
             })
 
         df_results = pd.DataFrame(records)
-
-        # Append to CSV
         df_results.to_csv(out_path, mode="a", index=False, header=not header_written)
         header_written = True
 
         print(f"✔ Results appended for T={T}, alpha={alpha}")
 
-    # --- Summary by T and nominal level ---
     summarize_empirical_coverage(out_path, latex=False)
-
-    # memory profiling
-    # snapshot = tracemalloc.take_snapshot()
-    # top_stats = snapshot.statistics("lineno")
-    # for stat in top_stats[:10]:
-    #     print(stat)
