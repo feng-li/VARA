@@ -14,7 +14,7 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm):
     def objective(theta):
         return -loglik_reparam(theta, Y, Z, params_scale)
 
-    if algorithm == "bfgs":
+    if algorithm == "lbfgs":
         opt_init, opt_update = optax.lbfgs()
     else:
         raise Exception("Not implemented.")
@@ -53,10 +53,10 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(0)
 
     # Example parameter dictionary (in natural scale)
-    algorithm = "bfgs"
+    algorithm = "lbfgs"
     # algorithm = "auto_gradhess"
 
-    p, q, T = 10, 10, 200
+    p, q, T = 3, 2, 100
     params = dict(
         eta_a=0.5,
         gamma_a=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),

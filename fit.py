@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from cov import compute_sandwich_variance
+# from cov import compute_sandwich_variance
 from mle_ad import mle_newton
 from yule_walker_ad import yule_walker
 # from mle_jaxopt import mle_bfgs # not maintained
