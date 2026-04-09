@@ -1,3 +1,5 @@
+from memory_profiler import profile
+
 import jax
 import jax.numpy as jnp
 import jax.lax as lax
@@ -77,6 +79,7 @@ def ensure_stationarity(beta, gamma_a, margin=0.98, eps=1e-6):
     return beta_new, gamma_a_new, info
 
 
+# @profile
 def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params_scale=dict(eta_a=1)):
     """
     Simulate data from the VAR attention model.

@@ -1,3 +1,5 @@
+from memory_profiler import profile
+
 import random
 import jax
 import jax.numpy as jnp
@@ -9,6 +11,7 @@ from hess import loglik_hess_analytical
 import pandas as pd
 
 
+# @profile
 def mle_newton(Y, Z, theta_init, params_scale,
                algorithm="analytical_gradhess", update_idx=slice(None),
                max_iter=100, tol=1e-8, alpha=1.0):
@@ -243,6 +246,203 @@ def mle_newton(Y, Z, theta_init, params_scale,
     return theta, g, H, dict(status=1, trace=trace)
 
 
+def mle_newton_gibbs(
+    Y,
+    Z,
+    theta_init,
+    params_scale,
+    block_order,
+    algorithm="analytical_gradhess",
+    max_outer_iter=20,
+    inner_max_iter=20,
+    tol=1e-8,
+    alpha=1.0,
+    update_idx=slice(None),
+):
+    """
+    Blockwise Newton wrapper using a Gibbs-style updating scheme.
+
+    Parameters
+    ----------
+    Y, Z, theta_init, params_scale : same as mle_newton
+    block_order : list
+        List of parameter blocks to update sequentially.
+        Each element can be:
+          - a list/array of indices, e.g. [0], [1,2,3], ...
+          - a slice
+    algorithm : str
+        Same as mle_newton
+    max_outer_iter : int
+        Number of outer Gibbs/block cycles
+    inner_max_iter : int
+        Max Newton iterations for each block update
+    tol : float
+        Outer convergence tolerance
+    alpha : float
+        Passed to mle_newton
+    update_idx : slice or array
+        Overall active parameters. Final output matches mle_newton:
+        returns theta restricted to update_idx.
+
+    Returns
+    -------
+    theta_hat : array
+        Estimated parameters on reparameterized scale, restricted to update_idx
+    grad_ll : array
+        Gradient at final point, restricted to update_idx
+    hess_ll : array
+        Hessian at final point, restricted to update_idx x update_idx
+    info : dict
+        status and trace
+    """
+
+    # ----- derivative functions for final evaluation -----
+    if algorithm == "analytical_gradhess":
+        loglik_grad = loglik_grad_analytical
+
+        def loglik_hess(theta, Y, Z, params_scale, update_idx):
+            return loglik_hess_analytical(
+                theta=theta,
+                Y=Y,
+                Z=Z,
+                params_scale=params_scale,
+                kappa4=3,
+                update_idx=update_idx,
+            )
+
+    elif algorithm == "auto_gradhess":
+        loglik_grad = jax.grad(loglik_reparam)
+        loglik_hess = jax.hessian(loglik_reparam)
+    else:
+        raise Exception("No such algorithm implemented.")
+
+    # ----- normalize overall update_idx -----
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta_init.size)
+    else:
+        update_idx = jnp.array(update_idx)
+
+    active_set = set(map(int, list(update_idx)))
+
+    # ----- normalize blocks -----
+    # ----- normalize blocks -----
+    if isinstance(block_order, dict):
+        block_items = list(block_order.items())
+    else:
+        block_items = [(f"block_{i}", blk) for i, blk in enumerate(block_order)]
+
+    normalized_blocks = []
+    for block_id, (block_name, blk) in enumerate(block_items):
+        if isinstance(blk, slice):
+            blk_idx = jnp.arange(theta_init.size)[blk]
+        else:
+            blk_idx = jnp.array(blk)
+
+        # keep only indices in overall active set
+        blk_idx = jnp.array([int(i) for i in blk_idx if int(i) in active_set])
+
+        if blk_idx.size > 0:
+            normalized_blocks.append((block_id, block_name, blk_idx))
+
+    if len(normalized_blocks) == 0:
+        raise ValueError("No valid blocks found in block_order.")
+
+    theta_full = theta_init.copy()
+    records = []
+
+    for outer_it in range(max_outer_iter):
+        theta_old = theta_full.copy()
+        ll_before_cycle = float(loglik_reparam(theta_full, Y, Z, params_scale, update_idx))
+
+        for block_id, block_name, blk_idx in normalized_blocks:
+            theta_block, grad_block, hess_block, conv_block = mle_newton(
+                Y=Y,
+                Z=Z,
+                theta_init=theta_full,
+                params_scale=params_scale,
+                algorithm=algorithm,
+                update_idx=blk_idx,
+                max_iter=inner_max_iter,
+                tol=tol,
+                alpha=alpha,
+            )
+
+            theta_full = theta_full.at[blk_idx].set(theta_block)
+
+            ll_after_block = float(loglik_reparam(theta_full, Y, Z, params_scale, update_idx))
+
+            records.append({
+                "outer_iteration": outer_it,
+                "block_id": block_id,
+                "block_size": int(blk_idx.size),
+                "block_idx": list(map(int, list(blk_idx))),
+                "loglik": ll_after_block,
+                "block_status": int(conv_block["status"]),
+                "block_inner_steps": len(conv_block["trace"]),
+            })
+
+        ll_after_cycle = float(loglik_reparam(theta_full, Y, Z, params_scale, update_idx))
+        abs_change = float(jnp.linalg.norm(theta_full - theta_old, ord=jnp.inf))
+        rel_change = float(abs_change / jnp.maximum(1.0, jnp.linalg.norm(theta_full)))
+
+        g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
+        g_active = g_full[update_idx]
+        g_norm = float(jnp.linalg.norm(g_active))
+
+        records.append({
+            "outer_iteration": outer_it,
+            "block_id": block_id,
+            "block_name": block_name,
+            "block_size": int(blk_idx.size),
+            "block_idx": list(map(int, list(blk_idx))),
+            "loglik": ll_after_block,
+            "block_status": int(conv_block["status"]),
+            "block_inner_steps": len(conv_block["trace"]),
+        })
+
+        if rel_change < tol or g_norm < tol:
+            H_full = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
+            H_active = H_full[jnp.ix_(update_idx, update_idx)]
+            trace = pd.DataFrame(records)
+            return theta_full[update_idx], g_active, H_active, dict(status=0, trace=trace)
+
+    H_full = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
+    H_active = H_full[jnp.ix_(update_idx, update_idx)]
+    g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
+    g_active = g_full[update_idx]
+    trace = pd.DataFrame(records)
+
+    return theta_full[update_idx], g_active, H_active, dict(status=1, trace=trace)
+
+
+
+
+def build_param_name_map(order, block_order):
+    """
+    Build a mapping from flattened parameter index to parameter name
+    using order and dict-valued block_order.
+    """
+    name_map = {}
+
+    for param_name in order:
+        if param_name not in block_order:
+            raise KeyError(f"{param_name} is in order but not in block_order.")
+
+        block = block_order[param_name]
+
+        if isinstance(block, slice):
+            raise ValueError("Please convert slice blocks to explicit index lists first.")
+
+        block = list(block)
+
+        if len(block) == 1:
+            name_map[int(block[0])] = param_name
+        else:
+            for local_pos, global_idx in enumerate(block, start=1):
+                name_map[int(global_idx)] = f"{param_name}[{local_pos}]"
+
+    return name_map
+
 # ---------- Example usage ----------
 if __name__ == "__main__":
 
@@ -258,7 +458,7 @@ if __name__ == "__main__":
 
     # --- Simulation settings ---
     key = jax.random.PRNGKey(random.randint(0, 10000))
-    T, p, q = 1000, 3, 3
+    T, p, q = 1000, 5, 3
 
     # --- True parameters (in natural scale) ---
     params_true = dict(
@@ -298,17 +498,49 @@ if __name__ == "__main__":
     theta_init_update = theta_true_reparam[update_idx]
     theta_init = theta_init.at[update_idx].set(theta_init_update * (1 + 1 * jax.random.normal(key, theta_init_update.shape)))
 
-    # Estimation
-    theta_hat_reparam_short, grad_ll, hess_ll, convergence = mle_newton(Y, Z, theta_init, params_scale, update_idx=update_idx, algorithm=algorithm)
+    # Estimation: full Newton
+    theta_hat_reparam_short_full, grad_ll_full, hess_ll_full, convergence_full = mle_newton(
+        Y, Z, theta_init, params_scale, update_idx=update_idx, algorithm=algorithm
+    )
 
-    theta_hat_reparam = theta_true_reparam
-    theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_short)
+    theta_hat_reparam_full = theta_true_reparam
+    theta_hat_reparam_full = theta_hat_reparam_full.at[update_idx].set(theta_hat_reparam_short_full)
 
-    # Convert back to natural scale (with softplus)
-    sigma2_tilde_hat = theta_hat_reparam[1+2*p:1+3*p]
-    sigma2_hat = jax.nn.softplus(sigma2_tilde_hat)
+    # Estimation: Gibbs-style block Newton
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
 
-    theta_hat = jnp.concatenate([theta_hat_reparam[:1+2*p], sigma2_hat])
+    param_name_map = build_param_name_map(order, block_order)
+
+    theta_hat_reparam_short_gibbs, grad_ll_gibbs, hess_ll_gibbs, convergence_gibbs = mle_newton_gibbs(
+        Y=Y,
+        Z=Z,
+        theta_init=theta_init,
+        params_scale=params_scale,
+        block_order=block_order,
+        algorithm=algorithm,
+        max_outer_iter=10,
+        inner_max_iter=30,
+        tol=1e-8,
+        alpha=1.0,
+        update_idx=update_idx,
+    )
+
+    theta_hat_reparam_gibbs = theta_true_reparam
+    theta_hat_reparam_gibbs = theta_hat_reparam_gibbs.at[update_idx].set(theta_hat_reparam_short_gibbs)
+
+    # Convert back to natural scale (with softplus) if needed
+    sigma2_tilde_hat_full = theta_hat_reparam_full[1+2*p:1+3*p]
+    sigma2_hat_full = jax.nn.softplus(sigma2_tilde_hat_full)
+    theta_hat_full = jnp.concatenate([theta_hat_reparam_full[:1+2*p], sigma2_hat_full])
+
+    sigma2_tilde_hat_gibbs = theta_hat_reparam_gibbs[1+2*p:1+3*p]
+    sigma2_hat_gibbs = jax.nn.softplus(sigma2_tilde_hat_gibbs)
+    theta_hat_gibbs = jnp.concatenate([theta_hat_reparam_gibbs[:1+2*p], sigma2_hat_gibbs])
 
 
     # --- Plot log-likelihood profile for update_idx parameters ---
@@ -321,14 +553,22 @@ if __name__ == "__main__":
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows))
 
-    # --- FIX: make axes iterable in all cases ---
     if isinstance(axes, plt.Axes):
         axes = [axes]
     else:
         axes = axes.flatten().tolist()
 
+    estimation_results = [
+        ("Full Newton", theta_hat_reparam_full, "blue", "-."),
+        ("Gibbs Newton", theta_hat_reparam_gibbs, "purple", "--"),
+    ]
+
     for ax, idx in zip(axes, update_idx):
-        theta_grid = jnp.linspace(theta_true_reparam[idx] - plot_width, theta_true_reparam[idx] + plot_width, n_points)
+        theta_grid = jnp.linspace(
+            theta_true_reparam[idx] - plot_width,
+            theta_true_reparam[idx] + plot_width,
+            n_points
+        )
         ll_values = []
         for val in theta_grid:
             theta_temp = theta_true_reparam.at[idx].set(val)
@@ -338,11 +578,21 @@ if __name__ == "__main__":
         ax.plot(theta_grid, ll_values, linestyle="-", linewidth=2, label="Likelihood")
         ax.axvline(theta_init[idx], color="green", linestyle=":", linewidth=2, label="Initial value")
         ax.axvline(theta_true_reparam[idx], color="red", linestyle="--", linewidth=2, label="True value")
-        ax.axvline(theta_hat_reparam[idx], color="blue", linestyle="-.", linewidth=2, label="MLE estimate")
+
+        for label, theta_hat_curr, color, linestyle in estimation_results:
+            ax.axvline(
+                theta_hat_curr[idx],
+                color=color,
+                linestyle=linestyle,
+                linewidth=2,
+                label=label
+            )
+
         ax.legend()
-        ax.set_xlabel(f"θ[{idx}] value")
+        param_name = param_name_map[int(idx)]
+        ax.set_xlabel(f"{param_name} value")
         ax.set_ylabel("Log-likelihood")
-        ax.set_title(f"Likelihood Profile for θ[{idx}]")
+        ax.set_title(f"Likelihood Profile for {param_name}")
         ax.grid(True)
 
     # hide unused subplots
@@ -350,10 +600,15 @@ if __name__ == "__main__":
         ax.axis("off")
 
     plt.tight_layout()
-    plt.savefig(os.path.expanduser("likelihood_profiles.pdf"), bbox_inches="tight")
-    print("Saved all likelihood profiles to 'likelihood_profiles.pdf'")
+    plt.savefig(os.path.expanduser("likelihood_profiles_compare.pdf"), bbox_inches="tight")
+    print("Saved all likelihood profiles to 'likelihood_profiles_compare.pdf'")
 
     print("True theta:", theta_true_reparam)
-    print("Estimated theta:", theta_hat_reparam)
-    # diff = jnp.stack([theta_true_reparam, theta_hat_reparam], axis=0)
-    # print("Diff:", diff)
+    print("Initial theta:", theta_init)
+    print("Estimated theta (Full Newton):", theta_hat_reparam_full)
+    print("Estimated theta (Gibbs Newton):", theta_hat_reparam_gibbs)
+
+    print("Full Newton status:", convergence_full["status"])
+    print("Gibbs Newton status:", convergence_gibbs["status"])
+    print("Full Newton iterations:", len(convergence_full["trace"]))
+    print("Gibbs Newton outer records:", len(convergence_gibbs["trace"]))
