@@ -3,7 +3,7 @@ from memory_profiler import profile
 import random
 import jax
 import jax.numpy as jnp
-
+import numpy as np
 from loglik_attn import loglik_reparam
 from grad import loglik_grad_analytical
 from hess import loglik_hess_analytical
@@ -261,42 +261,8 @@ def mle_newton_gibbs(
 ):
     """
     Blockwise Newton wrapper using a Gibbs-style updating scheme.
-
-    Parameters
-    ----------
-    Y, Z, theta_init, params_scale : same as mle_newton
-    block_order : list
-        List of parameter blocks to update sequentially.
-        Each element can be:
-          - a list/array of indices, e.g. [0], [1,2,3], ...
-          - a slice
-    algorithm : str
-        Same as mle_newton
-    max_outer_iter : int
-        Number of outer Gibbs/block cycles
-    inner_max_iter : int
-        Max Newton iterations for each block update
-    tol : float
-        Outer convergence tolerance
-    alpha : float
-        Passed to mle_newton
-    update_idx : slice or array
-        Overall active parameters. Final output matches mle_newton:
-        returns theta restricted to update_idx.
-
-    Returns
-    -------
-    theta_hat : array
-        Estimated parameters on reparameterized scale, restricted to update_idx
-    grad_ll : array
-        Gradient at final point, restricted to update_idx
-    hess_ll : array
-        Hessian at final point, restricted to update_idx x update_idx
-    info : dict
-        status and trace
     """
 
-    # ----- derivative functions for final evaluation -----
     if algorithm == "analytical_gradhess":
         loglik_grad = loglik_grad_analytical
 
@@ -316,7 +282,6 @@ def mle_newton_gibbs(
     else:
         raise Exception("No such algorithm implemented.")
 
-    # ----- normalize overall update_idx -----
     if isinstance(update_idx, slice):
         update_idx = jnp.arange(theta_init.size)
     else:
@@ -324,8 +289,6 @@ def mle_newton_gibbs(
 
     active_set = set(map(int, list(update_idx)))
 
-    # ----- normalize blocks -----
-    # ----- normalize blocks -----
     if isinstance(block_order, dict):
         block_items = list(block_order.items())
     else:
@@ -338,7 +301,6 @@ def mle_newton_gibbs(
         else:
             blk_idx = jnp.array(blk)
 
-        # keep only indices in overall active set
         blk_idx = jnp.array([int(i) for i in blk_idx if int(i) in active_set])
 
         if blk_idx.size > 0:
@@ -368,12 +330,13 @@ def mle_newton_gibbs(
             )
 
             theta_full = theta_full.at[blk_idx].set(theta_block)
-
             ll_after_block = float(loglik_reparam(theta_full, Y, Z, params_scale, update_idx))
 
             records.append({
                 "outer_iteration": outer_it,
+                "stage": "block",
                 "block_id": block_id,
+                "block_name": block_name,
                 "block_size": int(blk_idx.size),
                 "block_idx": list(map(int, list(blk_idx))),
                 "loglik": ll_after_block,
@@ -391,13 +354,18 @@ def mle_newton_gibbs(
 
         records.append({
             "outer_iteration": outer_it,
-            "block_id": block_id,
-            "block_name": block_name,
-            "block_size": int(blk_idx.size),
-            "block_idx": list(map(int, list(blk_idx))),
-            "loglik": ll_after_block,
-            "block_status": int(conv_block["status"]),
-            "block_inner_steps": len(conv_block["trace"]),
+            "stage": "cycle_end",
+            "block_id": -1,
+            "block_name": "cycle_end",
+            "block_size": 0,
+            "block_idx": "cycle_end",
+            "loglik": ll_after_cycle,
+            "block_status": 0,
+            "block_inner_steps": 0,
+            "cycle_gain": ll_after_cycle - ll_before_cycle,
+            "abs_change": abs_change,
+            "rel_change": rel_change,
+            "grad_norm": g_norm,
         })
 
         if rel_change < tol or g_norm < tol:
@@ -415,6 +383,85 @@ def mle_newton_gibbs(
     return theta_full[update_idx], g_active, H_active, dict(status=1, trace=trace)
 
 
+def mle_newton_hybrid(
+    Y,
+    Z,
+    theta_init,
+    params_scale,
+    block_order,
+    algorithm="analytical_gradhess",
+    gibbs_max_outer_iter=10,
+    gibbs_inner_max_iter=20,
+    full_max_iter=10,
+    tol=1e-8,
+    alpha=1.0,
+    update_idx=slice(None),
+):
+    """
+    Hybrid block-to-full Newton:
+      1. Run blockwise Gibbs/Newton to get a stabilized initial value
+      2. Run full Newton starting from that value
+
+    Returns same output structure as mle_newton, plus combined trace.
+    """
+
+    theta_gibbs_short, grad_gibbs, hess_gibbs, conv_gibbs = mle_newton_gibbs(
+        Y=Y,
+        Z=Z,
+        theta_init=theta_init,
+        params_scale=params_scale,
+        block_order=block_order,
+        algorithm=algorithm,
+        max_outer_iter=gibbs_max_outer_iter,
+        inner_max_iter=gibbs_inner_max_iter,
+        tol=tol,
+        alpha=alpha,
+        update_idx=update_idx,
+    )
+
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta_init.size)
+    else:
+        update_idx = jnp.array(update_idx)
+
+    theta_gibbs_full = theta_init.copy()
+    theta_gibbs_full = theta_gibbs_full.at[update_idx].set(theta_gibbs_short)
+
+    theta_full_short, grad_full, hess_full, conv_full = mle_newton(
+        Y=Y,
+        Z=Z,
+        theta_init=theta_gibbs_full,
+        params_scale=params_scale,
+        algorithm=algorithm,
+        update_idx=update_idx,
+        max_iter=full_max_iter,
+        tol=tol,
+        alpha=alpha,
+    )
+
+    trace_gibbs = conv_gibbs["trace"].copy()
+    trace_gibbs["method"] = "hybrid_gibbs"
+
+    trace_full = conv_full["trace"].copy()
+    trace_full["method"] = "hybrid_full"
+    trace_full["outer_iteration"] = jnp.nan
+    trace_full["block_id"] = -1
+    trace_full["block_name"] = "full_newton"
+    trace_full["block_size"] = len(update_idx)
+    trace_full["block_idx"] = "full_update"
+    trace_full["block_status"] = conv_full["status"]
+    trace_full["block_inner_steps"] = trace_full["iteration"]
+
+    trace = pd.concat([trace_gibbs, trace_full], ignore_index=True)
+
+    status = conv_full["status"]
+
+    return theta_full_short, grad_full, hess_full, dict(
+        status=status,
+        trace=trace,
+        gibbs_stage=conv_gibbs,
+        full_stage=conv_full,
+    )
 
 
 def build_param_name_map(order, block_order):
@@ -438,10 +485,11 @@ def build_param_name_map(order, block_order):
         if len(block) == 1:
             name_map[int(block[0])] = param_name
         else:
-            for local_pos, global_idx in enumerate(block, start=1):
+            for local_pos, global_idx in enumerate(block, start=0):
                 name_map[int(global_idx)] = f"{param_name}[{local_pos}]"
 
     return name_map
+
 
 # ---------- Example usage ----------
 if __name__ == "__main__":
@@ -476,7 +524,19 @@ if __name__ == "__main__":
     update_idx = slice(None)
 
     # --- Simulate data ---
-    Y, Z, W_a = simulate_VAR_attention(key, params_true, T=T, p=p, q=q, dist="normal")
+    # Y, Z, W_a = simulate_VAR_attention(key, params_true, T=T, p=p, q=q, dist="normal", save=True)
+
+    data_path = f"T={T}_p={p}_q={q}.npz"
+    print(f"Using {data_path}")
+    with np.load(data_path, allow_pickle=True) as obj:
+        data = obj["payload"].item()
+
+    Y = data["Y"]
+    Z = data["Z"]
+    W_a = data["W_a"]
+    params_true = data["params"]
+    # breakpoint()
+
     print("Simulated Y shape:", Y.shape)
 
     # --- Convert σ² → σ̃² (softplus inverse) ---
@@ -486,17 +546,25 @@ if __name__ == "__main__":
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
     order = ["eta_a", "gamma_a", "beta", "sigma2"]
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
+    param_name_map = build_param_name_map(order, block_order)
+
     theta_true_reparam, _ = flatten_params(params_reparam, order)
-    print("θ̃ length:", theta_true_reparam.size)
+    print("θ tilde length:", theta_true_reparam.size)
 
     # Only initialize update_idx related initial values
     if isinstance(update_idx, slice):
         update_idx = jnp.arange(theta_true_reparam.size)
 
     update_idx = jnp.array(update_idx)
-    theta_init = theta_true_reparam
+    theta_init = theta_true_reparam.copy()
     theta_init_update = theta_true_reparam[update_idx]
-    theta_init = theta_init.at[update_idx].set(theta_init_update * (1 + 1 * jax.random.normal(key, theta_init_update.shape)))
+    theta_init = theta_init.at[update_idx].add(0.5*jax.random.normal(key, theta_init_update.shape))
 
     # Estimation: full Newton
     theta_hat_reparam_short_full, grad_ll_full, hess_ll_full, convergence_full = mle_newton(
@@ -506,16 +574,7 @@ if __name__ == "__main__":
     theta_hat_reparam_full = theta_true_reparam
     theta_hat_reparam_full = theta_hat_reparam_full.at[update_idx].set(theta_hat_reparam_short_full)
 
-    # Estimation: Gibbs-style block Newton
-    block_order = {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
-
-    param_name_map = build_param_name_map(order, block_order)
-
+    # Estimation: 4-block Newton
     theta_hat_reparam_short_gibbs, grad_ll_gibbs, hess_ll_gibbs, convergence_gibbs = mle_newton_gibbs(
         Y=Y,
         Z=Z,
@@ -533,6 +592,26 @@ if __name__ == "__main__":
     theta_hat_reparam_gibbs = theta_true_reparam
     theta_hat_reparam_gibbs = theta_hat_reparam_gibbs.at[update_idx].set(theta_hat_reparam_short_gibbs)
 
+    # Estimation: hybrid block-to-full Newton
+    theta_hat_reparam_short_hybrid, grad_ll_hybrid, hess_ll_hybrid, convergence_hybrid = mle_newton_hybrid(
+        Y=Y,
+        Z=Z,
+        theta_init=theta_init,
+        params_scale=params_scale,
+        block_order=block_order,
+        algorithm=algorithm,
+        gibbs_max_outer_iter=5,
+        gibbs_inner_max_iter=20,
+        full_max_iter=10,
+        tol=1e-8,
+        alpha=1.0,
+        update_idx=update_idx,
+    )
+
+    theta_hat_reparam_hybrid = theta_true_reparam
+    theta_hat_reparam_hybrid = theta_hat_reparam_hybrid.at[update_idx].set(theta_hat_reparam_short_hybrid)
+
+
     # Convert back to natural scale (with softplus) if needed
     sigma2_tilde_hat_full = theta_hat_reparam_full[1+2*p:1+3*p]
     sigma2_hat_full = jax.nn.softplus(sigma2_tilde_hat_full)
@@ -542,10 +621,40 @@ if __name__ == "__main__":
     sigma2_hat_gibbs = jax.nn.softplus(sigma2_tilde_hat_gibbs)
     theta_hat_gibbs = jnp.concatenate([theta_hat_reparam_gibbs[:1+2*p], sigma2_hat_gibbs])
 
+    sigma2_tilde_hat_hybrid = theta_hat_reparam_hybrid[1+2*p:1+3*p]
+    sigma2_hat_hybrid = jax.nn.softplus(sigma2_tilde_hat_hybrid)
+    theta_hat_hybrid = jnp.concatenate([theta_hat_reparam_hybrid[:1+2*p], sigma2_hat_hybrid])
+
 
     # --- Plot log-likelihood profile for update_idx parameters ---
+    plot_natural_scale = True
     plot_width = 2
     n_points = 100
+
+
+    sigma2_slice = slice(1 + 2*p, 1 + 3*p)
+
+    if plot_natural_scale:
+        theta_true_plot, _ = flatten_params(params_true, order)
+
+        theta_init_plot = theta_init.at[sigma2_slice].set(
+            jax.nn.softplus(theta_init[sigma2_slice])
+        )
+
+        theta_hat_plot_full = theta_hat_full
+        theta_hat_plot_gibbs = theta_hat_gibbs
+        theta_hat_plot_hybrid = theta_hat_hybrid
+
+        x_label_suffix = " (natural scale)"
+    else:
+        theta_true_plot = theta_true_reparam
+        theta_init_plot = theta_init
+        theta_hat_plot_full = theta_hat_reparam_full
+        theta_hat_plot_gibbs = theta_hat_reparam_gibbs
+        theta_hat_plot_hybrid = theta_hat_reparam_hybrid
+
+        x_label_suffix = " (reparam scale)"
+
 
     n_params = len(update_idx)
     n_cols = min(4, n_params)
@@ -559,25 +668,33 @@ if __name__ == "__main__":
         axes = axes.flatten().tolist()
 
     estimation_results = [
-        ("Full Newton", theta_hat_reparam_full, "blue", "-."),
-        ("Gibbs Newton", theta_hat_reparam_gibbs, "purple", "--"),
+        ("Full Newton", theta_hat_plot_full, "blue", "-."),
+        ("4-block Newton", theta_hat_plot_gibbs, "purple", "--"),
+        ("Hybrid block_full", theta_hat_plot_hybrid, "orange", ":"),
     ]
 
     for ax, idx in zip(axes, update_idx):
         theta_grid = jnp.linspace(
-            theta_true_reparam[idx] - plot_width,
-            theta_true_reparam[idx] + plot_width,
+            theta_true_plot[idx] - plot_width,
+            theta_true_plot[idx] + plot_width,
             n_points
         )
+
         ll_values = []
         for val in theta_grid:
-            theta_temp = theta_true_reparam.at[idx].set(val)
+            theta_temp_plot = theta_true_plot.at[idx].set(val)
+
+            if plot_natural_scale and (1 + 2*p <= int(idx) < 1 + 3*p):
+                theta_temp = theta_true_reparam.at[idx].set(jnp.log(jnp.expm1(val)))
+            else:
+                theta_temp = theta_true_reparam.at[idx].set(val)
+
             ll = loglik_reparam(theta_temp, Y, Z, params_scale, update_idx)
             ll_values.append(float(ll))
 
         ax.plot(theta_grid, ll_values, linestyle="-", linewidth=2, label="Likelihood")
-        ax.axvline(theta_init[idx], color="green", linestyle=":", linewidth=2, label="Initial value")
-        ax.axvline(theta_true_reparam[idx], color="red", linestyle="--", linewidth=2, label="True value")
+        ax.axvline(theta_init_plot[idx], color="green", linestyle=":", linewidth=2, label="Initial value")
+        ax.axvline(theta_true_plot[idx], color="red", linestyle="--", linewidth=2, label="True value")
 
         for label, theta_hat_curr, color, linestyle in estimation_results:
             ax.axvline(
@@ -590,7 +707,7 @@ if __name__ == "__main__":
 
         ax.legend()
         param_name = param_name_map[int(idx)]
-        ax.set_xlabel(f"{param_name} value")
+        ax.set_xlabel(f"{param_name} value{x_label_suffix if 'sigma2' in param_name else ''}")
         ax.set_ylabel("Log-likelihood")
         ax.set_title(f"Likelihood Profile for {param_name}")
         ax.grid(True)
@@ -605,10 +722,15 @@ if __name__ == "__main__":
 
     print("True theta:", theta_true_reparam)
     print("Initial theta:", theta_init)
+
     print("Estimated theta (Full Newton):", theta_hat_reparam_full)
-    print("Estimated theta (Gibbs Newton):", theta_hat_reparam_gibbs)
+    print("Estimated theta (4-block Newton):", theta_hat_reparam_gibbs)
+    print("Estimated theta (Hybrid block->full):", theta_hat_reparam_hybrid)
 
     print("Full Newton status:", convergence_full["status"])
-    print("Gibbs Newton status:", convergence_gibbs["status"])
+    print("4-block Newton status:", convergence_gibbs["status"])
+    print("Hybrid status:", convergence_hybrid["status"])
+
     print("Full Newton iterations:", len(convergence_full["trace"]))
-    print("Gibbs Newton outer records:", len(convergence_gibbs["trace"]))
+    print("4-block Newton records:", len(convergence_gibbs["trace"]))
+    print("Hybrid records:", len(convergence_hybrid["trace"]))
