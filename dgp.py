@@ -147,21 +147,19 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
             raise ValueError("save must be False, True, or a file path string.")
 
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-        np.savez_compressed(
-            save_path,
+        save_obj = dict(
             Y=Y,
             Z=Z,
             W_a=W_a,
-            eta_a=eta_a,
-            gamma_a=gamma_a,
-            beta=beta,
-            sigma2=sigma2,
+            params=params,
             T=T,
             p=p,
             q=q,
             dist=dist,
-            key=key,
+            key=key
         )
+
+        np.savez_compressed(save_path, payload=np.array(save_obj, dtype=object))
         print(f"Saved simulated object to: {save_path}")
 
     return Y, Z, W_a
@@ -229,10 +227,15 @@ if __name__ == "__main__":
     # Simulate dataset
     # Y, Z, W_a = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal", params_scale=params_scale, save=True)
 
-    data = np.load(f"T={T}_p={p}_q={q}.npz")
-    Y = jnp.asarray(data["Y"])
-    Z = jnp.asarray(data["Z"])
-    W_a = jnp.asarray(data["W_a"])
+    data_path = f"T={T}_p={p}_q={q}.npz"
+    print(f"Using {data_path}")
+    with np.load(data_path, allow_pickle=True) as obj:
+        data = obj["payload"].item()
+
+    Y = data["Y"]
+    Z = data["Z"]
+    W_a = data["W_a"]
+    params_true = data["params"]
 
     print("Simulated Y shape:", Y.shape)
 
