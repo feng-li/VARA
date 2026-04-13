@@ -514,7 +514,7 @@ if __name__ == "__main__":
         eta_a=0.5,
         gamma_a=jnp.linspace(-0.15, 0.15, p),
         beta=jnp.linspace(-0.20, 0.20, p),
-        sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
+        sigma2=jnp.exp(jnp.log(0.5) + 0.2 * jax.random.normal(key, (p,)))  # positive σ²
     )
 
     params_scale = dict(eta_a=1)

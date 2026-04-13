@@ -170,6 +170,8 @@ if __name__ == "__main__":
 
     # --- Simulation settings ---
     key = jax.random.PRNGKey(random.randint(0, 10000))
+    keys = jax.random.split(key,10)
+
     T, p, q = 1000, 3, 3
 
     # --- True parameters (in natural scale) ---
@@ -177,7 +179,7 @@ if __name__ == "__main__":
         eta_a=0.2,
         gamma_a=jnp.linspace(-0.15, 0.15, p),
         beta=jnp.linspace(-0.20, 0.20, p),
-        sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
+        sigma2=jnp.exp(jnp.log(0.5) + 0.2 * jax.random.normal(keys[0], (p,)))  # positive σ²
     )
 
     params_scale = dict(eta_a=1)

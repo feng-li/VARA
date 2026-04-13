@@ -10,6 +10,7 @@ import psutil
 import os
 
 from loglik_attn import build_attention
+from loglik_attn import loglik_reparam
 
 def mem_gb():
     return psutil.Process(os.getpid()).memory_info().rss / 1024**3
@@ -418,10 +419,12 @@ def plot_likelihood_profiles(
 
 if __name__ == "__main__":
 
-    from loglik_attn import loglik_reparam
+    import random
 
     # Set random number seed
-    key = jax.random.PRNGKey(0)
+    seed = random.randrange(10**9)
+    key = jax.random.PRNGKey(seed)
+    keys = jax.random.split(key, 10)
 
     # Example parameter dictionary (in natural scale)
     T, p, q = 1000, 5, 3
@@ -431,7 +434,7 @@ if __name__ == "__main__":
         eta_a=0.5,
         gamma_a=jnp.linspace(-0.15, 0.15, p),
         beta=jnp.linspace(-0.20, 0.20, p),
-        sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
+        sigma2=jnp.exp(jnp.log(0.5) + 0.2 * jax.random.normal(keys[0], (p,)))  # positive σ²
     )
 
     # Ensure stationarity
@@ -443,20 +446,20 @@ if __name__ == "__main__":
     params_scale = dict(eta_a=1)
 
     # Simulate dataset
-    # Y, Z, W_a = simulate_VAR_attention(
-    #     key, params, T=T, p=p, q=q, dist="normal",
-    #     params_scale=params_scale, save=True
-    # )
+    Y, Z, W_a = simulate_VAR_attention(
+        key, params=params_true, T=T, p=p, q=q, dist="normal",
+        params_scale=params_scale, save=True
+    )
 
-    data_path = f"T={T}_p={p}_q={q}.npz"
-    print(f"Using {data_path}")
-    with np.load(data_path, allow_pickle=True) as obj:
-        data = obj["payload"].item()
+    # data_path = f"T={T}_p={p}_q={q}.npz"
+    # print(f"Using {data_path}")
+    # with np.load(data_path, allow_pickle=True) as obj:
+    #     data = obj["payload"].item()
 
-    Y = data["Y"]
-    Z = data["Z"]
-    W_a = data["W_a"]
-    params_true = data["params"]
+    # Y = data["Y"]
+    # Z = data["Z"]
+    # W_a = data["W_a"]
+    # params_true = data["params"]
 
     print("Simulated Y shape:", Y.shape)
 
