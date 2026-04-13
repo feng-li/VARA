@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import jax.lax as lax
 from jax.random import multivariate_normal, normal
+import numpy as np
 import matplotlib.pyplot as plt
 import psutil
 import os
@@ -80,49 +81,37 @@ def ensure_stationarity(beta, gamma_a, margin=0.98, eps=1e-6):
 
 
 # @profile
-def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params_scale=dict(eta_a=1)):
+def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
+                           params_scale=dict(eta_a=1), save=False):
     """
     Simulate data from the VAR attention model.
 
+    save:
+        False -> do not save
+        True  -> save to default path
+        str   -> save to that file path
 
-    key: JAX PRNGKey
-    T: sample size
-    p: dimension of time series
-    q: dimension of feature vector
-    dist: 'normal' or 't5' for noise distribution
-
-    Returns: (Y, params, Z, W_a, W_b)
+    Returns: (Y, Z, W_a)
     """
     mem_start = mem_gb()
 
     keys = jax.random.split(key, 7)
 
-    # Step 1: Generate feature vectors Z ~ N(0, Σ_z) Use less-correlated features Z. Highly correlated Z makes the
-    # attention mapping degenerate.
     idx = jnp.arange(q)
     Sigma_z = 0.9 ** jnp.abs(idx[:, None] - idx[None, :])
     Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
 
-    # Create structured features
-    # Z = create_structured_features(keys[0], p, q)
-
-    # Step 2: Draw parameters
     eta_a = params["eta_a"]
     gamma_a = params["gamma_a"]
     beta = params["beta"]
     sigma2 = params["sigma2"]
 
-    # Ensure stationarity
     beta, gamma_a, stat_info = ensure_stationarity(beta, gamma_a, margin=0.98)
     print("Stationarity check:", stat_info)
 
-    # Step 3: Construct W_a, W_b
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
-
-    # Step 4: Construct S, G
     G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
 
-    # Step 5: Random noise
     if dist == "normal":
         eps_raw = normal(keys[5], (T, p))
     elif dist == "t5":
@@ -130,29 +119,50 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal", params
         z = normal(k1, (T, p))
         u = jax.random.chisquare(k2, df=5, shape=(T, p))
         eps_raw = z / jnp.sqrt(u / 5.0)
-        eps_raw = eps_raw * jnp.sqrt(3.0 / 5.0)  # normalize variance to 1
+        eps_raw = eps_raw * jnp.sqrt(3.0 / 5.0)
     else:
         raise ValueError("dist must be 'normal' or 't5'.")
 
-    # Scale to Σ_e = diag(sigma2)
     eps = eps_raw * jnp.sqrt(sigma2)
 
-    # Y = jnp.zeros((T, p))
-    # for t in range(1, T):
-    #     Y = Y.at[t].set(jnp.linalg.solve(S, (G @ Y[t - 1] + eps[t])))
     def step(y_prev, eps_t):
         y_t = G @ y_prev + eps_t
-        return y_t, y_t  # the carry passed to the next step and the output collected across time.
+        return y_t, y_t
 
     y0 = jnp.zeros((p,))
-    _, Ys = lax.scan(step, y0, eps[1:])   # returns (T-1, p)
+    _, Ys = lax.scan(step, y0, eps[1:])
     Y = jnp.vstack([y0[None, :], Ys])
 
     params = dict(eta_a=eta_a, gamma_a=gamma_a, beta=beta, sigma2=sigma2)
 
-    # TODO: Add the attention checking.
     mem_used = mem_gb() - mem_start
     print(f"DGP RAM used: {mem_used:.3f} GB")
+
+    if save is not False:
+        if save is True:
+            save_path = f"T={T}_p={p}_q={q}.npz"
+        elif isinstance(save, str):
+            save_path = save
+        else:
+            raise ValueError("save must be False, True, or a file path string.")
+
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        np.savez_compressed(
+            save_path,
+            Y=Y,
+            Z=Z,
+            W_a=W_a,
+            eta_a=eta_a,
+            gamma_a=gamma_a,
+            beta=beta,
+            sigma2=sigma2,
+            T=T,
+            p=p,
+            q=q,
+            dist=dist,
+            key=key,
+        )
+        print(f"Saved simulated object to: {save_path}")
 
     return Y, Z, W_a
 
@@ -217,7 +227,13 @@ if __name__ == "__main__":
     params_scale = dict(eta_a=1)
 
     # Simulate dataset
-    Y, Z, W_a = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal", params_scale=params_scale)
+    # Y, Z, W_a = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal", params_scale=params_scale, save=True)
+
+    data = np.load(f"T={T}_p={p}_q={q}.npz")
+    Y = jnp.asarray(data["Y"])
+    Z = jnp.asarray(data["Z"])
+    W_a = jnp.asarray(data["W_a"])
+
     print("Simulated Y shape:", Y.shape)
 
     # Convert σ² → σ̃² for reparameterized estimation
