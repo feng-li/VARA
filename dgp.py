@@ -202,30 +202,251 @@ def flatten_params(params: dict, order: list[str]):
     return theta_flat, param_slices
 
 
+def plot_likelihood_profiles(
+    Y,
+    Z,
+    params_true,
+    params_scale,
+    loglik_fn,
+    update_idx=slice(None),
+    theta_init=None,
+    theta_hat_dict=None,
+    plot_natural_scale=True,
+    plot_width=2.0,
+    n_points=100,
+    save_path=None,
+):
+    """
+    Plot 1D likelihood profiles around true parameters.
+
+    Parameters
+    ----------
+    Y, Z : arrays
+        Data used in the likelihood.
+    params_true : dict
+        True parameters on natural scale.
+    params_scale : dict
+        Parameter scaling dict.
+    loglik_fn : callable
+        Typically loglik_reparam(theta, Y, Z, params_scale, update_idx).
+    update_idx : slice or array-like
+        Indices to plot.
+    theta_init : 1D array, optional
+        Initial parameter vector on reparameterized scale.
+    theta_hat_dict : dict[str, 1D array], optional
+        Estimated parameter vectors on reparameterized scale.
+        Example:
+            {
+                "Full Newton": theta_hat_reparam_full,
+                "4-block Newton": theta_hat_reparam_gibbs,
+            }
+    plot_natural_scale : bool
+        If True, sigma2 is shown on natural scale.
+    plot_width : float
+        Half-width of grid around true value.
+    n_points : int
+        Number of grid points.
+    save_path : str, optional
+        If provided, save figure to this path.
+
+    Returns
+    -------
+    fig, axes
+    """
+    import math
+    import matplotlib.pyplot as plt
+
+    order = ["eta_a", "gamma_a", "beta", "sigma2"]
+    p = Y.shape[1]
+
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
+
+    def build_param_name_map(order, block_order):
+        name_map = {}
+        for param_name in order:
+            block = list(block_order[param_name])
+            if len(block) == 1:
+                name_map[int(block[0])] = param_name
+            else:
+                for local_pos, global_idx in enumerate(block):
+                    name_map[int(global_idx)] = f"{param_name}[{local_pos}]"
+        return name_map
+
+    param_name_map = build_param_name_map(order, block_order)
+
+    sigma2_slice = slice(1 + 2 * p, 1 + 3 * p)
+
+    sigma2_tilde_true = jnp.log(jnp.expm1(params_true["sigma2"]))
+    params_reparam = params_true.copy()
+    params_reparam["sigma2"] = sigma2_tilde_true
+
+    theta_true_reparam, _ = flatten_params(params_reparam, order)
+
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta_true_reparam.size)
+    update_idx = jnp.array(update_idx)
+
+    if plot_natural_scale:
+        theta_true_plot, _ = flatten_params(params_true, order)
+    else:
+        theta_true_plot = theta_true_reparam
+
+    if theta_init is not None:
+        if plot_natural_scale:
+            theta_init_plot = theta_init.at[sigma2_slice].set(
+                jax.nn.softplus(theta_init[sigma2_slice])
+            )
+        else:
+            theta_init_plot = theta_init
+    else:
+        theta_init_plot = None
+
+    theta_hat_plot_dict = {}
+    if theta_hat_dict is not None:
+        for label, theta_hat in theta_hat_dict.items():
+            if plot_natural_scale:
+                theta_hat_plot = theta_hat.at[sigma2_slice].set(
+                    jax.nn.softplus(theta_hat[sigma2_slice])
+                )
+            else:
+                theta_hat_plot = theta_hat
+            theta_hat_plot_dict[label] = theta_hat_plot
+
+    n_params = len(update_idx)
+    n_cols = min(4, n_params)
+    n_rows = math.ceil(n_params / n_cols)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows))
+    if isinstance(axes, plt.Axes):
+        axes = [axes]
+    else:
+        axes = axes.flatten().tolist()
+
+    styles = [
+        ("blue", "-."),
+        ("purple", "--"),
+        ("orange", ":"),
+        ("brown", "-"),
+        ("black", "--"),
+    ]
+
+    for ax, idx in zip(axes, update_idx):
+        idx = int(idx)
+
+        ll_values = []
+
+        if plot_natural_scale and (1 + 2 * p <= idx < 1 + 3 * p):
+            theta_grid_reparam = jnp.linspace(
+                theta_true_reparam[idx] - plot_width,
+                theta_true_reparam[idx] + plot_width,
+                n_points
+            )
+            theta_grid_plot = jax.nn.softplus(theta_grid_reparam)
+
+            for val_reparam in theta_grid_reparam:
+                theta_temp = theta_true_reparam.at[idx].set(val_reparam)
+                ll = loglik_fn(theta_temp, Y, Z, params_scale, update_idx)
+                ll_values.append(float(ll))
+
+            ax.plot(theta_grid_plot, ll_values, linewidth=2, label="Likelihood")
+
+        else:
+            theta_grid = jnp.linspace(
+                theta_true_plot[idx] - plot_width,
+                theta_true_plot[idx] + plot_width,
+                n_points
+            )
+
+            for val in theta_grid:
+                theta_temp = theta_true_reparam.at[idx].set(val)
+                ll = loglik_fn(theta_temp, Y, Z, params_scale, update_idx)
+                ll_values.append(float(ll))
+
+            ax.plot(theta_grid, ll_values, linewidth=2, label="Likelihood")
+
+        if theta_init_plot is not None:
+            ax.axvline(
+                theta_init_plot[idx],
+                color="green",
+                linestyle=":",
+                linewidth=2,
+                label="Initial value"
+            )
+
+        ax.axvline(
+            theta_true_plot[idx],
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label="True value"
+        )
+
+        for k, (label, theta_hat_plot) in enumerate(theta_hat_plot_dict.items()):
+            color, linestyle = styles[k % len(styles)]
+            ax.axvline(
+                theta_hat_plot[idx],
+                color=color,
+                linestyle=linestyle,
+                linewidth=2,
+                label=label
+            )
+
+        param_name = param_name_map[idx]
+        suffix = " (natural scale)" if (plot_natural_scale and "sigma2" in param_name) else ""
+        ax.set_xlabel(f"{param_name} value{suffix}")
+        ax.set_ylabel("Log-likelihood")
+        ax.set_title(f"Likelihood Profile for {param_name}")
+        ax.grid(True)
+        ax.legend()
+
+    for ax in axes[n_params:]:
+        ax.axis("off")
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        plt.savefig(os.path.expanduser(save_path), bbox_inches="tight")
+        print(f"Saved likelihood profiles to: {save_path}")
+
+    return fig, axes
+
+
 if __name__ == "__main__":
+
+    from loglik_attn import loglik_reparam
 
     # Set random number seed
     key = jax.random.PRNGKey(0)
 
     # Example parameter dictionary (in natural scale)
-    p, q, T = 300, 50, 200
-    params = dict(
+    T, p, q = 1000, 5, 3
+
+    # --- True parameters (in natural scale) ---
+    params_true = dict(
         eta_a=0.5,
-        gamma_a=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
-        beta=jax.random.uniform(key, (p,), minval=-0.2, maxval=0.2),
+        gamma_a=jnp.linspace(-0.15, 0.15, p),
+        beta=jnp.linspace(-0.20, 0.20, p),
         sigma2=jnp.exp(jax.random.normal(key, (p,)))  # positive σ²
     )
 
     # Ensure stationarity
-    beta, gamma_a, stat_info = ensure_stationarity(params['beta'], params['gamma_a'], margin=0.98)
-    params['beta'] = beta
-    params['gamma_a'] = gamma_a
+    beta, gamma_a, stat_info = ensure_stationarity(params_true["beta"], params_true["gamma_a"], margin=0.98)
+    params_true["beta"] = beta
+    params_true["gamma_a"] = gamma_a
     print("Stationarity check:", stat_info)
 
     params_scale = dict(eta_a=1)
 
     # Simulate dataset
-    # Y, Z, W_a = simulate_VAR_attention(key, params, T=T, p=p, q=q, dist="normal", params_scale=params_scale, save=True)
+    # Y, Z, W_a = simulate_VAR_attention(
+    #     key, params, T=T, p=p, q=q, dist="normal",
+    #     params_scale=params_scale, save=True
+    # )
 
     data_path = f"T={T}_p={p}_q={q}.npz"
     print(f"Using {data_path}")
@@ -239,27 +460,45 @@ if __name__ == "__main__":
 
     print("Simulated Y shape:", Y.shape)
 
-    # Convert σ² → σ̃² for reparameterized estimation
-    sigma2_tilde = jnp.log(jnp.expm1(params["sigma2"]))
-    params_reparam = params.copy()
-    params_reparam["sigma2"] = sigma2_tilde
+    # Convert σ² → σ̃² for reparameterized likelihood
+    sigma2_tilde_true = jnp.log(jnp.expm1(params_true["sigma2"]))
+    params_reparam = params_true.copy()
+    params_reparam["sigma2"] = sigma2_tilde_true
 
-    # Flatten parameter vector θ̃ (for estimation/Hessian functions)
+    # Flatten parameter vector θ̃
     order = ["eta_a", "gamma_a", "beta", "sigma2"]
     theta_tilde, _ = flatten_params(params_reparam, order)
 
     print("Parameter vector θ (reparameterized) length:", theta_tilde.shape[0])
-    print("First few estimated σ²:", sigma2_tilde[:5])
+    print("First few sigma2_tilde:", sigma2_tilde_true[:5])
 
-    # ---------- Visualization ----------
+    # ---------- Time series visualization ----------
     fig, axes = plt.subplots(10, 10, figsize=(20, 20), sharex=True)
     axes = axes.flatten()
 
     print("Plotting first 100 series")
-    for i in range(100):  # plot first 100 series
+    for i in range(100):
         axes[i].plot(Y[:, i], lw=1)
         axes[i].set_title(f"Series {i+1}", fontsize=8)
-        axes[i].tick_params(axis='both', which='major', labelsize=6)
+        axes[i].tick_params(axis="both", which="major", labelsize=6)
 
     plt.tight_layout()
+    plt.show()
+
+    # ---------- Likelihood profile plot ----------
+    plot_likelihood_profiles(
+        Y=Y,
+        Z=Z,
+        params_true=params_true,
+        params_scale=params_scale,
+        loglik_fn=loglik_reparam,
+        update_idx=slice(None),
+        theta_init=None,
+        theta_hat_dict=None,
+        plot_natural_scale=True,
+        plot_width=2.0,
+        n_points=100,
+        save_path="likelihood_profiles_true.pdf",
+    )
+
     plt.show()

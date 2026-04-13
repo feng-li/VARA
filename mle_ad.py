@@ -7,6 +7,7 @@ import numpy as np
 from loglik_attn import loglik_reparam
 from grad import loglik_grad_analytical
 from hess import loglik_hess_analytical
+from dgp import plot_likelihood_profiles
 
 import pandas as pd
 
@@ -627,110 +628,21 @@ if __name__ == "__main__":
 
 
     # --- Plot log-likelihood profile for update_idx parameters ---
-    plot_natural_scale = True
-    plot_width = 2
-    n_points = 100
-
-
-    sigma2_slice = slice(1 + 2*p, 1 + 3*p)
-
-    if plot_natural_scale:
-        theta_true_plot, _ = flatten_params(params_true, order)
-
-        theta_init_plot = theta_init.at[sigma2_slice].set(
-            jax.nn.softplus(theta_init[sigma2_slice])
-        )
-
-        theta_hat_plot_full = theta_hat_full
-        theta_hat_plot_gibbs = theta_hat_gibbs
-        theta_hat_plot_hybrid = theta_hat_hybrid
-
-        x_label_suffix = " (natural scale)"
-    else:
-        theta_true_plot = theta_true_reparam
-        theta_init_plot = theta_init
-        theta_hat_plot_full = theta_hat_reparam_full
-        theta_hat_plot_gibbs = theta_hat_reparam_gibbs
-        theta_hat_plot_hybrid = theta_hat_reparam_hybrid
-
-        x_label_suffix = " (reparam scale)"
-
-
-    n_params = len(update_idx)
-    n_cols = min(4, n_params)
-    n_rows = math.ceil(n_params / n_cols)
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows))
-
-    if isinstance(axes, plt.Axes):
-        axes = [axes]
-    else:
-        axes = axes.flatten().tolist()
-
-    estimation_results = [
-        ("Full Newton", theta_hat_plot_full, "blue", "-."),
-        ("4-block Newton", theta_hat_plot_gibbs, "purple", "--"),
-        ("Hybrid block_full", theta_hat_plot_hybrid, "orange", ":"),
-    ]
-
-    for ax, idx in zip(axes, update_idx):
-        theta_grid = jnp.linspace(
-            theta_true_plot[idx] - plot_width,
-            theta_true_plot[idx] + plot_width,
-            n_points
-        )
-
-        ll_values = []
-        for val in theta_grid:
-            theta_temp_plot = theta_true_plot.at[idx].set(val)
-
-            if plot_natural_scale and (1 + 2*p <= int(idx) < 1 + 3*p):
-                theta_temp = theta_true_reparam.at[idx].set(jnp.log(jnp.expm1(val)))
-            else:
-                theta_temp = theta_true_reparam.at[idx].set(val)
-
-            ll = loglik_reparam(theta_temp, Y, Z, params_scale, update_idx)
-            ll_values.append(float(ll))
-
-        ax.plot(theta_grid, ll_values, linestyle="-", linewidth=2, label="Likelihood")
-        ax.axvline(theta_init_plot[idx], color="green", linestyle=":", linewidth=2, label="Initial value")
-        ax.axvline(theta_true_plot[idx], color="red", linestyle="--", linewidth=2, label="True value")
-
-        for label, theta_hat_curr, color, linestyle in estimation_results:
-            ax.axvline(
-                theta_hat_curr[idx],
-                color=color,
-                linestyle=linestyle,
-                linewidth=2,
-                label=label
-            )
-
-        ax.legend()
-        param_name = param_name_map[int(idx)]
-        ax.set_xlabel(f"{param_name} value{x_label_suffix if 'sigma2' in param_name else ''}")
-        ax.set_ylabel("Log-likelihood")
-        ax.set_title(f"Likelihood Profile for {param_name}")
-        ax.grid(True)
-
-    # hide unused subplots
-    for ax in axes[n_params:]:
-        ax.axis("off")
-
-    plt.tight_layout()
-    plt.savefig(os.path.expanduser("likelihood_profiles_compare.pdf"), bbox_inches="tight")
-    print("Saved all likelihood profiles to 'likelihood_profiles_compare.pdf'")
-
-    print("True theta:", theta_true_reparam)
-    print("Initial theta:", theta_init)
-
-    print("Estimated theta (Full Newton):", theta_hat_reparam_full)
-    print("Estimated theta (4-block Newton):", theta_hat_reparam_gibbs)
-    print("Estimated theta (Hybrid block->full):", theta_hat_reparam_hybrid)
-
-    print("Full Newton status:", convergence_full["status"])
-    print("4-block Newton status:", convergence_gibbs["status"])
-    print("Hybrid status:", convergence_hybrid["status"])
-
-    print("Full Newton iterations:", len(convergence_full["trace"]))
-    print("4-block Newton records:", len(convergence_gibbs["trace"]))
-    print("Hybrid records:", len(convergence_hybrid["trace"]))
+    plot_likelihood_profiles(
+        Y=Y,
+        Z=Z,
+        params_true=params_true,
+        params_scale=params_scale,
+        loglik_fn=loglik_reparam,
+        update_idx=update_idx,
+        theta_init=theta_init,
+        theta_hat_dict={
+            "Full Newton": theta_hat_reparam_full,
+            "4-block Newton": theta_hat_reparam_gibbs,
+            "Hybrid block→full": theta_hat_reparam_hybrid,
+        },
+        plot_natural_scale=True,
+        plot_width=2.0,
+        n_points=100,
+        save_path="likelihood_profiles_compare.pdf",
+    )
