@@ -501,6 +501,7 @@ if __name__ == "__main__":
 
     from dgp import simulate_VAR_attention
     from dgp import flatten_params
+    from mle_optimize import mle_optimize
 
     # jax.config.update("jax_enable_x64", True)
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
@@ -561,6 +562,17 @@ if __name__ == "__main__":
     theta_true_reparam, _ = flatten_params(params_reparam, order)
     print("θ tilde length:", theta_true_reparam.size)
 
+
+    # Select algorithms to run
+    selected_algorithms = {
+        "Full Newton": True,
+        "Block Newton": True,
+        "Hybrid Block2Full": True,
+        "LBFGS": True,
+    }
+
+    # Container of estimated parameter vectors for plotting
+    theta_hat_dict = {}
     # Only initialize update_idx related initial values
     if isinstance(update_idx, slice):
         update_idx = jnp.arange(theta_true_reparam.size)
@@ -568,66 +580,65 @@ if __name__ == "__main__":
     update_idx = jnp.array(update_idx)
     theta_init = theta_true_reparam.copy()
     theta_init_update = theta_true_reparam[update_idx]
-    theta_init = theta_init.at[update_idx].add(0.5*jax.random.normal(key, theta_init_update.shape))
+    theta_init = theta_init.at[update_idx].add(0.5 * jax.random.normal(key, theta_init_update.shape))
 
-    # Estimation: full Newton
-    theta_hat_reparam_short_full, grad_ll_full, hess_ll_full, convergence_full = mle_newton(
-        Y, Z, theta_init, params_scale, update_idx=update_idx, algorithm=algorithm
-    )
+    if selected_algorithms["Full Newton"]:
+        theta_hat_reparam_short_full, grad_ll_full, hess_ll_full, convergence_full = mle_newton(
+            Y, Z, theta_init, params_scale, update_idx=update_idx, algorithm=algorithm
+        )
 
-    theta_hat_reparam_full = theta_true_reparam
-    theta_hat_reparam_full = theta_hat_reparam_full.at[update_idx].set(theta_hat_reparam_short_full)
+        theta_hat_reparam_full = theta_true_reparam.at[update_idx].set(theta_hat_reparam_short_full)
+        theta_hat_dict["Full Newton"] = theta_hat_reparam_full
 
-    # Estimation: 4-block Newton
-    theta_hat_reparam_short_gibbs, grad_ll_gibbs, hess_ll_gibbs, convergence_gibbs = mle_newton_gibbs(
-        Y=Y,
-        Z=Z,
-        theta_init=theta_init,
-        params_scale=params_scale,
-        block_order=block_order,
-        algorithm=algorithm,
-        max_outer_iter=10,
-        inner_max_iter=30,
-        tol=1e-8,
-        alpha=1.0,
-        update_idx=update_idx,
-    )
+    if selected_algorithms["Block Newton"]:
+        theta_hat_reparam_short_gibbs, grad_ll_gibbs, hess_ll_gibbs, convergence_gibbs = mle_newton_gibbs(
+            Y=Y,
+            Z=Z,
+            theta_init=theta_init,
+            params_scale=params_scale,
+            block_order=block_order,
+            algorithm=algorithm,
+            max_outer_iter=10,
+            inner_max_iter=20,
+            tol=1e-8,
+            alpha=1.0,
+            update_idx=update_idx,
+        )
 
-    theta_hat_reparam_gibbs = theta_true_reparam
-    theta_hat_reparam_gibbs = theta_hat_reparam_gibbs.at[update_idx].set(theta_hat_reparam_short_gibbs)
+        theta_hat_reparam_gibbs = theta_true_reparam.at[update_idx].set(theta_hat_reparam_short_gibbs)
+        theta_hat_dict["Block Newton"] = theta_hat_reparam_gibbs
 
-    # Estimation: hybrid block-to-full Newton
-    theta_hat_reparam_short_hybrid, grad_ll_hybrid, hess_ll_hybrid, convergence_hybrid = mle_newton_hybrid(
-        Y=Y,
-        Z=Z,
-        theta_init=theta_init,
-        params_scale=params_scale,
-        block_order=block_order,
-        algorithm=algorithm,
-        gibbs_max_outer_iter=5,
-        gibbs_inner_max_iter=20,
-        full_max_iter=10,
-        tol=1e-8,
-        alpha=1.0,
-        update_idx=update_idx,
-    )
+    if selected_algorithms["Hybrid Block2Full"]:
+        theta_hat_reparam_short_hybrid, grad_ll_hybrid, hess_ll_hybrid, convergence_hybrid = mle_newton_hybrid(
+            Y=Y,
+            Z=Z,
+            theta_init=theta_init,
+            params_scale=params_scale,
+            block_order=block_order,
+            algorithm=algorithm,
+            gibbs_max_outer_iter=5,
+            gibbs_inner_max_iter=20,
+            full_max_iter=10,
+            tol=1e-8,
+            alpha=1.0,
+            update_idx=update_idx,
+        )
 
-    theta_hat_reparam_hybrid = theta_true_reparam
-    theta_hat_reparam_hybrid = theta_hat_reparam_hybrid.at[update_idx].set(theta_hat_reparam_short_hybrid)
+        theta_hat_reparam_hybrid = theta_true_reparam.at[update_idx].set(theta_hat_reparam_short_hybrid)
+        theta_hat_dict["Hybrid Block2Full"] = theta_hat_reparam_hybrid
 
+    if selected_algorithms["LBFGS"]:
+        theta_hat_reparam_short_opt, grad_ll_opt, hess_ll_opt, convergence_opt = mle_optimize(
+            Y=Y,
+            Z=Z,
+            theta_init=theta_init,
+            params_scale=params_scale,
+            algorithm="lbfgs",
+            update_idx=update_idx,
+        )
 
-    # Convert back to natural scale (with softplus) if needed
-    sigma2_tilde_hat_full = theta_hat_reparam_full[1+2*p:1+3*p]
-    sigma2_hat_full = jax.nn.softplus(sigma2_tilde_hat_full)
-    theta_hat_full = jnp.concatenate([theta_hat_reparam_full[:1+2*p], sigma2_hat_full])
-
-    sigma2_tilde_hat_gibbs = theta_hat_reparam_gibbs[1+2*p:1+3*p]
-    sigma2_hat_gibbs = jax.nn.softplus(sigma2_tilde_hat_gibbs)
-    theta_hat_gibbs = jnp.concatenate([theta_hat_reparam_gibbs[:1+2*p], sigma2_hat_gibbs])
-
-    sigma2_tilde_hat_hybrid = theta_hat_reparam_hybrid[1+2*p:1+3*p]
-    sigma2_hat_hybrid = jax.nn.softplus(sigma2_tilde_hat_hybrid)
-    theta_hat_hybrid = jnp.concatenate([theta_hat_reparam_hybrid[:1+2*p], sigma2_hat_hybrid])
+        theta_hat_reparam_opt = theta_true_reparam.at[update_idx].set(theta_hat_reparam_short_opt)
+        theta_hat_dict["LBFGS"] = theta_hat_reparam_opt
 
 
     # --- Plot log-likelihood profile for update_idx parameters ---
@@ -639,11 +650,7 @@ if __name__ == "__main__":
         loglik_fn=loglik_reparam,
         update_idx=update_idx,
         theta_init=theta_init,
-        theta_hat_dict={
-            "Full Newton": theta_hat_reparam_full,
-            "4-block Newton": theta_hat_reparam_gibbs,
-            "Hybrid block→full": theta_hat_reparam_hybrid,
-        },
+        theta_hat_dict=theta_hat_dict,
         plot_natural_scale=True,
         plot_width=2.0,
         n_points=100,

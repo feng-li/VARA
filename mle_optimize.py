@@ -5,21 +5,28 @@ import optax
 from loglik_attn import loglik_reparam
 
 
-def mle_optimize(Y, Z, theta_init, params_scale, algorithm):
+def mle_optimize(Y, Z, theta_init, params_scale, algorithm, update_idx=slice(None)):
     """
     MLE estimator using Optax LBFGS (line-search version).
     """
 
-    # Negative log-likelihood
-    def objective(theta):
-        return -loglik_reparam(theta, Y, Z, params_scale)
+    if isinstance(update_idx, slice):
+        update_idx = jnp.arange(theta_init.size)
+    update_idx = jnp.array(update_idx)
+
+    theta_full_init = theta_init
+    theta = theta_full_init[update_idx]
+
+    # Negative log-likelihood on active block only
+    def objective(theta_short):
+        theta_full = theta_full_init.at[update_idx].set(theta_short)
+        return -loglik_reparam(theta_full, Y, Z, params_scale, update_idx)
 
     if algorithm == "lbfgs":
         opt_init, opt_update = optax.lbfgs()
     else:
         raise Exception("Not implemented.")
 
-    theta = theta_init
     state = opt_init(theta)
 
     maxiter = 50
@@ -27,7 +34,6 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm):
     for _ in range(maxiter):
         loss, grad = jax.value_and_grad(objective)(theta)
 
-        # ★★★ correct required signature ★★★
         updates, state = opt_update(
             grad, state, theta,
             value=loss,
@@ -43,7 +49,6 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm):
     theta_hat = theta
 
     return theta_hat, [], [], state
-
 
 
 if __name__ == "__main__":
