@@ -515,7 +515,7 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
     V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
     H = assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
 
-    V_tilde, H_tilde, Kp = scale_V_H(V, H, p)
+    V_tilde, H_tilde, Kp, scale_vec = scale_V_H(V, H, p)
     pd_info = check_positive_definite_scaled(V_tilde, H_tilde)
 
     if verbose:
@@ -783,7 +783,7 @@ if __name__ == "__main__":
         eta_a=0.2,
         gamma_a=jnp.linspace(-0.15, 0.15, p),
         beta=jnp.linspace(-0.20, 0.20, p),
-        jnp.exp(jnp.log(0.5) + 0.2 * jax.random.normal(keys[0], (p,)))
+        sigma2=jnp.exp(jnp.log(0.5) + 0.2 * jax.random.normal(keys[0], (p,)))
     )
 
     params_scale = dict(eta_a=1)
