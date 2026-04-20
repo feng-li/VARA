@@ -210,7 +210,7 @@ if __name__ == "__main__":
     update_idx = jnp.array(update_idx)
     theta_init = theta_true_reparam
     theta_init_update = theta_true_reparam[update_idx]
-    theta_init = theta_init.at[update_idx].set(theta_init_update * (1 + 1 * jax.random.normal(key, theta_init_update.shape)))
+    theta_init = theta_init.at[update_idx].add(0.5 * jax.random.normal(key, theta_init_update.shape))
 
     # Estimation
     # breakpoint()

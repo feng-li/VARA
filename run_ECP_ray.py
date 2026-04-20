@@ -85,8 +85,8 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
             idx_all = jnp.arange(theta_true.size)[sl]
             idx = jnp.intersect1d(idx_all, update_idx_array)
             if idx.size > 0:
-                noise = 1.0 + scale * jax.random.normal(key, shape=(len(idx),))
-                theta_init = theta_init.at[idx].set(theta_true[idx] * noise)
+                noise = scale * jax.random.normal(key, shape=(len(idx),))
+                theta_init = theta_init.at[idx].add(noise)
 
         # 3. Estimate
         result, convergence = estimate(
