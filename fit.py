@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 
 from cov import compute_sandwich_variance
-from mle_ad import mle_newton, mle_newton_gibbs, mle_newton_hybrid
+from mle_ad import mle_newton, mle_newton_gibbs, mle_newton_hybrid, mle_optimize
 from yule_walker_ad import yule_walker
 # from mle_jaxopt import mle_bfgs   # not maintained
 
@@ -118,6 +118,17 @@ def estimate(
             algorithm="analytical_gradhess",
             update_idx=update_idx,
         )
+
+    elif algorithm == "lbfgs":
+        theta_hat_reparam_short_opt, grad_ll_opt, hess_ll_opt, convergence_opt = mle_optimize(
+            Y=Y,
+            Z=Z,
+            theta_init=theta_init,
+            params_scale=params_scale,
+            algorithm="lbfgs",
+            update_idx=update_idx,
+        )
+
 
     else:
         raise ValueError(f"No such algorithm implemented: {algorithm}")

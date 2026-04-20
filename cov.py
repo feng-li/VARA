@@ -760,6 +760,7 @@ def compute_z_stat_from_theta_hat(Y, Z, theta_hat, theta_true, A, rate, params_s
     z_val = rate * diff / jnp.sqrt(jnp.maximum(jnp.diag(J_T), 1e-12))
     return z_val, {"J_T": J_T, **extras}
 
+
 def compare_VH_analytic_vs_auto(theta_hat, Y, Z, params_scale, kappa4=3.0, verbose=True):
     """
     Compare analytical V,H from build_VH_from_theta_hat(...) with
@@ -796,7 +797,7 @@ if __name__ == "__main__":
     import random
     from dgp import simulate_VAR_attention
     from dgp import flatten_params
-    from yule_walker_ad import yule_walker
+    from mle_optimize import mle_optimize
 
     # jax.config.update("jax_enable_x64", True)
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
@@ -804,7 +805,7 @@ if __name__ == "__main__":
     # --- Simulation settings ---
     key = jax.random.PRNGKey(random.randint(0, 10000))
     keys = jax.random.split(key,10)
-    T, p, q = 100, 10, 5
+    T, p, q = 1000, 10, 5
 
     # --- True parameters (in natural scale) ---
     params_true = dict(
@@ -851,7 +852,7 @@ if __name__ == "__main__":
 
     # Estimation
     # breakpoint()
-    theta_hat_reparam_short, grad_ll, hess_ll, convergence = yule_walker(Y, Z, theta_init, params_scale, update_idx=update_idx)
+    theta_hat_reparam_short, grad_ll, hess_ll, convergence = mle_optimize(Y, Z, theta_init, params_scale, algorithm="lbfgs", update_idx=update_idx)
 
     theta_hat_reparam = theta_true_reparam
     theta_hat_reparam = theta_hat_reparam.at[update_idx].set(theta_hat_reparam_short)
