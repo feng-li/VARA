@@ -4,6 +4,7 @@ from jax.scipy.stats import norm
 from jax.scipy.sparse.linalg import cg
 
 from hess import compute_Wa_Wb_dots
+from cov_auto import compute_V_auto_natural, compute_H_auto_natural
 
 # ===============================================================
 # === Utility functions =========================================
@@ -759,6 +760,34 @@ def compute_z_stat_from_theta_hat(Y, Z, theta_hat, theta_true, A, rate, params_s
     z_val = rate * diff / jnp.sqrt(jnp.maximum(jnp.diag(J_T), 1e-12))
     return z_val, {"J_T": J_T, **extras}
 
+def compare_VH_analytic_vs_auto(theta_hat, Y, Z, params_scale, kappa4=3.0, verbose=True):
+    """
+    Compare analytical V,H from build_VH_from_theta_hat(...) with
+    autodiff-based V_auto,H_auto on the natural scale.
+    """
+    V_analytic, H_analytic = build_VH_from_theta_hat(
+        Y, Z, theta_hat, params_scale, kappa4=kappa4
+    )
+
+    V_auto = compute_V_auto_natural(theta_hat, Y, Z, params_scale)
+    H_auto = compute_H_auto_natural(theta_hat, Y, Z, params_scale)
+
+    out = {
+        "V_analytic": V_analytic,
+        "H_analytic": H_analytic,
+        "V_auto": V_auto,
+        "H_auto": H_auto,
+        "V_max_abs_diff": jnp.max(jnp.abs(V_analytic - V_auto)),
+        "H_max_abs_diff": jnp.max(jnp.abs(H_analytic - H_auto)),
+    }
+
+    if verbose:
+        print("Autodiff vs analytical comparison")
+        print(f"max abs diff V = {out['V_max_abs_diff']:.6e}")
+        print(f"max abs diff H = {out['H_max_abs_diff']:.6e}")
+
+    return out
+
 # ------------------------------------------------------------
 # Example
 # ------------------------------------------------------------
@@ -836,4 +865,74 @@ if __name__ == "__main__":
     # Test sandwich variance
     var_theta = compute_sandwich_variance(Y, Z, theta_hat, params_scale)
 
+    # ------------------------------------------------------------
+    # Test sandwich variance
+    # ------------------------------------------------------------
+    var_theta = compute_sandwich_variance(Y, Z, theta_hat, params_scale)
+    print("Sandwich SE:")
     print(var_theta["se"])
+
+    # ------------------------------------------------------------
+    # Compare analytical V/H against autodiff V/H on natural scale
+    # ------------------------------------------------------------
+    cmp = compare_VH_analytic_vs_auto(
+        theta_hat=theta_hat,
+        Y=Y,
+        Z=Z,
+        params_scale=params_scale,
+        kappa4=3.0,
+        verbose=True,
+    )
+
+    print("\nMax absolute differences:")
+    print("V_max_abs_diff =", cmp["V_max_abs_diff"])
+    print("H_max_abs_diff =", cmp["H_max_abs_diff"])
+
+    # ------------------------------------------------------------
+    # Compare projected asymptotic covariance J_T
+    # Example: eta_a, gamma_a[1], beta[1], sigma2[1]
+    # ------------------------------------------------------------
+    A_eta = make_A(p, "eta_a")
+    A_gamma1 = make_A(p, "gamma_a", j=1)
+    A_beta1 = make_A(p, "beta", j=1)
+    A_sigma1 = make_A(p, "sigma2", j=1)
+
+    J_eta_analytic, _ = compute_projected_asymptotic_covariance(
+        A_eta, cmp["V_analytic"], cmp["H_analytic"], p, scaling="theory"
+    )
+    J_eta_auto, _ = compute_projected_asymptotic_covariance(
+        A_eta, cmp["V_auto"], cmp["H_auto"], p, scaling="theory"
+    )
+
+    J_gamma1_analytic, _ = compute_projected_asymptotic_covariance(
+        A_gamma1, cmp["V_analytic"], cmp["H_analytic"], p, scaling="theory"
+    )
+    J_gamma1_auto, _ = compute_projected_asymptotic_covariance(
+        A_gamma1, cmp["V_auto"], cmp["H_auto"], p, scaling="theory"
+    )
+
+    J_beta1_analytic, _ = compute_projected_asymptotic_covariance(
+        A_beta1, cmp["V_analytic"], cmp["H_analytic"], p, scaling="theory"
+    )
+    J_beta1_auto, _ = compute_projected_asymptotic_covariance(
+        A_beta1, cmp["V_auto"], cmp["H_auto"], p, scaling="theory"
+    )
+
+    J_sigma1_analytic, _ = compute_projected_asymptotic_covariance(
+        A_sigma1, cmp["V_analytic"], cmp["H_analytic"], p, scaling="theory"
+    )
+    J_sigma1_auto, _ = compute_projected_asymptotic_covariance(
+        A_sigma1, cmp["V_auto"], cmp["H_auto"], p, scaling="theory"
+    )
+
+    print("\nProjected covariance comparison:")
+    print("eta_a   analytic =", J_eta_analytic[0, 0],   " auto =", J_eta_auto[0, 0])
+    print("gamma_1 analytic =", J_gamma1_analytic[0, 0], " auto =", J_gamma1_auto[0, 0])
+    print("beta_1  analytic =", J_beta1_analytic[0, 0],  " auto =", J_beta1_auto[0, 0])
+    print("sigma_1 analytic =", J_sigma1_analytic[0, 0], " auto =", J_sigma1_auto[0, 0])
+
+
+    D_H = cmp["H_analytic"] / T - cmp["H_auto"]
+    D_V = cmp["V_analytic"] / T - (T - 1) * cmp["V_auto"]
+    print("scaled H max abs diff =", jnp.max(jnp.abs(D_H)))
+    print("scaled V max abs diff =", jnp.max(jnp.abs(D_V)))

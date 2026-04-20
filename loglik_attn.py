@@ -132,6 +132,87 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
 
     return val
 
+
+# ===============================================================
+# === Used for Autodiff-based V and H for validation ============
+# ===============================================================
+
+def loglik_t_natural(theta, y_t, y_tm1, Z, params_scale, T):
+    """
+    Single-time contribution consistent with current loglik(theta, Y, Z, params_scale)
+    in loglik_attn.py.
+
+    Natural-scale parameterization:
+        theta = (eta_a, gamma_a, beta, sigma2)
+
+    Summing this from t=1,...,T-1 reproduces the current total log-likelihood.
+    """
+    p = y_t.shape[0]
+
+    eta_a = theta[0]
+    gamma_a = theta[1:1+p]
+    beta = theta[1+p:1+2*p]
+    sigma2 = theta[1+2*p:1+3*p]
+
+    W_a = build_attention(Z, eta_a, params_scale["eta_a"])
+    G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
+
+    e_t = y_t - G @ y_tm1
+
+    ll_t = (
+        - (p / 2.0) * jnp.log(2.0 * jnp.pi) / (T - 1)
+        - 0.5 * jnp.sum(jnp.log(sigma2)) / (T - 1)
+        - 0.5 * jnp.sum((e_t ** 2) / sigma2) / (T - 1)
+    )
+    return ll_t
+
+
+def loglik_natural_from_t(theta, Y, Z, params_scale):
+    T, _ = Y.shape
+    vals = []
+    for t in range(1, T):
+        vals.append(loglik_t_natural(theta, Y[t], Y[t-1], Z, params_scale, T))
+    return jnp.sum(jnp.stack(vals))
+
+
+def loglik_t_reparam_consistent(theta, y_t, y_tm1, Z, params_scale, T):
+    """
+    Single-time contribution consistent with current loglik_reparam(...)
+    in loglik_attn.py.
+
+    Reparameterized parameterization:
+        theta = (eta_a, gamma_a, beta, sigma2_tilde)
+    """
+    p = y_t.shape[0]
+
+    eta_a = theta[0]
+    gamma_a = theta[1:1+p]
+    beta = theta[1+p:1+2*p]
+    sigma2_tilde = theta[1+2*p:1+3*p]
+
+    sigma2 = jax.nn.softplus(sigma2_tilde)
+    log_sigma2 = jnp.log(sigma2)
+
+    W_a = build_attention(Z, eta_a, params_scale["eta_a"])
+    G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * W_a)
+
+    e_t = y_t - G @ y_tm1
+
+    ll_t = (
+        - (p / 2.0) * jnp.log(2.0 * jnp.pi) / (T - 1)
+        - 0.5 * jnp.sum(log_sigma2) / (T - 1)
+        - 0.5 * jnp.sum((e_t ** 2) / sigma2) / (T - 1)
+    )
+    return ll_t
+
+
+def loglik_reparam_from_t_consistent(theta, Y, Z, params_scale):
+    T, _ = Y.shape
+    vals = []
+    for t in range(1, T):
+        vals.append(loglik_t_reparam_consistent(theta, Y[t], Y[t-1], Z, params_scale, T))
+    return jnp.sum(jnp.stack(vals))
+
 # --------------------------------------------------------
 # Example usage
 # --------------------------------------------------------
