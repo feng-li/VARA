@@ -81,6 +81,46 @@ def ensure_stationarity(beta, gamma_a, margin=0.98, eps=1e-6):
     return beta_new, gamma_a_new, info
 
 
+def build_param_name_map(block_order):
+    """
+    Build a dictionary mapping each global parameter index
+    to a readable parameter name based on block_order.
+
+    Scalar blocks keep their original name, while vector blocks
+    are labeled as name_1, name_2, ...
+
+    Example
+    -------
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": [1, 2],
+        "beta": [3, 4],
+        "sigma2": [5, 6],
+    }
+
+    returns
+    -------
+    {
+        0: "eta_a",
+        1: "gamma_a_1",
+        2: "gamma_a_2",
+        3: "beta_1",
+        4: "beta_2",
+        5: "sigma2_1",
+        6: "sigma2_2",
+    }
+    """
+    name_map = {}
+    for param_name, block in block_order.items():
+        block = list(block)
+        if len(block) == 1:
+            name_map[int(block[0])] = param_name
+        else:
+            for local_pos, global_idx in enumerate(block, start=1):
+                name_map[int(global_idx)] = f"{param_name}_{local_pos}"
+    return name_map
+
+
 # @profile
 def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
                            params_scale=dict(eta_a=1), save=False):
@@ -166,40 +206,42 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
     return Y, Z, W_a
 
 
-def flatten_params(params: dict, order: list[str]):
+def flatten_params(params: dict, block_order: dict):
     """
-    Flatten a parameter dictionary into a single 1D JAX array (concatenated in given order)
-    and return parameter slices.
+    Flatten a parameter dictionary into a single 1D JAX array using
+    the key order of `block_order`, and return parameter slices.
 
-    Args:
-        params: dict[str, scalar or jnp.ndarray]
-            Dictionary of parameters (some scalars, some arrays).
-        order: list[str]
-            Desired key order for concatenation.
-
-    Returns:
-        theta_flat : jnp.ndarray
-            1D array with all parameters concatenated in the specified order.
-        param_slices : dict[str, slice]
-            Dictionary mapping parameter names to their index slices in theta_flat.
+    Also checks that parameter lengths match the block sizes implied by block_order.
     """
     flat_list = []
     param_slices = {}
 
     start = 0
-    for k in order:
+    for k, blk in block_order.items():
         if k not in params:
             continue
 
         v = params[k]
-        v_arr = jnp.atleast_1d(v).ravel()     # scalar → array([scalar])
+        v_arr = jnp.atleast_1d(v).ravel()
+
+        expected_size = len(jnp.atleast_1d(blk))
+        if v_arr.size != expected_size:
+            raise ValueError(
+                f"Parameter '{k}' has size {v_arr.size}, "
+                f"but block_order implies size {expected_size}."
+            )
+
         flat_list.append(v_arr)
 
         end = start + v_arr.size
         param_slices[k] = slice(start, end)
         start = end
 
-    theta_flat = jnp.concatenate(flat_list)
+    if len(flat_list) == 0:
+        theta_flat = jnp.array([])
+    else:
+        theta_flat = jnp.concatenate(flat_list)
+
     return theta_flat, param_slices
 
 
@@ -257,7 +299,6 @@ def plot_likelihood_profiles(
     import math
     import matplotlib.pyplot as plt
 
-    order = ["eta_a", "gamma_a", "beta", "sigma2"]
     p = Y.shape[1]
 
     block_order = {
@@ -267,18 +308,7 @@ def plot_likelihood_profiles(
         "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
     }
 
-    def build_param_name_map(order, block_order):
-        name_map = {}
-        for param_name in order:
-            block = list(block_order[param_name])
-            if len(block) == 1:
-                name_map[int(block[0])] = param_name
-            else:
-                for local_pos, global_idx in enumerate(block):
-                    name_map[int(global_idx)] = f"{param_name}[{local_pos}]"
-        return name_map
-
-    param_name_map = build_param_name_map(order, block_order)
+    param_name_map = build_param_name_map(block_order)
 
     sigma2_slice = slice(1 + 2 * p, 1 + 3 * p)
 
@@ -286,14 +316,14 @@ def plot_likelihood_profiles(
     params_reparam = params_true.copy()
     params_reparam["sigma2"] = sigma2_tilde_true
 
-    theta_true_reparam, _ = flatten_params(params_reparam, order)
+    theta_true_reparam, _ = flatten_params(params_reparam, block_order)
 
     if isinstance(update_idx, slice):
         update_idx = jnp.arange(theta_true_reparam.size)
     update_idx = jnp.array(update_idx)
 
     if plot_natural_scale:
-        theta_true_plot, _ = flatten_params(params_true, order)
+        theta_true_plot, _ = flatten_params(params_true, block_order)
     else:
         theta_true_plot = theta_true_reparam
 
@@ -469,8 +499,14 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde_true
 
     # Flatten parameter vector θ̃
-    order = ["eta_a", "gamma_a", "beta", "sigma2"]
-    theta_tilde, _ = flatten_params(params_reparam, order)
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
+
+    theta_tilde, param_slices = flatten_params(params_reparam, block_order)
 
     print("Parameter vector θ (reparameterized) length:", theta_tilde.shape[0])
     print("First few sigma2_tilde:", sigma2_tilde_true[:5])

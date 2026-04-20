@@ -201,7 +201,7 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
 # === Assemble analytical H =====================================
 # ===============================================================
 def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True):
-
+    p = sigma2.shape[0]
     V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
     sigma_inv4 = 1.0 / (sigma2 ** 2)
 
@@ -701,8 +701,7 @@ def compute_projected_asymptotic_covariance(A, V, H, p, scaling="theory", eps=1e
         raise ValueError(f"A must have shape (L, {d}), got {A.shape}")
 
     if scaling == "theory":
-        V_tilde, H_tilde, Kp = scale_V_H(V, H, p=p)
-        scale_vec = jnp.diag(Kp)
+        V_tilde, H_tilde, Kp, scale_vec = scale_V_H(V, H, p=p)
     elif scaling == "adaptive":
         Kp, scale_vec = build_Kp_adaptive_from_diag(V, H, eps=eps, mode="max")
         V_tilde = Kp @ V @ Kp
@@ -803,8 +802,13 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde_true
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
-    order = ["eta_a", "gamma_a", "beta", "sigma2"]
-    theta_true_reparam, _ = flatten_params(params_reparam, order)
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
+    theta_true_reparam, _ = flatten_params(params_reparam, block_order)
     print("θ length:", theta_true_reparam.size)
 
     # Only initialize update_idx related initial values

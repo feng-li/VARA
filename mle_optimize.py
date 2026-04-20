@@ -74,7 +74,6 @@ if __name__ == "__main__":
     Y, Z, W_a = simulate_VAR_attention(key, params, T=T, p=p, q=q,
                                        params_scale=params_scale, dist="normal")
 
-    order = ["eta_a", "gamma_a", "beta", "sigma2"]
     # Convert σ² → σ̃² for reparameterized estimation
     sigma2_tilde = jnp.log(jnp.expm1(params["sigma2"]))
     params_reparam = params.copy()

@@ -407,8 +407,13 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde_true
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
-    order = ["eta_a", "gamma_a", "beta", "sigma2"]
-    theta_true_reparam, _ = flatten_params(params_reparam, order)
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
+    theta_true_reparam, _ = flatten_params(params_reparam, block_order)
     print("θ tilde length:", theta_true_reparam.size)
 
     # --- Compute analytical and automatic Hessians ---

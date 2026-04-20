@@ -12,11 +12,10 @@ from tqdm import trange
 import pandas as pd
 from datetime import datetime
 import itertools
-import random
 
 from dgp import simulate_VAR_attention, flatten_params
 from fit import estimate
-from hess import compute_Wa_Wb_dots
+
 from cov import (
     compute_projected_asymptotic_covariance_from_theta_hat,
     compute_z_stat_from_theta_hat,
@@ -44,8 +43,14 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         standardized stats for eta_a, gamma_a[1], beta[1], sigma2[1]
     """
     # ---- True theta ----
-    order = ["eta_a", "gamma_a", "beta", "sigma2"]
-    theta_true, param_slices = flatten_params(params_true, order)
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
+
+    theta_true, param_slices = flatten_params(params_true, block_order)
 
     if isinstance(update_idx, slice):
         update_idx_array = jnp.arange(theta_true.size)
@@ -94,6 +99,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
             params_scale=params_scale,
             algorithm=algorithm,
             update_idx=update_idx_array,
+            block_order=block_order
         )
 
         theta_hat = jnp.asarray(result["theta"])
@@ -110,68 +116,63 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         status = int(convergence["status"])
 
         if status == 0:
-            try:
-                z_eta, _ = compute_z_stat_from_theta_hat(
-                    Y=Y,
-                    Z=Z,
-                    theta_hat=theta_hat,
-                    theta_true=theta_true,
-                    A=make_A(p=p, kind="eta_a"),
-                    rate=jnp.sqrt(T * p),
-                    params_scale=params_scale,
-                    kappa4=kappa4,
-                    scaling="theory",
-                )
+            z_eta, _ = compute_z_stat_from_theta_hat(
+                Y=Y,
+                Z=Z,
+                theta_hat=theta_hat,
+                theta_true=theta_true,
+                A=make_A(p=p, kind="eta_a"),
+                rate=jnp.sqrt(T * p),
+                params_scale=params_scale,
+                kappa4=kappa4,
+                scaling="theory",
+            )
 
-                z_gamma1, _ = compute_z_stat_from_theta_hat(
-                    Y=Y,
-                    Z=Z,
-                    theta_hat=theta_hat,
-                    theta_true=theta_true,
-                    A=make_A(p=p, kind="gamma_a", j=1),
-                    rate=jnp.sqrt(T),
-                    params_scale=params_scale,
-                    kappa4=kappa4,
-                    scaling="theory",
-                )
+            z_gamma1, _ = compute_z_stat_from_theta_hat(
+                Y=Y,
+                Z=Z,
+                theta_hat=theta_hat,
+                theta_true=theta_true,
+                A=make_A(p=p, kind="gamma_a", j=1),
+                rate=jnp.sqrt(T),
+                params_scale=params_scale,
+                kappa4=kappa4,
+                scaling="theory",
+            )
 
-                z_beta1, _ = compute_z_stat_from_theta_hat(
-                    Y=Y,
-                    Z=Z,
-                    theta_hat=theta_hat,
-                    theta_true=theta_true,
-                    A=make_A(p=p, kind="beta", j=1),
-                    rate=jnp.sqrt(T),
-                    params_scale=params_scale,
-                    kappa4=kappa4,
-                    scaling="theory",
-                )
+            z_beta1, _ = compute_z_stat_from_theta_hat(
+                Y=Y,
+                Z=Z,
+                theta_hat=theta_hat,
+                theta_true=theta_true,
+                A=make_A(p=p, kind="beta", j=1),
+                rate=jnp.sqrt(T),
+                params_scale=params_scale,
+                kappa4=kappa4,
+                scaling="theory",
+            )
 
-                z_sigma1, _ = compute_z_stat_from_theta_hat(
-                    Y=Y,
-                    Z=Z,
-                    theta_hat=theta_hat,
-                    theta_true=theta_true,
-                    A=make_A(p=p, kind="sigma2", j=1),
-                    rate=jnp.sqrt(T),
-                    params_scale=params_scale,
-                    kappa4=kappa4,
-                    scaling="theory",
-                )
+            z_sigma1, _ = compute_z_stat_from_theta_hat(
+                Y=Y,
+                Z=Z,
+                theta_hat=theta_hat,
+                theta_true=theta_true,
+                A=make_A(p=p, kind="sigma2", j=1),
+                rate=jnp.sqrt(T),
+                params_scale=params_scale,
+                kappa4=kappa4,
+                scaling="theory",
+            )
 
-                z_stats = jnp.array([
-                    z_eta[0],
-                    z_gamma1[0],
-                    z_beta1[0],
-                    z_sigma1[0],
-                ])
-
-            except Exception as e:
-                print(f"[single_replication theorem verification error] {e}")
-                z_stats = jnp.full((4,), jnp.nan)
+            z_stats = jnp.array([
+                z_eta[0],
+                z_gamma1[0],
+                z_beta1[0],
+                z_sigma1[0],
+            ])
 
             return inside, ci_length, theta_hat, status, z_stats
-
+    breakpoint()
     return last_inside, last_ci_length, last_theta_hat, last_status, last_z_stats
 
 
@@ -252,6 +253,12 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 
     # update all by default
     update_idx = slice(None)
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
 
     if USE_RAY:
         print("🔹 Running with Ray parallelization")
@@ -306,8 +313,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     theta_hat_all = theta_hat_all[valid_mask]
     z_stats_all = z_stats_all[valid_mask]
 
-    order = ["eta_a", "gamma_a", "beta", "sigma2"]
-    theta_true, idx = flatten_params(params_true, order)
+    theta_true, idx = flatten_params(params_true, block_order)
 
     coverage = jnp.nanmean(inside, axis=0)
     avg_length = jnp.nanmean(ci_length, axis=0)
@@ -363,7 +369,7 @@ if __name__ == "__main__":
 
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
-    USE_RAY = True
+    USE_RAY = False
     seed = 2025
     key = jax.random.PRNGKey(seed)
 
