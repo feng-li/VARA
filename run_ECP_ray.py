@@ -172,7 +172,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
             ])
 
             return inside, ci_length, theta_hat, status, z_stats
-    breakpoint()
+    # breakpoint()
     return last_inside, last_ci_length, last_theta_hat, last_status, last_z_stats
 
 
@@ -290,7 +290,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 
         ray.shutdown()
     else:
-        print("🔹 Running locally with JAX")
+        print("🔹 Running sequentially with JAX")
         results = [
             single_replication(
                 subkeys[r], params_true, T, p, q,
@@ -369,7 +369,7 @@ if __name__ == "__main__":
 
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
-    USE_RAY = False
+    USE_RAY = True
     seed = 2025
     key = jax.random.PRNGKey(seed)
 
@@ -380,7 +380,7 @@ if __name__ == "__main__":
     alpha_list = [0.1]
     dist_list = ["normal"]
 
-    algorithm = "auto_gradhess"   # "auto_gradhess", "analytical_gradhess"
+    algorithm = "lbfgs"   # "auto_gradhess", "analytical_gradhess"
     out_path = f"results_coverage_@{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
 
     params_dgp = dict(

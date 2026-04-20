@@ -29,7 +29,8 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm, update_idx=slice(Non
 
     state = opt_init(theta)
 
-    maxiter = 50
+    maxiter = 100
+    trace = []
 
     for _ in range(maxiter):
         loss, grad = jax.value_and_grad(objective)(theta)
@@ -43,12 +44,24 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm, update_idx=slice(Non
 
         theta = optax.apply_updates(theta, updates)
 
-        if jnp.linalg.norm(updates) < 1e-6:
-            break
+        grad_norm = optax.tree.norm(grad)
+        update_norm = optax.tree.norm(updates)
+        trace.append({
+            "loss": float(loss),
+            "grad_norm": grad_norm,
+            "update_norm": update_norm,
+        })
+
+        # print(f"Parameter norm: {update_norm}, grad norm: {grad_norm}")
+        converged = (grad_norm < 1e-4) or (update_norm < 1e-4)
+        if converged:
+            conv_state = dict(status=0, trace=trace)
+            theta_hat = theta
+            return theta_hat, [], [], conv_state
 
     theta_hat = theta
-
-    return theta_hat, [], [], state
+    conv_state = dict(status=1, trace=trace)
+    return theta_hat, [], [], conv_state
 
 
 if __name__ == "__main__":
@@ -79,8 +92,15 @@ if __name__ == "__main__":
     params_reparam = params.copy()
     params_reparam["sigma2"] = sigma2_tilde
 
-    # Flatten parameter vector θ̃ (for estimation/Hessian functions)
-    theta_tilde, _ = flatten_params(params_reparam, order)
+    # --- Flatten parameters into reparameterized vector θ̃ ---
+    block_order = {
+        "eta_a": [0],
+        "gamma_a": list(range(1, 1 + p)),
+        "beta": list(range(1 + p, 1 + 2 * p)),
+        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
+    }
+
+    theta_tilde, _ = flatten_params(params_reparam, block_order)
 
     theta_init = theta_tilde + 0.05 * jax.random.normal(key, theta_tilde.shape)
 
