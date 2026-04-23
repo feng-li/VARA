@@ -121,9 +121,20 @@ def build_param_name_map(block_order):
     return name_map
 
 
+def draw_Z(key, p, q):
+    """
+    Draw Z according to the paper design:
+        Z_k ~ N(0, Sigma_z),  Sigma_z[j1,j2] = 0.5^{|j1-j2|}
+    """
+    idx = jnp.arange(q)
+    Sigma_z = 0.5 ** jnp.abs(idx[:, None] - idx[None, :])
+    Z = multivariate_normal(key, jnp.zeros(q), Sigma_z, (p,))
+    return Z
+
+
 # @profile
 def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
-                           params_scale=dict(eta_a=1), save=False):
+                           params_scale=dict(eta_a=1), save=False, Z=None):
     """
     Simulate data from the VAR attention model.
 
@@ -137,10 +148,15 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
     mem_start = mem_gb()
 
     keys = jax.random.split(key, 7)
-
-    idx = jnp.arange(q)
-    Sigma_z = 0.5 ** jnp.abs(idx[:, None] - idx[None, :])
-    Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
+    # --------------------------------------------------
+    # Feature matrix Z
+    # --------------------------------------------------
+    if Z is None:
+        # default: paper-style DGP
+        Z = draw_Z(keys[0], p, q)
+    else:
+        # sanity check
+        assert Z.shape == (p, q), f"Z must have shape ({p},{q})"
 
     eta_a = params["eta_a"]
     gamma_a = params["gamma_a"]

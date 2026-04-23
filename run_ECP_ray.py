@@ -13,7 +13,7 @@ import pandas as pd
 from datetime import datetime
 import itertools
 
-from dgp import simulate_VAR_attention, flatten_params
+from dgp import simulate_VAR_attention, flatten_params, draw_Z
 from fit import estimate
 
 from cov import (
@@ -26,7 +26,7 @@ from cov import (
 # === Single replication ========================================
 # ===============================================================
 
-def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0.05,
+def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alpha=0.05,
                        algorithm="analytical_gradhess", update_idx=slice(None),
                        max_tries=10, kappa4=3.0):
     """
@@ -75,9 +75,9 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         noise_key = jax.random.fold_in(subkey, attempt + max_tries)
 
         # 1. Simulate data
-        Y, Z, W_a = simulate_VAR_attention(
+        Y, Z_used, W_a = simulate_VAR_attention(
             attempt_key, params_true, T=T, p=p, q=q,
-            dist=dist, params_scale=params_scale
+            dist=dist, params_scale=params_scale, Z=Z
         )
 
         # 2. Initial values
@@ -88,9 +88,6 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
             "beta": 0.2,
             "sigma2": 0.1,
         }
-
-
-
 
         for name, sl in param_slices.items():
             key, noise_key = jax.random.split(noise_key)
@@ -103,7 +100,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
         # 3. Estimate
         result, convergence = estimate(
-            Y, Z, attempt_key, theta_init,
+            Y, Z_used, attempt_key, theta_init,
             params_scale=params_scale,
             algorithm=algorithm,
             update_idx=update_idx_array,
@@ -126,7 +123,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         if status == 0:
             z_eta, _ = compute_z_stat_from_theta_hat(
                 Y=Y,
-                Z=Z,
+                Z=Z_used,
                 theta_hat=theta_hat,
                 theta_true=theta_true,
                 A=make_A(p=p, kind="eta_a"),
@@ -138,7 +135,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
             z_gamma1, _ = compute_z_stat_from_theta_hat(
                 Y=Y,
-                Z=Z,
+                Z=Z_used,
                 theta_hat=theta_hat,
                 theta_true=theta_true,
                 A=make_A(p=p, kind="gamma_a", j=1),
@@ -150,7 +147,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
             z_beta1, _ = compute_z_stat_from_theta_hat(
                 Y=Y,
-                Z=Z,
+                Z=Z_used,
                 theta_hat=theta_hat,
                 theta_true=theta_true,
                 A=make_A(p=p, kind="beta", j=1),
@@ -162,7 +159,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
 
             z_sigma1, _ = compute_z_stat_from_theta_hat(
                 Y=Y,
-                Z=Z,
+                Z=Z_used,
                 theta_hat=theta_hat,
                 theta_true=theta_true,
                 A=make_A(p=p, kind="sigma2", j=1),
@@ -259,6 +256,9 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
         ),
     )
 
+    Z = draw_Z(pkeys[0], p, q)
+
+
     # update all by default
     update_idx = slice(None)
     block_order = {
@@ -285,7 +285,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 
         futures = [
             actors[r % N_ACTORS].run.remote(
-                subkeys[r], params_true, T, p, q,
+                subkeys[r], params_true, Z, T, p, q,
                 params_scale, dist, alpha,
                 algorithm, update_idx, 10, kappa4
             )
@@ -301,7 +301,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
         print("🔹 Running sequentially with JAX")
         results = [
             single_replication(
-                subkeys[r], params_true, T, p, q,
+                subkeys[r], params_true, Z, T, p, q,
                 params_scale, dist, alpha,
                 algorithm, update_idx, 10, kappa4
             )
@@ -399,9 +399,9 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(seed)
 
     R_list = [100]
-    p_list = [10]
-    q_list = [5]
-    T_list = [200]
+    p_list = [5]
+    q_list = [50]
+    T_list = [500]
     alpha_list = [0.1]
     dist_list = ["normal"]
 
@@ -409,10 +409,10 @@ if __name__ == "__main__":
     out_path = f"results_coverage_@{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
 
     params_dgp = dict(
-        eta_a=0.2,
-        gamma_a=dict(minval=-0.2, maxval=0.2),
+        eta_a=0.5,
+        gamma_a=dict(minval=0.15, maxval=0.3),
         beta=dict(minval=-0.2, maxval=0.2),
-        sigma2=dict(minval=0.25, maxval=1.0),
+        sigma2=dict(minval=0.5, maxval=1.0),
     )
 
     params_scale = dict(eta_a=1)
