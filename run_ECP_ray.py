@@ -320,6 +320,23 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     ci_length = ci_length[valid_mask]
     theta_hat_all = theta_hat_all[valid_mask]
     z_stats_all = z_stats_all[valid_mask]
+    status_all = status_all[valid_mask]
+
+    # --- put the diagnostic block here ---
+    converged_mask = (status_all == 0) & jnp.isfinite(theta_hat_all).all(axis=1)
+
+    print("convergence rate =", float(jnp.mean(converged_mask)))
+    print("eta_a coverage, all runs      =", float(jnp.mean(inside[:, 0])))
+    print("eta_a coverage, converged only=", float(jnp.mean(inside[converged_mask, 0])))
+    print("eta_a quantiles =",
+          jnp.quantile(theta_hat_all[:, 0], jnp.array([0.01, 0.05, 0.5, 0.95, 0.99])))
+
+    theta_true, idx = flatten_params(params_true, block_order)
+
+    coverage = jnp.nanmean(inside, axis=0)
+    avg_length = jnp.nanmean(ci_length, axis=0)
+    rmse = jnp.sqrt(jnp.nanmean((theta_hat_all - theta_true) ** 2, axis=0))
+
 
     theta_true, idx = flatten_params(params_true, block_order)
 
