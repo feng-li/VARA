@@ -50,14 +50,19 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
     }
 
-    theta_true, param_slices = flatten_params(params_true, block_order)
+    # --- Convert σ² → σ̃² (softplus inverse) ---
+    sigma2_tilde_true = jnp.log(jnp.expm1(params_true["sigma2"]))
+    params_reparam = params_true.copy()
+    params_reparam["sigma2"] = sigma2_tilde_true
+    theta_true_reparam, param_slices = flatten_params(params_reparam, block_order)
+    theta_true, _ = flatten_params(params_true, block_order)
 
     if isinstance(update_idx, slice):
-        update_idx_array = jnp.arange(theta_true.size)
+        update_idx_array = jnp.arange(theta_true_reparam.size)
     else:
         update_idx_array = jnp.array(update_idx)
 
-    d = theta_true.shape[0]
+    d = theta_true_reparam.shape[0]
 
     last_inside = jnp.zeros(d, dtype=bool)
     last_ci_length = jnp.full(d, jnp.nan)
@@ -76,7 +81,7 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
         )
 
         # 2. Initial values
-        theta_init = theta_true
+        theta_init = theta_true_reparam
         perturb_scales = {
             "eta_a": 0.3,
             "gamma_a": 0.8,
@@ -84,10 +89,13 @@ def single_replication(subkey, params_true, T, p, q, params_scale, dist, alpha=0
             "sigma2": 0.1,
         }
 
+
+
+
         for name, sl in param_slices.items():
             key, noise_key = jax.random.split(noise_key)
             scale = perturb_scales[name]
-            idx_all = jnp.arange(theta_true.size)[sl]
+            idx_all = jnp.arange(theta_true_reparam.size)[sl]
             idx = jnp.intersect1d(idx_all, update_idx_array)
             if idx.size > 0:
                 noise = scale * jax.random.normal(key, shape=(len(idx),))

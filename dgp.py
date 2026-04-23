@@ -139,7 +139,7 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
     keys = jax.random.split(key, 7)
 
     idx = jnp.arange(q)
-    Sigma_z = 0.9 ** jnp.abs(idx[:, None] - idx[None, :])
+    Sigma_z = 0.5 ** jnp.abs(idx[:, None] - idx[None, :])
     Z = multivariate_normal(keys[0], jnp.zeros(q), Sigma_z, (p,))
 
     eta_a = params["eta_a"]

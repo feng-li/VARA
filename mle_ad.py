@@ -495,11 +495,6 @@ def build_param_name_map(order, block_order):
 # ---------- Example usage ----------
 if __name__ == "__main__":
 
-    import os
-    import math
-    import matplotlib.pyplot as plt
-
-    from dgp import simulate_VAR_attention
     from dgp import flatten_params
     from mle_optimize import mle_optimize
 
