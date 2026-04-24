@@ -83,9 +83,9 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
         # 2. Initial values
         theta_init = theta_true_reparam
         perturb_scales = {
-            "eta_a": 0.3,
-            "gamma_a": 0.8,
-            "beta": 0.2,
+            "eta_a": 0.1,
+            "gamma_a": 0.1,
+            "beta": 0.1,
             "sigma2": 0.1,
         }
 
@@ -126,11 +126,10 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
                 Z=Z_used,
                 theta_hat=theta_hat,
                 theta_true=theta_true,
+                theta_for_J=theta_true,   # use truth for cleaner theorem verification
                 A=make_A(p=p, kind="eta_a"),
-                rate=jnp.sqrt(T * p),
                 params_scale=params_scale,
-                kappa4=kappa4,
-                scaling="theory",
+                kappa4=kappa4
             )
 
             z_gamma1, _ = compute_z_stat_from_theta_hat(
@@ -138,11 +137,10 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
                 Z=Z_used,
                 theta_hat=theta_hat,
                 theta_true=theta_true,
+                theta_for_J=theta_true,   # use truth for cleaner theorem verification
                 A=make_A(p=p, kind="gamma_a", j=1),
-                rate=jnp.sqrt(T),
                 params_scale=params_scale,
-                kappa4=kappa4,
-                scaling="theory",
+                kappa4=kappa4
             )
 
             z_beta1, _ = compute_z_stat_from_theta_hat(
@@ -150,11 +148,10 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
                 Z=Z_used,
                 theta_hat=theta_hat,
                 theta_true=theta_true,
+                theta_for_J=theta_true,   # use truth for cleaner theorem verification
                 A=make_A(p=p, kind="beta", j=1),
-                rate=jnp.sqrt(T),
                 params_scale=params_scale,
-                kappa4=kappa4,
-                scaling="theory",
+                kappa4=kappa4
             )
 
             z_sigma1, _ = compute_z_stat_from_theta_hat(
@@ -162,11 +159,10 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
                 Z=Z_used,
                 theta_hat=theta_hat,
                 theta_true=theta_true,
+                theta_for_J=theta_true,   # use truth for cleaner theorem verification
                 A=make_A(p=p, kind="sigma2", j=1),
-                rate=jnp.sqrt(T),
                 params_scale=params_scale,
-                kappa4=kappa4,
-                scaling="theory",
+                kappa4=kappa4
             )
 
             z_stats = jnp.array([
@@ -390,12 +386,13 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 # ===============================================================
 
 if __name__ == "__main__":
+    import random
     from summarize import summarize_empirical_coverage
 
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
     USE_RAY = True
-    seed = 2025
+    seed = random.randint(0, 10000)
     key = jax.random.PRNGKey(seed)
 
     R_list = [100]

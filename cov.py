@@ -749,16 +749,62 @@ def compute_projected_asymptotic_covariance_from_theta_hat(Y, Z, theta_hat, A, p
     return J_T, {"V": V, "H": H, **extras}
 
 
-def compute_z_stat_from_theta_hat(Y, Z, theta_hat, theta_true, A, rate, params_scale,
-                                  kappa4=3.0, scaling="theory"):
+def compute_z_stat_from_theta_hat(
+    Y,
+    Z,
+    theta_hat,
+    theta_true,
+    A,
+    params_scale,
+    theta_for_J=None,
+    kappa4=3.0,
+    eps=1e-12,
+):
+    """
+    Theorem 1 statistic for a 1-row projection A:
+        sqrt(T_eff) * A K_p^{-1} (theta_hat - theta_true) / sqrt(J)
+    where
+        J = A H_tilde^{-1} V_tilde H_tilde^{-1} A^T,
+        H_tilde = K_p H K_p,
+        V_tilde = K_p V K_p.
 
-    J_T, extras = compute_projected_asymptotic_covariance_from_theta_hat(
-        Y, Z, theta_hat, A, params_scale, kappa4=kappa4, scaling=scaling
+    Here H and V are the theorem-normalized matrices:
+        H = -(1/T_eff) E[ Hessian(total loglik) ]
+        V =  (1/T_eff) Cov[ Score(total loglik) ].
+    """
+    T_eff = Y.shape[0] - 1
+    p = Y.shape[1]
+
+    if theta_for_J is None:
+        theta_for_J = theta_true   # cleaner in simulation
+
+    # raw matrices from current code carry a factor of T_eff
+    V_raw, H_raw = build_VH_from_theta_hat(
+        Y, Z, theta_for_J, params_scale, kappa4=kappa4
     )
 
-    diff = A @ (theta_hat - theta_true)
-    z_val = rate * diff / jnp.sqrt(jnp.maximum(jnp.diag(J_T), 1e-12))
-    return z_val, {"J_T": J_T, **extras}
+    # theorem normalization
+    V = V_raw / T_eff
+    H = H_raw / T_eff
+
+    J, extras = compute_projected_asymptotic_covariance(
+        A=A, V=V, H=H, p=p, scaling="theory"
+    )
+
+    # K_p^{-1} = diag(sqrt(p), 1, ..., 1)
+    Kp = build_Kp(p, dtype=theta_hat.dtype)
+    Kp_inv_diag = 1.0 / jnp.diag(Kp)
+
+    diff_tilde = A @ (Kp_inv_diag * (theta_hat - theta_true))
+    z_val = jnp.sqrt(T_eff) * diff_tilde / jnp.sqrt(jnp.maximum(jnp.diag(J), eps))
+
+    return z_val, {
+        "J": J,
+        "V_theorem": V,
+        "H_theorem": H,
+        "T_eff": T_eff,
+        **extras,
+    }
 
 
 def compare_VH_analytic_vs_auto(theta_hat, Y, Z, params_scale, kappa4=3.0, verbose=True):
@@ -877,7 +923,7 @@ if __name__ == "__main__":
     # Compare analytical V/H against autodiff V/H on natural scale
     # ------------------------------------------------------------
     cmp = compare_VH_analytic_vs_auto(
-        theta_hat=theta_hat,
+        theta_hat=theta_hat,    # or theta_hat
         Y=Y,
         Z=Z,
         params_scale=params_scale,
@@ -889,6 +935,9 @@ if __name__ == "__main__":
     print("V_max_abs_diff =", cmp["V_max_abs_diff"])
     print("H_max_abs_diff =", cmp["H_max_abs_diff"])
 
+    T_eff = Y.shape[0] - 1
+    print("H normalized diff =", jnp.max(jnp.abs(cmp["H_analytic"] / T_eff - cmp["H_auto"])))
+    print("V normalized diff =", jnp.max(jnp.abs(cmp["V_analytic"] / T_eff - cmp["V_auto"])))
     # ------------------------------------------------------------
     # Compare projected asymptotic covariance J_T
     # Example: eta_a, gamma_a[1], beta[1], sigma2[1]
