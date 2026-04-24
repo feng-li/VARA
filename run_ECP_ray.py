@@ -13,7 +13,7 @@ import pandas as pd
 from datetime import datetime
 import itertools
 
-from dgp import simulate_VAR_attention, flatten_params, draw_Z
+from dgp import simulate_VAR_attention, flatten_params, draw_Z, draw_good_Z_for_eta
 from fit import estimate
 
 from cov import (
@@ -121,6 +121,10 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
         status = int(convergence["status"])
 
         if status == 0:
+
+            eta_max = 2.0
+            theta_hat_eval = theta_hat.at[0].set(jnp.clip(theta_hat[0], -eta_max, eta_max))
+
             z_eta, _ = compute_z_stat_from_theta_hat(
                 Y=Y,
                 Z=Z_used,
@@ -165,14 +169,43 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
                 kappa4=kappa4
             )
 
-            z_stats = jnp.array([
-                z_eta[0],
-                z_gamma1[0],
-                z_beta1[0],
-                z_sigma1[0],
-            ])
+            z_stats_list = []
 
+            for group_name, sl in param_slices.items():
+                start = sl.start
+                stop = sl.stop
+
+                if stop - start == 1:
+                    A = make_A(p=p, kind=group_name)
+                    z_val, _ = compute_z_stat_from_theta_hat(
+                        Y=Y,
+                        Z=Z_used,
+                        theta_hat=theta_hat,
+                        theta_true=theta_true,
+                        theta_for_J=theta_true,
+                        A=A,
+                        params_scale=params_scale,
+                        kappa4=kappa4
+                    )
+                    z_stats_list.append(z_val[0])
+                else:
+                    for j in range(stop - start):
+                        A = make_A(p=p, kind=group_name, j=j+1)
+                        z_val, _ = compute_z_stat_from_theta_hat(
+                            Y=Y,
+                            Z=Z_used,
+                            theta_hat=theta_hat,
+                            theta_true=theta_true,
+                            theta_for_J=theta_true,
+                            A=A,
+                            params_scale=params_scale,
+                            kappa4=kappa4
+                        )
+                        z_stats_list.append(z_val[0])
+
+            z_stats = jnp.array(z_stats_list)
             return inside, ci_length, theta_hat, status, z_stats
+
     # breakpoint()
     return last_inside, last_ci_length, last_theta_hat, last_status, last_z_stats
 
@@ -194,14 +227,14 @@ class ReplicationActor:
             return result
         except Exception as e:
             print(f"[Ray actor error] {e}")
+            d = 1 + 3 * kwargs["p"] if "p" in kwargs else 1 + 3 * args[3]
             return (
-                jnp.zeros(1, bool),
-                jnp.full(1, jnp.nan),
-                jnp.full(1, jnp.nan),
+                jnp.zeros(d, dtype=bool),
+                jnp.full((d,), jnp.nan),
+                jnp.full((d,), jnp.nan),
                 -1,
-                jnp.full((4,), jnp.nan),
+                jnp.full((d,), jnp.nan),
             )
-
 
 # ===============================================================
 # === Main Monte Carlo driver ===================================
@@ -252,7 +285,19 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
         ),
     )
 
-    Z = draw_Z(pkeys[0], p, q)
+    # Z = draw_Z(pkeys[0], p, q)
+    Z, Z_info = draw_good_Z_for_eta(
+        key=pkeys[0],
+        p=p,
+        q=q,
+        params_true=params_true,
+        params_scale=params_scale,
+        max_tries=200,
+        min_offdiag_std=0.15,
+        max_abs_score=3.0,
+        min_eta_signal=0.05,
+        verbose=True,
+    )
 
 
     # update all by default
@@ -320,7 +365,6 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 
     # --- put the diagnostic block here ---
     converged_mask = (status_all == 0) & jnp.isfinite(theta_hat_all).all(axis=1)
-
     print("convergence rate =", float(jnp.mean(converged_mask)))
     print("eta_a coverage, all runs      =", float(jnp.mean(inside[:, 0])))
     print("eta_a coverage, converged only=", float(jnp.mean(inside[converged_mask, 0])))
@@ -355,13 +399,24 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     print(jnp.round(rmse, 4))
 
     # theorem verification summary
-    z_names = ["eta_a", "gamma_a[1]", "beta[1]", "sigma2[1]"]
+    # theorem verification summary (all parameters)
+    param_names = []
+    for group_name, sl in idx.items():
+        start = sl.start
+        stop = sl.stop
+
+        if stop - start == 1:
+            param_names.append(group_name)
+        else:
+            for j in range(stop - start):
+                param_names.append(f"{group_name}[{j}]")
+
     z_mean = jnp.nanmean(z_stats_all, axis=0)
     z_var = jnp.nanvar(z_stats_all, axis=0)
     z_reject_5 = jnp.nanmean(jnp.abs(z_stats_all) > 1.959963984540054, axis=0)
 
     print("\n=== Theorem 1 verification (standardized Z statistics) ===")
-    for i, name in enumerate(z_names):
+    for i, name in enumerate(param_names):
         print(
             f"{name:<12s}: mean={float(z_mean[i]): .4f}, "
             f"var={float(z_var[i]): .4f}, "
@@ -392,17 +447,22 @@ if __name__ == "__main__":
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
     USE_RAY = True
-    seed = random.randint(0, 10000)
+    # seed = random.randint(0, 10000)
+    seed = 5682
+    print(f"=== Using a global seed: {seed}")
     key = jax.random.PRNGKey(seed)
 
     R_list = [100]
-    p_list = [5]
+    p_list = [10]
     q_list = [50]
-    T_list = [500]
+    T_list = [1000]
     alpha_list = [0.1]
     dist_list = ["normal"]
 
     algorithm = "lbfgs"   # "auto_gradhess", "analytical_gradhess"
+    # algorithm = "auto_gradhess"
+    # algorithm = "block_newton"
+
     out_path = f"results_coverage_@{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
 
     params_dgp = dict(

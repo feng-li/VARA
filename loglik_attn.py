@@ -39,6 +39,8 @@ def loglik(theta, Y, Z, params_scale):
 
     # S, G, sigma2 = construct_matrices(theta, Z, p)
     eta_a = theta[0]
+    # eta_max = 2
+    # eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
     beta = theta[1+p:1+2*p]
     sigma2 = theta[1+2*p:1+3*p]
@@ -99,6 +101,8 @@ def loglik_reparam(theta, Y, Z, params_scale, update_idx=slice(None)):
 
     T, p = Y.shape
     eta_a = theta[0]
+    # eta_max = 2
+    # eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     # eta_b = theta[1]
     # gamma_a = theta[2:2+p]
     gamma_a = theta[1:1+p]
@@ -150,6 +154,8 @@ def loglik_t_natural(theta, y_t, y_tm1, Z, params_scale, T):
     p = y_t.shape[0]
 
     eta_a = theta[0]
+    # eta_max = 2
+    # eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
     beta = theta[1+p:1+2*p]
     sigma2 = theta[1+2*p:1+3*p]
@@ -186,6 +192,8 @@ def loglik_t_reparam_consistent(theta, y_t, y_tm1, Z, params_scale, T):
     p = y_t.shape[0]
 
     eta_a = theta[0]
+    # eta_max = 2
+    # eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
     beta = theta[1+p:1+2*p]
     sigma2_tilde = theta[1+2*p:1+3*p]

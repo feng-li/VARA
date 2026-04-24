@@ -64,7 +64,9 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1), update_idx=s
 
     print(params_scale)
     T, p = Y.shape
-    eta_a = theta[0]
+    # eta_a = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
     beta = theta[1+p:1+2*p]
 

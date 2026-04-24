@@ -62,7 +62,10 @@ def hess_block_sigma2(theta, Y, Z, params_scale):
         ∂²ℓ/∂σ̃²² = d²·H_σ² + dd·g_σ²
     """
     T, p = Y.shape
-    eta_a = theta[0]
+
+    # eta_a = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
     beta    = theta[1+p:1+2*p]
 
@@ -92,7 +95,9 @@ def hess_block_sigma2(theta, Y, Z, params_scale):
 def hess_block_eta_a_gamma_a(theta, Y, Z, params_scale):
     """∂²ℓ / ∂η_a ∂γ_aᵀ — interaction between attention strength η_a and γ_a."""
     T, p = Y.shape
-    eta_a = theta[0]
+    # eta_a = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
     beta = theta[1+p:1+2*p]
     sigma2 = jax.nn.softplus(theta[1+2*p:1+3*p])
@@ -126,7 +131,9 @@ def hess_block_eta_a_beta(theta, Y, Z, params_scale):
     """∂²ℓ / ∂η_a ∂βᵀ — interaction between attention strength (η_a)
     and baseline coefficients (β). Appendix B.2 Eq. (∂²ℓ/∂β∂η_a)."""
     T, p = Y.shape
-    eta_a   = theta[0]
+    # eta_a   = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
     beta    = theta[1+p:1+2*p]
     sigma2  = jax.nn.softplus(theta[1+2*p:1+3*p])
@@ -147,7 +154,9 @@ def hess_block_eta_a_beta(theta, Y, Z, params_scale):
 def hess_block_eta_a_sigma2(theta, Y, Z, params_scale):
     """∂²ℓ / ∂η_a ∂σ̃²ᵀ : interaction of attention strength (a) and variances."""
     T, p = Y.shape
-    eta_a   = theta[0]
+    # eta_a   = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
 
     sigma2, d_sigma2, _ = softplus_sigma2(theta, p)
@@ -177,7 +186,9 @@ def hess_block_eta_a_sigma2(theta, Y, Z, params_scale):
 def hess_block_gamma_a_beta(theta, Y, Z, params_scale):
     """∂²ℓ / ∂β ∂γ_aᵀ — Appendix B.2, Eq. (∂²ℓ/∂β∂γ_a)."""
     T, p = Y.shape
-    eta_a = theta[0]
+    # eta_a = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     sigma2 = jax.nn.softplus(theta[1+2*p:1+3*p])
     Sigma_inv = Sigma_inv_from_sigma2(sigma2)
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
@@ -195,7 +206,9 @@ def hess_block_gamma_a_sigma2(theta, Y, Z, params_scale):
     TODO: check
     """
     T, p = Y.shape
-    eta_a = theta[0]
+    # eta_a = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
 
     beta    = theta[1+p:1+2*p]
@@ -222,7 +235,9 @@ def hess_block_gamma_a_sigma2(theta, Y, Z, params_scale):
 def hess_block_beta_sigma2(theta, Y, Z, params_scale):
     """∂²ℓ / ∂β ∂σ̃²ᵀ : effect of baseline coefficients on variances."""
     T, p = Y.shape
-    eta_a = theta[0]
+    # eta_a = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
 
     beta    = theta[1+p:1+2*p]
@@ -255,7 +270,9 @@ def hess_block_beta_sigma2(theta, Y, Z, params_scale):
 def hess_block_eta_a(theta, Y, Z, params_scale):
     """∂²ℓ / ∂η_a² (scalar). Exact second derivative from the verified gradient."""
     T, p = Y.shape
-    eta_a = theta[0]
+    # eta_a = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     gamma_a = theta[1:1+p]
     beta    = theta[1+p:1+2*p]
     sigma2  = jax.nn.softplus(theta[1+2*p:1+3*p])
@@ -284,7 +301,9 @@ def hess_block_eta_a(theta, Y, Z, params_scale):
 def hess_block_gamma_a(theta, Y, Z, params_scale):
     """∂²ℓ / ∂γ_a ∂γ_aᵀ ∈ R^{p×p}."""
     T, p = Y.shape
-    eta_a = theta[0]
+    # eta_a = theta[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
     sigma2 = jax.nn.softplus(theta[1+2*p:1+3*p])
     W_a = build_attention(Z, eta_a, params_scale['eta_a'])
     Sigma_inv = Sigma_inv_from_sigma2(sigma2)

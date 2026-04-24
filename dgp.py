@@ -11,6 +11,7 @@ import os
 
 from loglik_attn import build_attention
 from loglik_attn import loglik_reparam
+from hess import compute_Wa_Wb_dots
 
 def mem_gb():
     return psutil.Process(os.getpid()).memory_info().rss / 1024**3
@@ -130,6 +131,107 @@ def draw_Z(key, p, q):
     Sigma_z = 0.5 ** jnp.abs(idx[:, None] - idx[None, :])
     Z = multivariate_normal(key, jnp.zeros(q), Sigma_z, (p,))
     return Z
+
+
+def draw_good_Z_for_eta(
+    key,
+    p,
+    q,
+    params_true,
+    params_scale,
+    max_tries=200,
+    min_offdiag_std=0.15,
+    max_abs_score=3.0,
+    min_eta_signal=0.05,
+    verbose=True,
+):
+    """
+    Draw a fixed-design Z matrix that is informative enough for eta_a.
+
+    Why this helps
+    --------------
+    eta_a is identified only through the attention map W_a(eta_a), and in practice
+    its information is driven by gamma_a * W_a_dot. Some randomly drawn Z designs
+    make this direction nearly flat, which hurts Theorem 1 verification for eta_a.
+
+    Screening rules
+    ---------------
+    Accept Z only if:
+      1) off-diagonal similarity scores have enough spread,
+      2) no score is too extreme,
+      3) the eta-direction signal ||diag(gamma_a) W_dot|| is not too small.
+
+    Returns
+    -------
+    Z : jax.Array, shape (p, q)
+        Accepted feature matrix.
+    info : dict
+        Diagnostics for the accepted design.
+    """
+    best_Z = None
+    best_info = None
+    best_score = -jnp.inf
+
+    gamma_a = params_true["gamma_a"]
+    eta_a = params_true["eta_a"]
+
+    for attempt in range(max_tries):
+        subkey = jax.random.fold_in(key, attempt)
+        Z = draw_Z(subkey, p, q)
+
+        S = (Z @ Z.T) / jnp.sqrt(q)
+        off_mask = ~jnp.eye(p, dtype=bool)
+        off = S[off_mask]
+
+        Wa, Wdot, _ = compute_Wa_Wb_dots(
+            Z, eta_a, params_scale["eta_a"]
+        )
+
+        eta_signal = jnp.linalg.norm(gamma_a[:, None] * Wdot)
+        off_std = jnp.std(off)
+        max_score = jnp.max(jnp.abs(off))
+
+        good_design = bool(
+            (off_std > min_offdiag_std) and
+            (max_score < max_abs_score) and
+            (eta_signal > min_eta_signal)
+        )
+
+        info = {
+            "attempt": attempt + 1,
+            "offdiag_std": float(off_std),
+            "max_abs_score": float(max_score),
+            "eta_signal": float(eta_signal),
+            "accepted": good_design,
+        }
+
+        # keep the best candidate even if none passes
+        score_value = float(off_std + 0.5 * eta_signal - 0.1 * max_score)
+        if score_value > best_score:
+            best_score = score_value
+            best_Z = Z
+            best_info = info
+
+        if good_design:
+            if verbose:
+                print(
+                    "[Z design accepted] "
+                    f"attempt={info['attempt']}, "
+                    f"offdiag_std={info['offdiag_std']:.4f}, "
+                    f"max_abs_score={info['max_abs_score']:.4f}, "
+                    f"eta_signal={info['eta_signal']:.4f}"
+                )
+            return Z, info
+
+    if verbose:
+        print(
+            "[Z design fallback: no candidate passed screening] "
+            f"best attempt={best_info['attempt']}, "
+            f"offdiag_std={best_info['offdiag_std']:.4f}, "
+            f"max_abs_score={best_info['max_abs_score']:.4f}, "
+            f"eta_signal={best_info['eta_signal']:.4f}"
+        )
+    return best_Z, best_info
 
 
 # @profile

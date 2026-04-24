@@ -476,7 +476,10 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 
     T, p = Y.shape
 
-    eta_a = theta_hat[0]
+    # eta_a = theta_hat[0]
+    eta_max = 2
+    eta_a = jnp.clip(theta_hat[0], -eta_max, eta_max)
+
     gamma_a = theta_hat[1:1+p]
     beta = theta_hat[1+p:1+2*p]
     sigma2 = theta_hat[1+2*p:1+3*p]
@@ -710,15 +713,17 @@ def compute_projected_asymptotic_covariance(A, V, H, p, scaling="theory", eps=1e
     else:
         raise ValueError("scaling must be either 'theory' or 'adaptive'")
 
-    H_tilde_inv = jnp.linalg.inv(H_tilde)
-    J_T = A @ H_tilde_inv @ V_tilde @ H_tilde_inv @ A.T
+    # H_tilde_inv = jnp.linalg.inv(H_tilde)
+    # J_T = A @ H_tilde_inv @ V_tilde @ H_tilde_inv @ A.T
+    X = jnp.linalg.solve(H_tilde, A.T)
+    J_T = A @ jnp.linalg.solve(H_tilde, V_tilde @ X)
+    J_T = 0.5 * (J_T + J_T.T)
 
     return J_T, {
         "Kp": Kp,
         "scale_vec": scale_vec,
         "V_tilde": V_tilde,
         "H_tilde": H_tilde,
-        "H_tilde_inv": H_tilde_inv,
     }
 
 
@@ -726,6 +731,9 @@ def build_VH_from_theta_hat(Y, Z, theta_hat, params_scale, kappa4=3.0):
     T, p = Y.shape
 
     eta_a = theta_hat[0]
+    # eta_max = 2
+    # eta_a = jnp.clip(theta_hat[0], -eta_max, eta_max)
+
     gamma_a = theta_hat[1:1+p]
     beta = theta_hat[1+p:1+2*p]
     sigma2 = theta_hat[1+2*p:1+3*p]

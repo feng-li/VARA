@@ -5,7 +5,15 @@ import optax
 from loglik_attn import loglik_reparam
 
 
-def mle_optimize(Y, Z, theta_init, params_scale, algorithm, update_idx=slice(None)):
+def mle_optimize(
+    Y,
+    Z,
+    theta_init,
+    params_scale,
+    algorithm,
+    update_idx=slice(None),
+    eta_max=2.0,   # new
+):
     """
     MLE estimator using Optax LBFGS (line-search version).
     """
@@ -14,10 +22,13 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm, update_idx=slice(Non
         update_idx = jnp.arange(theta_init.size)
     update_idx = jnp.array(update_idx)
 
+    # Python-side lookup for whether eta_a is active in the short vector
+    update_idx_list = [int(i) for i in list(update_idx)]
+    eta_short_pos = update_idx_list.index(0) if 0 in update_idx_list else None
+
     theta_full_init = theta_init
     theta = theta_full_init[update_idx]
 
-    # Negative log-likelihood on active block only
     def objective(theta_short):
         theta_full = theta_full_init.at[update_idx].set(theta_short)
         return -loglik_reparam(theta_full, Y, Z, params_scale, update_idx)
@@ -29,7 +40,7 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm, update_idx=slice(Non
 
     state = opt_init(theta)
 
-    maxiter = 100
+    maxiter = 200
     trace = []
 
     for _ in range(maxiter):
@@ -44,24 +55,29 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm, update_idx=slice(Non
 
         theta = optax.apply_updates(theta, updates)
 
+        # ---- project eta_a to a compact parameter space ----
+        if eta_short_pos is not None:
+            theta = theta.at[eta_short_pos].set(
+                jnp.clip(theta[eta_short_pos], -eta_max, eta_max)
+            )
+
         grad_norm = optax.tree.norm(grad)
         update_norm = optax.tree.norm(updates)
+
         trace.append({
             "loss": float(loss),
-            "grad_norm": grad_norm,
-            "update_norm": update_norm,
+            "grad_norm": float(grad_norm),
+            "update_norm": float(update_norm),
         })
 
-        # print(f"Parameter norm: {update_norm}, grad norm: {grad_norm}")
-        converged = (grad_norm < 1e-5) or (update_norm < 1e-5)
+        # require BOTH to be small
+        converged = (grad_norm < 1e-5) and (update_norm < 1e-5)
         if converged:
             conv_state = dict(status=0, trace=trace)
-            theta_hat = theta
-            return theta_hat, [], [], conv_state
+            return theta, [], [], conv_state
 
-    theta_hat = theta
     conv_state = dict(status=1, trace=trace)
-    return theta_hat, [], [], conv_state
+    return theta, [], [], conv_state
 
 
 if __name__ == "__main__":
