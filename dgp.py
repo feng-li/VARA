@@ -473,7 +473,7 @@ if __name__ == "__main__":
     keys = jax.random.split(key, 10)
 
     # Example parameter dictionary (in natural scale)
-    T, p, q = 1000, 5, 3
+    T, p, q = 500, 10, 50
 
     # --- True parameters (in natural scale) ---
     params_true = dict(
