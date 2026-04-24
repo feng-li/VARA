@@ -53,7 +53,7 @@ def mle_optimize(Y, Z, theta_init, params_scale, algorithm, update_idx=slice(Non
         })
 
         # print(f"Parameter norm: {update_norm}, grad norm: {grad_norm}")
-        converged = (grad_norm < 1e-4) or (update_norm < 1e-4)
+        converged = (grad_norm < 1e-5) or (update_norm < 1e-5)
         if converged:
             conv_state = dict(status=0, trace=trace)
             theta_hat = theta
