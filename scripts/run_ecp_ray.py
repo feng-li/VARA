@@ -27,6 +27,7 @@ from vara.cov import (
 )
 from vara.simulation import (
     flatten_simulation_params,
+    kappa4_for_dist,
     make_block_order,
     reparam_theta_from_params,
 )
@@ -598,6 +599,7 @@ if __name__ == "__main__":
             algorithm=algorithm,
             ray_num_cpus=args.ray_num_cpus,
             max_cpus_per_task=1,
+            kappa4=kappa4_for_dist(dist),
         )
 
         finish_time = datetime.now()
