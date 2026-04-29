@@ -256,8 +256,8 @@ def run_theorem3_verification(
     eta_bounds=(-2.0, 2.0),
     grid_size=81,
     curvature_step=0.02,
-    USE_RAY=True,
-    MAX_CPUS_PER_TASK=1,
+    ray_num_cpus=52,
+    max_cpus_per_task=1,
 ):
     """
     Run Monte Carlo verification of Theorem 3 for one (T, p, q) setting.
@@ -268,6 +268,12 @@ def run_theorem3_verification(
         which should have mean about 0, variance about 1, and rejection
         probability about 0.05.
     """
+    if ray_num_cpus < 1:
+        raise ValueError("ray_num_cpus must be >= 1.")
+    use_ray = ray_num_cpus > 1
+    if use_ray and max_cpus_per_task > ray_num_cpus:
+        raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
+
     key = jax.random.PRNGKey(seed)
     keys = jax.random.split(key, 10)
     rep_keys = jax.random.split(keys[4], R)
@@ -321,12 +327,17 @@ def run_theorem3_verification(
     print(f"Z_info     = {Z_info}")
     print("=" * 70 + "\n")
 
-    if USE_RAY:
-        ray.init(ignore_reinit_error=True, include_dashboard=False)
-        n_actors = max(1, int(os.cpu_count() / MAX_CPUS_PER_TASK))
+    if use_ray:
+        ray.init(
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            num_cpus=ray_num_cpus,
+            _node_ip_address="127.0.0.1",
+        )
+        n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
         print(f"Running with Ray using {n_actors} actors")
         actors = [
-            Theorem3ReplicationActor.options(num_cpus=MAX_CPUS_PER_TASK).remote()
+            Theorem3ReplicationActor.options(num_cpus=max_cpus_per_task).remote()
             for _ in range(n_actors)
         ]
         futures = [
@@ -610,7 +621,12 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Run Theorem 3 verification.")
-    parser.add_argument("--use-ray", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--ray-num-cpus",
+        type=int,
+        default=52,
+        help="Total Ray CPU budget. Use 1 for sequential execution.",
+    )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--R", type=int, default=500)
     parser.add_argument("--T-list", type=str, default="500,1000,2000,4000")
@@ -642,8 +658,8 @@ if __name__ == "__main__":
             dist=args.dist,
             grid_size=args.grid_size,
             curvature_step=args.curvature_step,
-            USE_RAY=args.use_ray,
-            MAX_CPUS_PER_TASK=args.max_cpus_per_task,
+            ray_num_cpus=args.ray_num_cpus,
+            max_cpus_per_task=args.max_cpus_per_task,
         )
         all_dfs.append(df)
 

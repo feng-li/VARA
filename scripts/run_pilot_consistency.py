@@ -484,8 +484,8 @@ def run_pilot_consistency_verification(
     dist="normal",
     kappa4=3.0,
     qmle_algorithm="lbfgs",
-    USE_RAY=True,
-    MAX_CPUS_PER_TASK=1,
+    ray_num_cpus=52,
+    max_cpus_per_task=1,
 ):
     """
     Run a Monte Carlo verification of Theorem 2.
@@ -495,6 +495,12 @@ def run_pilot_consistency_verification(
       2. pilot_mode='concentrated' second
       3. pilot_mode='qmle' only after Theorem 1 eta_a is stable
     """
+    if ray_num_cpus < 1:
+        raise ValueError("ray_num_cpus must be >= 1.")
+    use_ray = ray_num_cpus > 1
+    if use_ray and max_cpus_per_task > ray_num_cpus:
+        raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
+
     key = jax.random.PRNGKey(seed)
     keys = jax.random.split(key, 10)
 
@@ -544,29 +550,30 @@ def run_pilot_consistency_verification(
     print(f"pilot_mode = {pilot_mode}")
     print(f"dist       = {dist}")
     print(f"kappa4     = {kappa4}")
-    print(f"USE_RAY    = {USE_RAY}")
+    print(f"ray cpus   = {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
     print(f"stationary = {not bool(stat_info['rescaled'])}")
     print(f"Z_info     = {Z_info}")
     print("=" * 70 + "\n")
 
     rep_keys = jax.random.split(keys[4], R)
 
-    if USE_RAY:
+    if use_ray:
         print("Running with Ray parallelization")
         print("JAX devices:", jax.devices())
-        print(f"\nNUM_CPUS_PER_TASK: {MAX_CPUS_PER_TASK}\n")
+        print(f"\nNUM_CPUS_PER_TASK: {max_cpus_per_task}\n")
 
         ray.init(
             ignore_reinit_error=True,
             include_dashboard=False,
+            num_cpus=ray_num_cpus,
             _node_ip_address="127.0.0.1",
         )
 
-        n_actors = max(1, min(R, int(os.cpu_count() / MAX_CPUS_PER_TASK)))
+        n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
         print(f"Ray actors using {n_actors} actors...")
 
         actors = [
-            Theorem2ReplicationActor.options(num_cpus=MAX_CPUS_PER_TASK).remote()
+            Theorem2ReplicationActor.options(num_cpus=max_cpus_per_task).remote()
             for _ in range(n_actors)
         ]
 
@@ -692,11 +699,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run pilot consistency verification.")
     parser.add_argument(
-        "--use-ray",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use Ray parallelization. Use --no-use-ray for sequential execution.",
+        "--ray-num-cpus",
+        type=int,
+        default=52,
+        help="Total Ray CPU budget. Use 1 for sequential execution.",
     )
+    parser.add_argument("--max-cpus-per-task", type=int, default=1)
     args = parser.parse_args()
 
     # First run oracle mode.
@@ -711,8 +719,8 @@ if __name__ == "__main__":
         pilot_mode="oracle",
         dist="normal",
         kappa4=3.0,
-        USE_RAY=args.use_ray,
-        MAX_CPUS_PER_TASK=1,
+        ray_num_cpus=args.ray_num_cpus,
+        max_cpus_per_task=args.max_cpus_per_task,
     )
 
     # Then try:

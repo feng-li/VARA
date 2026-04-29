@@ -107,7 +107,7 @@ def run_full_simulation(
     dist_list: Sequence[str] = ("normal", "laplace"),
     q: int = 50,
     alpha: float = 0.05,
-    use_ray: bool = True,
+    ray_num_cpus: int = 52,
     max_cpus_per_task: int = 1,
     qmle_algorithm: str = "lbfgs",
     qmle_perturb_scale: float = 0.05,
@@ -123,6 +123,12 @@ def run_full_simulation(
     results_dir: Path = RESULTS_DIR,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Run the full simulation grid and save detailed/summary CSVs."""
+    if ray_num_cpus < 1:
+        raise ValueError("ray_num_cpus must be >= 1.")
+    use_ray = ray_num_cpus > 1
+    if use_ray and max_cpus_per_task > ray_num_cpus:
+        raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
+
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -178,6 +184,7 @@ def run_full_simulation(
                 print(f"methods      : {methods}")
                 print(f"seed         : {seed}")
                 print(f"grid_size    : {grid_size_use}")
+                print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
                 print(f"screen_z     : {screen_z}, Z_info={Z_info}")
                 print("=" * 80)
 
@@ -188,9 +195,10 @@ def run_full_simulation(
                     ray.init(
                         ignore_reinit_error=True,
                         include_dashboard=False,
+                        num_cpus=ray_num_cpus,
                         _node_ip_address="127.0.0.1",
                     )
-                    n_actors = max(1, min(R, int(os.cpu_count() / max_cpus_per_task)))
+                    n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
                     actors = [
                         FullSimulationActor.options(num_cpus=max_cpus_per_task).remote()
                         for _ in range(n_actors)
@@ -308,9 +316,12 @@ def main():
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument("--alpha", type=float, default=0.05)
 
-    ray_group = parser.add_mutually_exclusive_group()
-    ray_group.add_argument("--use-ray", dest="use_ray", action="store_true", default=True)
-    ray_group.add_argument("--no-use-ray", dest="use_ray", action="store_false")
+    parser.add_argument(
+        "--ray-num-cpus",
+        type=int,
+        default=52,
+        help="Total Ray CPU budget. Use 1 for sequential execution.",
+    )
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
 
     parser.add_argument("--qmle-algorithm", type=str, default="lbfgs")
@@ -341,7 +352,7 @@ def main():
         dist_list=_parse_str_list(args.dist_list),
         q=args.q,
         alpha=args.alpha,
-        use_ray=args.use_ray,
+        ray_num_cpus=args.ray_num_cpus,
         max_cpus_per_task=args.max_cpus_per_task,
         qmle_algorithm=args.qmle_algorithm,
         qmle_perturb_scale=args.qmle_perturb_scale,

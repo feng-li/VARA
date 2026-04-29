@@ -260,7 +260,7 @@ class ReplicationActor:
 def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
                             dist="normal", alpha=0.05,
                             algorithm="analytical_gradhess",
-                            USE_RAY=False, MAX_CPUS_PER_TASK=1,
+                            ray_num_cpus=52, max_cpus_per_task=1,
                             kappa4=3.0):
     """
     Monte Carlo simulation to estimate:
@@ -270,6 +270,12 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
         - theorem verification Z statistics
     """
 
+    if ray_num_cpus < 1:
+        raise ValueError("ray_num_cpus must be >= 1.")
+    use_ray = ray_num_cpus > 1
+    if use_ray and max_cpus_per_task > ray_num_cpus:
+        raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
+
     print("\n" + "=" * 70 + "\nEmpirical Simulation Setup\n" + "=" * 70)
     print(f"Algorithm      : {algorithm}")
     print(f"Distribution   : {dist}")
@@ -277,6 +283,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     print(f"Response dim p : {p}")
     print(f"Feature dim  q : {q}")
     print(f"Replications R : {R}")
+    print(f"Ray num CPUs   : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
     print(f"Random key     : {key}")
     print("=" * 70, "\n")
 
@@ -328,18 +335,23 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     update_idx = slice(None)
     block_order = make_block_order(p)
 
-    if USE_RAY:
+    if use_ray:
         print("🔹 Running with Ray parallelization")
         print("JAX devices:", jax.devices())
-        print(f"\nNUM_CPUS_PER_TASK: {MAX_CPUS_PER_TASK}\n")
+        print(f"\nNUM_CPUS_PER_TASK: {max_cpus_per_task}\n")
 
-        ray.init(ignore_reinit_error=True, include_dashboard=False)
+        ray.init(
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            num_cpus=ray_num_cpus,
+            _node_ip_address="127.0.0.1",
+        )
 
-        N_ACTORS = max(1, int(os.cpu_count() / MAX_CPUS_PER_TASK))
+        N_ACTORS = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
         print(f"Ray actors using {N_ACTORS} actors...")
 
         actors = [
-            ReplicationActor.options(num_cpus=MAX_CPUS_PER_TASK).remote()
+            ReplicationActor.options(num_cpus=max_cpus_per_task).remote()
             for _ in range(N_ACTORS)
         ]
 
@@ -475,10 +487,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run empirical coverage simulations.")
     parser.add_argument(
-        "--use-ray",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use Ray parallelization. Use --no-use-ray for sequential execution.",
+        "--ray-num-cpus",
+        type=int,
+        default=52,
+        help="Total Ray CPU budget. Use 1 for sequential execution.",
     )
     parser.add_argument(
         "--R-list",
@@ -522,7 +534,6 @@ if __name__ == "__main__":
 
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
-    USE_RAY = args.use_ray
     seed = random.randint(0, 10000)
     # seed = 5682, 1873
     print(f"=== Using a global seed: {seed}")
@@ -560,8 +571,6 @@ if __name__ == "__main__":
     ):
         print("\n" + "=" * 70 + f"\nRunning Monte Carlo: T={T}, nominal={(1-alpha):.2%}\n" + "=" * 70)
 
-        MAX_CPUS_PER_TASK = 1
-
         start_time = datetime.now()
         start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
         print(f"⏱ Started at {start_ts}")
@@ -587,8 +596,8 @@ if __name__ == "__main__":
             dist=dist,
             alpha=alpha,
             algorithm=algorithm,
-            USE_RAY=USE_RAY,
-            MAX_CPUS_PER_TASK=MAX_CPUS_PER_TASK,
+            ray_num_cpus=args.ray_num_cpus,
+            max_cpus_per_task=1,
         )
 
         finish_time = datetime.now()
