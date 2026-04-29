@@ -462,6 +462,7 @@ if __name__ == "__main__":
     import random
     from .dgp import simulate_VAR_attention, flatten_params
     from .loglik_attn import loglik_reparam
+    from .params import make_block_order
 
     jnp.set_printoptions(threshold=10_000, linewidth=1000, suppress=True, precision=10)
 
@@ -493,12 +494,7 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde_true
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
-    block_order = {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
+    block_order = make_block_order(p)
     theta_true_reparam, _ = flatten_params(params_reparam, block_order)
     print("θ tilde length:", theta_true_reparam.size)
 

@@ -24,90 +24,15 @@ from vara.dgp import (
     draw_good_Z_for_eta,
     ensure_stationarity,
 )
-
-# Reuse the concentrated likelihood and estimator from the Theorem 2 / pilot script.
-try:
-    from .run_pilot_consistency import (
-        concentrated_loglik_eta,
-        estimate_eta_concentrated,
-    )
-except ImportError:
-    from run_pilot_consistency import (
-        concentrated_loglik_eta,
-        estimate_eta_concentrated,
-    )
+from vara.simulation import (
+    estimate_eta_concentrated,
+    estimate_eta_curvature as estimate_omega_gamma,
+)
 
 
 # =====================================================================
-# 1. Curvature / omega_gamma utilities for Theorem 3
+# 1. Rate utilities for Theorem 3
 # =====================================================================
-
-def finite_diff_second_derivative_eta(
-    eta_center,
-    Y,
-    Z,
-    params_scale,
-    h=0.02,
-    eta_bounds=(-2.0, 2.0),
-    ridge=1e-10,
-):
-    """
-    Compute the scalar second derivative of the concentrated log-likelihood
-    l_c(eta) by a centered finite difference.
-
-    Theorem 3 uses omega_gamma = limit of -l_c''(gamma) / (T p).
-    In this code, paper gamma is code eta_a.
-    """
-    eta_center = float(eta_center)
-    lower, upper = eta_bounds
-
-    if eta_center - h < lower or eta_center + h > upper:
-        return jnp.nan
-
-    f_minus = concentrated_loglik_eta(
-        eta_center - h, Y, Z, params_scale, ridge=ridge
-    )
-    f_zero = concentrated_loglik_eta(
-        eta_center, Y, Z, params_scale, ridge=ridge
-    )
-    f_plus = concentrated_loglik_eta(
-        eta_center + h, Y, Z, params_scale, ridge=ridge
-    )
-
-    return (f_plus - 2.0 * f_zero + f_minus) / (h ** 2)
-
-
-def estimate_omega_gamma(
-    eta_center,
-    Y,
-    Z,
-    p,
-    params_scale,
-    h=0.02,
-    eta_bounds=(-2.0, 2.0),
-    ridge=1e-10,
-):
-    """
-    Finite-sample omega_gamma estimator:
-        omega_hat = - l_c''(eta_center) / (T_eff * p).
-
-    Theorem 3(ii): sqrt(T p) (eta_hat_c - eta) -> N(0, omega_gamma^{-1}).
-    Therefore the standardized statistic is
-        z = sqrt(T_eff * p) * (eta_hat_c - eta) * sqrt(omega_hat).
-    """
-    T_eff = Y.shape[0] - 1
-    l2 = finite_diff_second_derivative_eta(
-        eta_center=eta_center,
-        Y=Y,
-        Z=Z,
-        params_scale=params_scale,
-        h=h,
-        eta_bounds=eta_bounds,
-        ridge=ridge,
-    )
-    omega = -l2 / (T_eff * p)
-    return omega, l2
-
 
 def theorem3_rate_bound(T_eff, p):
     """

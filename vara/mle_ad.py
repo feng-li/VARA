@@ -516,6 +516,7 @@ if __name__ == "__main__":
 
     from .dgp import flatten_params
     from .mle_optimize import mle_optimize
+    from .params import make_block_order
 
     # jax.config.update("jax_enable_x64", True)
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
@@ -564,12 +565,7 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde_true
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
-    block_order = {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
+    block_order = make_block_order(p)
     param_name_map = build_param_name_map(block_order)
 
     theta_true_reparam, _ = flatten_params(params_reparam, block_order)

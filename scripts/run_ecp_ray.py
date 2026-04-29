@@ -18,13 +18,29 @@ try:
 except ImportError:
     from _bootstrap import RESULTS_DIR
 
-from vara.dgp import simulate_VAR_attention, flatten_params, draw_good_Z_for_eta, ensure_stationarity
+from vara.dgp import simulate_VAR_attention, draw_good_Z_for_eta, ensure_stationarity
 from vara.fit import estimate
 from vara.cov import (
     compute_projected_asymptotic_covariance_from_theta_hat,
     compute_z_stat_from_theta_hat,
     make_A,
 )
+from vara.simulation import (
+    flatten_simulation_params,
+    make_block_order,
+    reparam_theta_from_params,
+)
+
+
+def _param_slices_from_block_order(block_order):
+    """Return contiguous slices in flattened parameter order."""
+    slices = {}
+    start = 0
+    for name, block in block_order.items():
+        stop = start + len(block)
+        slices[name] = slice(start, stop)
+        start = stop
+    return slices
 
 # ===============================================================
 # === Single replication ========================================
@@ -47,12 +63,8 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
         standardized stats for eta_a, gamma_a[1], beta[1], sigma2[1]
     """
     # ---- True theta ----
-    block_order = {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
+    block_order = make_block_order(p)
+    param_slices = _param_slices_from_block_order(block_order)
 
     params_true = dict(params_true)
     beta, gamma_a, _ = ensure_stationarity(
@@ -61,12 +73,8 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
     params_true["beta"] = beta
     params_true["gamma_a"] = gamma_a
 
-    # --- Convert σ² → σ̃² (softplus inverse) ---
-    sigma2_tilde_true = jnp.log(jnp.expm1(params_true["sigma2"]))
-    params_reparam = params_true.copy()
-    params_reparam["sigma2"] = sigma2_tilde_true
-    theta_true_reparam, param_slices = flatten_params(params_reparam, block_order)
-    theta_true, _ = flatten_params(params_true, block_order)
+    theta_true_reparam = reparam_theta_from_params(params_true, p)
+    theta_true = flatten_simulation_params(params_true, p)
 
     if isinstance(update_idx, slice):
         update_idx_array = jnp.arange(theta_true_reparam.size)
@@ -318,12 +326,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 
     # update all by default
     update_idx = slice(None)
-    block_order = {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
+    block_order = make_block_order(p)
 
     if USE_RAY:
         print("🔹 Running with Ray parallelization")
@@ -387,14 +390,8 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     print("eta_a quantiles =",
           jnp.quantile(theta_hat_all[:, 0], jnp.array([0.01, 0.05, 0.5, 0.95, 0.99])))
 
-    theta_true, idx = flatten_params(params_true, block_order)
-
-    coverage = jnp.nanmean(inside, axis=0)
-    avg_length = jnp.nanmean(ci_length, axis=0)
-    rmse = jnp.sqrt(jnp.nanmean((theta_hat_all - theta_true) ** 2, axis=0))
-
-
-    theta_true, idx = flatten_params(params_true, block_order)
+    theta_true = flatten_simulation_params(params_true, p)
+    idx = _param_slices_from_block_order(block_order)
 
     coverage = jnp.nanmean(inside, axis=0)
     avg_length = jnp.nanmean(ci_length, axis=0)

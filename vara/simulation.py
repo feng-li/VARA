@@ -30,6 +30,7 @@ from .attention import attention_matvec
 from .cov import compute_sandwich_variance
 from .dgp import ensure_stationarity
 from .fit import estimate
+from .params import make_block_order
 from .two_stage import concentrated_eta_loglik, fit_all_components_two_stage
 
 
@@ -58,16 +59,6 @@ def kappa4_for_dist(dist: str) -> float:
     if dist == "t5":
         return 9.0
     raise ValueError(f"Unknown dist={dist}")
-
-
-def make_block_order(p: int) -> Dict[str, List[int]]:
-    """Return theta block indices for ``(eta_a, gamma_a, beta, sigma2)``."""
-    return {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
 
 
 def flatten_simulation_params(params: Dict[str, Any], p: int) -> jnp.ndarray:
@@ -276,11 +267,11 @@ def finite_diff_second_derivative_eta(
     Y: jnp.ndarray,
     Z: jnp.ndarray,
     params_scale: Dict[str, float],
-    h: float,
-    eta_bounds: Tuple[float, float],
-    ridge: float,
-    batch_size: int,
-    dense_threshold: int,
+    h: float = 0.02,
+    eta_bounds: Tuple[float, float] = (-2.0, 2.0),
+    ridge: float = 1e-10,
+    batch_size: int = 512,
+    dense_threshold: int = 2500,
 ) -> jnp.ndarray:
     """Approximate the second derivative of the concentrated eta objective."""
     lower, upper = eta_bounds
@@ -312,11 +303,11 @@ def estimate_eta_curvature(
     Z: jnp.ndarray,
     p: int,
     params_scale: Dict[str, float],
-    h: float,
-    eta_bounds: Tuple[float, float],
-    ridge: float,
-    batch_size: int,
-    dense_threshold: int,
+    h: float = 0.02,
+    eta_bounds: Tuple[float, float] = (-2.0, 2.0),
+    ridge: float = 1e-10,
+    batch_size: int = 512,
+    dense_threshold: int = 2500,
 ):
     """Estimate the normalized curvature used for eta standard errors.
 

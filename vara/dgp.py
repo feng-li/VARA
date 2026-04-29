@@ -594,6 +594,7 @@ def plot_likelihood_profiles(
 if __name__ == "__main__":
 
     import random
+    from .params import make_block_order
 
     # Set random number seed
     seed = random.randrange(10**9)
@@ -643,12 +644,7 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde_true
 
     # Flatten parameter vector θ̃
-    block_order = {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
+    block_order = make_block_order(p)
 
     theta_tilde, param_slices = flatten_params(params_reparam, block_order)
 

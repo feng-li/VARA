@@ -82,6 +82,7 @@ def mle_optimize(
 
 if __name__ == "__main__":
     from .dgp import simulate_VAR_attention, flatten_params
+    from .params import make_block_order
 
     # Set random number seed
     key = jax.random.PRNGKey(0)
@@ -109,12 +110,7 @@ if __name__ == "__main__":
     params_reparam["sigma2"] = sigma2_tilde
 
     # --- Flatten parameters into reparameterized vector θ̃ ---
-    block_order = {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
+    block_order = make_block_order(p)
 
     theta_tilde, _ = flatten_params(params_reparam, block_order)
 

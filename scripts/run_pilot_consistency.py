@@ -21,12 +21,21 @@ except ImportError:
 
 from vara.dgp import (
     simulate_VAR_attention,
-    flatten_params,
     draw_good_Z_for_eta,
     ensure_stationarity,
 )
 from vara.attention import build_attention
 from vara.fit import estimate
+from vara.simulation import (
+    estimate_eta_concentrated as _estimate_eta_concentrated,
+    flatten_simulation_params,
+    make_block_order,
+    reparam_theta_from_params,
+)
+from vara.two_stage import (
+    concentrated_eta_loglik as _concentrated_eta_loglik,
+    fit_all_components_two_stage,
+)
 
 
 # =====================================================================
@@ -130,44 +139,15 @@ def fit_all_components_given_eta(
     params_scale,
     ridge=1e-10,
 ):
-    """
-    Vectorized componentwise OLS for all k.
-
-    Returns
-    -------
-    alpha_hat : shape (p,)
-        Paper alpha estimates, i.e. code beta estimates.
-    beta_hat : shape (p,)
-        Paper beta estimates, i.e. code gamma_a estimates.
-    sigma2_hat : shape (p,)
-        Residual variance estimates.
-    """
-    T, p = Y.shape
-
-    W = build_attention(Z, eta_a, params_scale["eta_a"])
-
-    Y_lag = Y[:-1]        # (T-1, p)
-    Y_now = Y[1:]         # (T-1, p)
-
-    X1 = Y_lag            # own lag for every component
-    X2 = Y_lag @ W.T      # column k = Y_lag @ W[k, :]
-
-    xx11 = jnp.sum(X1 * X1, axis=0) + ridge
-    xx22 = jnp.sum(X2 * X2, axis=0) + ridge
-    xx12 = jnp.sum(X1 * X2, axis=0)
-
-    xy1 = jnp.sum(X1 * Y_now, axis=0)
-    xy2 = jnp.sum(X2 * Y_now, axis=0)
-
-    det = xx11 * xx22 - xx12 ** 2 + ridge
-
-    alpha_hat = (xy1 * xx22 - xy2 * xx12) / det
-    beta_hat = (xx11 * xy2 - xx12 * xy1) / det
-
-    resid = Y_now - X1 * alpha_hat[None, :] - X2 * beta_hat[None, :]
-    sigma2_hat = jnp.mean(resid ** 2, axis=0)
-
-    return alpha_hat, beta_hat, sigma2_hat
+    """Compatibility wrapper around ``vara.two_stage.fit_all_components_two_stage``."""
+    fit = fit_all_components_two_stage(
+        Y=Y,
+        Z=Z,
+        eta=eta_a,
+        params_scale=params_scale,
+        ridge=ridge,
+    )
+    return fit["alpha_hat"], fit["beta_hat"], fit["sigma2_hat"]
 
 
 # =====================================================================
@@ -182,74 +162,15 @@ def concentrated_loglik_eta(
     ridge=1e-10,
     eps=1e-12,
 ):
-    """
-    Concentrated log-quasi-likelihood for eta_a.
-
-    Paper:
-        l_c(gamma) = - T/2 sum_k log{ sigma2_tilde_k(gamma) }
-
-    Code:
-        paper gamma = eta_a
-
-    We ignore constants and use T_eff = T - 1.
-    """
-    T_eff = Y.shape[0] - 1
-
-    _, _, sigma2_hat = fit_all_components_given_eta(
+    """Compatibility wrapper around ``vara.two_stage.concentrated_eta_loglik``."""
+    return _concentrated_eta_loglik(
+        eta=eta_a,
         Y=Y,
         Z=Z,
-        eta_a=eta_a,
         params_scale=params_scale,
         ridge=ridge,
+        eps=eps,
     )
-
-    sigma2_hat = jnp.maximum(sigma2_hat, eps)
-    return -0.5 * T_eff * jnp.sum(jnp.log(sigma2_hat))
-
-
-def golden_section_maximize(
-    fn,
-    lower=-2.0,
-    upper=2.0,
-    tol=1e-4,
-    max_iter=100,
-):
-    """
-    Scalar derivative-free maximization on a compact interval.
-
-    This is stable for eta_a because it avoids relying on a noisy eta gradient.
-    """
-    gr = (math.sqrt(5.0) - 1.0) / 2.0
-
-    a = float(lower)
-    b = float(upper)
-
-    c = b - gr * (b - a)
-    d = a + gr * (b - a)
-
-    fc = float(fn(c))
-    fd = float(fn(d))
-
-    for _ in range(max_iter):
-        if abs(b - a) < tol:
-            break
-
-        if fc < fd:
-            a = c
-            c = d
-            fc = fd
-            d = a + gr * (b - a)
-            fd = float(fn(d))
-        else:
-            b = d
-            d = c
-            fd = fc
-            c = b - gr * (b - a)
-            fc = float(fn(c))
-
-    eta_hat = 0.5 * (a + b)
-    f_hat = float(fn(eta_hat))
-    return eta_hat, f_hat
 
 
 def estimate_eta_concentrated(
@@ -260,76 +181,18 @@ def estimate_eta_concentrated(
     grid_size=41,
     ridge=1e-10,
 ):
-    """
-    Robust concentrated estimator for eta_a.
-
-    Procedure:
-      1. grid search to find a good bracket,
-      2. golden-section refinement around the best grid cell.
-
-    Returns
-    -------
-    eta_hat : scalar
-    info : dict
-    """
-    lower, upper = eta_bounds
-    grid = jnp.linspace(lower, upper, grid_size)
-
-    vals = []
-    for eta in grid:
-        vals.append(
-            concentrated_loglik_eta(
-                eta,
-                Y,
-                Z,
-                params_scale,
-                ridge=ridge,
-            )
-        )
-    vals = jnp.array(vals)
-
-    best_idx = int(jnp.argmax(vals))
-
-    # Build local bracket around best grid point
-    left_idx = max(0, best_idx - 1)
-    right_idx = min(grid_size - 1, best_idx + 1)
-
-    local_lower = float(grid[left_idx])
-    local_upper = float(grid[right_idx])
-
-    # If best point is on boundary, refine on the boundary interval
-    if best_idx == 0:
-        local_lower = float(grid[0])
-        local_upper = float(grid[1])
-    elif best_idx == grid_size - 1:
-        local_lower = float(grid[-2])
-        local_upper = float(grid[-1])
-
-    fn = lambda x: concentrated_loglik_eta(
-        x,
-        Y,
-        Z,
-        params_scale,
+    """Compatibility wrapper around ``vara.simulation.estimate_eta_concentrated``."""
+    eta_hat, info = _estimate_eta_concentrated(
+        Y=Y,
+        Z=Z,
+        params_scale=params_scale,
+        eta_bounds=eta_bounds,
+        grid_size=grid_size,
         ridge=ridge,
     )
-
-    eta_hat, obj_hat = golden_section_maximize(
-        fn,
-        lower=local_lower,
-        upper=local_upper,
-        tol=1e-4,
-        max_iter=100,
-    )
-
-    info = {
-        "eta_hat": eta_hat,
-        "objective": obj_hat,
-        "grid_best_eta": float(grid[best_idx]),
-        "grid_best_obj": float(vals[best_idx]),
-        "on_boundary": bool(best_idx == 0 or best_idx == grid_size - 1),
-    }
-
-    return jnp.asarray(eta_hat), info
+    info = dict(info)
+    info["eta_hat"] = float(eta_hat)
+    return eta_hat, info
 
 
 # =====================================================================
@@ -342,20 +205,9 @@ def make_reparam_theta_from_params(params_true, p):
 
     Your estimate() expects sigma2 on the softplus-inverse scale.
     """
-    block_order = {
-        "eta_a": [0],
-        "gamma_a": list(range(1, 1 + p)),
-        "beta": list(range(1 + p, 1 + 2 * p)),
-        "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
-    }
-
-    sigma2_tilde = jnp.log(jnp.expm1(params_true["sigma2"]))
-    params_reparam = dict(params_true)
-    params_reparam["sigma2"] = sigma2_tilde
-
-    theta_reparam, _ = flatten_params(params_reparam, block_order)
-    theta_true, _ = flatten_params(params_true, block_order)
-
+    block_order = make_block_order(p)
+    theta_reparam = reparam_theta_from_params(params_true, p)
+    theta_true = flatten_simulation_params(params_true, p)
     return theta_reparam, theta_true, block_order
 
 
