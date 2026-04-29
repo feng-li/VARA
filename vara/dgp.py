@@ -295,6 +295,10 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
 
     if dist == "normal":
         eps_raw = normal(keys[5], (T, p))
+    elif dist == "laplace":
+        u = jax.random.uniform(keys[5], (T, p), minval=-0.5 + 1e-12, maxval=0.5 - 1e-12)
+        b = 1.0 / jnp.sqrt(2.0)
+        eps_raw = -b * jnp.sign(u) * jnp.log1p(-2.0 * jnp.abs(u))
     elif dist == "t5":
         k1, k2 = jax.random.split(keys[5])
         z = normal(k1, (T, p))
