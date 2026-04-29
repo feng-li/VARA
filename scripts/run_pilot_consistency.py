@@ -25,7 +25,7 @@ from vara.dgp import (
     draw_good_Z_for_eta,
     ensure_stationarity,
 )
-from vara.loglik_attn import build_attention
+from vara.attention import build_attention
 from vara.fit import estimate
 
 

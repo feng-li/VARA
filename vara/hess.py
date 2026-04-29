@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from .loglik_attn import build_attention
+from .attention import build_attention
 
 # =====================================================
 # Helpers

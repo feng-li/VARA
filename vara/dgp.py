@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import psutil
 import os
 
-from .loglik_attn import build_attention
+from .attention import build_attention
 from .loglik_attn import loglik_reparam
 from .hess import compute_Wa_Wb_dots
 from .cov import Gamma0_stationary_with_lyapunov_doubling

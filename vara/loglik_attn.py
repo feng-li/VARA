@@ -2,29 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax import grad, hessian
 
-
-def build_attention(Z, eta, scale):
-    """
-    Construct an attention weight matrix W from feature vectors Z and scale eta.
-    Z: (p, q) feature matrix, each row Z[k] is the feature vector of series k
-    eta: scalar temperature parameter
-    scale Larger scale → sharper changes in W when η changes → easier for MLE to find the right η.
-    Returns W: (p, p) attention weight matrix with rows summing to 1
-    """
-    p, q = Z.shape
-    # Similarity scores
-    scores = (Z @ Z.T) / jnp.sqrt(q)     # shape (p, p)
-    scores = eta * scores
-
-    # Mask diagonal (no or less self-weighting) by replacing with -inf. This makes sure diag of W is zero.
-    mask = jnp.eye(p) * -1e6
-
-    scores = scores * scale + mask
-
-    # Softmax row-wise
-    W = jax.nn.softmax(scores, axis=1)
-
-    return W
+from .attention import build_attention
 
 
 def loglik(theta, Y, Z, params_scale):

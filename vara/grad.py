@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from .loglik_attn import build_attention
+from .attention import build_attention
 
 
 def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1), update_idx=slice(None)):

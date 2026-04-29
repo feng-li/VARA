@@ -2,7 +2,7 @@ import jax
 from jax import jit
 import jax.numpy as jnp
 import optax
-from .loglik_attn import build_attention     # moved import here
+from .attention import build_attention
 
 
 # ------------------------------------------------------------
