@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 from jax import grad, hessian
 
-from loglik_attn import construct_matrices
+from .loglik_attn import construct_matrices
 
 
 def loglik_plain(theta, Y, W_a, W_b):

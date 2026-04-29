@@ -1,33 +1,67 @@
 # Vector Autoregression with Attention Weights (VARA)
 
-This repository implements a **network-augmented Vector Autoregression (VAR)** model that incorporates structured dependencies through attention-like weight matrices.
+VARA is a research codebase for a network-augmented vector autoregression that uses structured attention weights to model cross-series dependence.
+
+## Repository Layout
+
+```text
+.
+├── vara/          # core model, likelihood, covariance, and estimation code
+├── scripts/       # experiment runners, plotting helpers, and setup utilities
+├── data/          # small checked-in input data files
+├── patches/       # reference patch files kept with the repo
+├── outputs/       # generated results, figures, and simulation artifacts
+├── README.md
+├── pyproject.toml
+└── requirements.txt
+```
+
+## Quick Start
+
+1. Create an environment and install dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Run an experiment:
+
+   ```bash
+   python scripts/run_ecp_ray.py
+   ```
+
+3. Summarize a result file:
+
+   ```bash
+   python scripts/summarize_ecp.py outputs/results/results_coverage_@YYYY-MM-DD_HH.MM.SS.csv
+   ```
+
+4. Plot the checked-in varying-`p` example:
+
+   ```bash
+   python scripts/plot_varying_p.py
+   ```
+
+Generated files are written under `outputs/` instead of cluttering the repository root.
 
 ## Model
 
-The model is defined as
+The model is
 
-$$Y_t = \text{diag}(\beta) Y_{t-1}+\text{diag}(\gamma_a) W_a Y_{t-1}+ \text{diag}(\gamma_b) W_b Y_t+ \varepsilon_t,$$
+$$Y_t = \operatorname{diag}(\beta)Y_{t-1} + \operatorname{diag}(\gamma_a)W_aY_{t-1} + \operatorname{diag}(\gamma_b)W_bY_t + \varepsilon_t.$$
 
-where
+Where:
 
-* $Y_t \in \mathbb{R}^p$: vector of (p) endogenous time series at time (t).
-* $\text{diag}(\beta)$: diagonal autoregressive coefficient matrix for own-lag effects.
-* $W_a$: attention/weight matrix capturing **cross-series lagged dependence**.
-* $\text{diag}(\gamma_a)$: scaling coefficients for the weighted lag term.
-* $W_b$: attention/weight matrix capturing **contemporaneous dependence**.
-* $\text{diag}(\gamma_b)$: scaling coefficients for contemporaneous effects.
-* $\varepsilon_t$: innovation vector.
+- $Y_t \in \mathbb{R}^p$ is the vector of endogenous series at time $t$.
+- $\beta$ controls own-lag effects.
+- $W_a$ captures lagged cross-series dependence.
+- $\gamma_a$ scales the lagged attention term.
+- $W_b$ captures contemporaneous dependence.
+- $\gamma_b$ scales the contemporaneous attention term.
+- $\varepsilon_t$ is the innovation vector.
 
-## Key Features
+## Notes
 
-* **Own-lag dynamics**: Each series retains its traditional VAR autoregressive structure.
-* **Attention-weighted lag effects**: Cross-series interactions at lag 1 are governed by (W_a), which can be learned or externally specified (e.g., economic networks, spatial adjacency, learned attention scores).
-* **Contemporaneous interactions**: (W_b) allows modeling of instantaneous effects across series, beyond traditional VAR specifications.
-* **Scalable**: By using structured matrices, the model reduces the parameter explosion of unrestricted VARs, making it suitable for high-dimensional time series.
-
-## Applications
-
-* **Macroeconomic forecasting** (capturing spillovers between sectors or countries).
-* **Financial networks** (modeling interdependencies of assets, systemic risk).
-* **Spatio-temporal forecasting** (regional demand, transportation, energy consumption).
-* **Sensor networks** (IoT, environmental monitoring).
+- The reusable code lives in the `vara` package and can be imported directly from notebooks or other scripts.
+- The scripts directory is intentionally lightweight; it contains runnable entrypoints rather than a large CLI framework.
+- `data/varying_p.csv` is the small checked-in plotting example that used to live at the repository root.

@@ -13,10 +13,14 @@ import pandas as pd
 from datetime import datetime
 import itertools
 
-from dgp import simulate_VAR_attention, flatten_params, draw_Z, draw_good_Z_for_eta
-from fit import estimate
+try:
+    from ._bootstrap import RESULTS_DIR
+except ImportError:
+    from _bootstrap import RESULTS_DIR
 
-from cov import (
+from vara.dgp import simulate_VAR_attention, flatten_params, draw_good_Z_for_eta
+from vara.fit import estimate
+from vara.cov import (
     compute_projected_asymptotic_covariance_from_theta_hat,
     compute_z_stat_from_theta_hat,
     make_A,
@@ -442,7 +446,10 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 
 if __name__ == "__main__":
     import random
-    from summarize import summarize_empirical_coverage
+    try:
+        from .summarize_ecp import summarize_empirical_coverage
+    except ImportError:
+        from summarize_ecp import summarize_empirical_coverage
 
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
@@ -463,7 +470,7 @@ if __name__ == "__main__":
     # algorithm = "auto_gradhess"
     # algorithm = "block_newton"
 
-    out_path = f"results_coverage_@{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
+    out_path = RESULTS_DIR / f"results_coverage_@{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
 
     params_dgp = dict(
         eta_a=0.5,
@@ -574,4 +581,5 @@ if __name__ == "__main__":
 
         print(f"✔ Results appended for T={T}, alpha={alpha}")
 
-    summarize_empirical_coverage(out_path, latex=False)
+    print(f"Results written to: {out_path}")
+    summarize_empirical_coverage(str(out_path), latex=False)

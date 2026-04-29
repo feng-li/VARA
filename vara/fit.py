@@ -1,10 +1,10 @@
 import jax
 import jax.numpy as jnp
 
-from cov import compute_sandwich_variance
-from mle_ad import mle_newton, mle_newton_gibbs, mle_newton_hybrid
-from mle_optimize import mle_optimize
-from yule_walker_ad import yule_walker
+from .cov import compute_sandwich_variance
+from .mle_ad import mle_newton, mle_newton_gibbs, mle_newton_hybrid
+from .mle_optimize import mle_optimize
+from .yule_walker_ad import yule_walker
 
 
 def estimate(

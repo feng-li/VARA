@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from loglik_attn import build_attention
+from .loglik_attn import build_attention
 
 
 def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1), update_idx=slice(None)):
@@ -127,8 +127,8 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1), update_idx=s
 
 if __name__ == "__main__":
     import random
-    from dgp import simulate_VAR_attention, flatten_params
-    from loglik_attn import loglik_reparam
+    from .dgp import simulate_VAR_attention, flatten_params
+    from .loglik_attn import loglik_reparam
 
 
     # --- Simulation settings ---

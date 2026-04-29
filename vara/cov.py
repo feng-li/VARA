@@ -3,8 +3,8 @@ import jax.numpy as jnp
 from jax.scipy.stats import norm
 from jax.scipy.sparse.linalg import cg
 
-from hess import compute_Wa_Wb_dots
-from cov_auto import compute_V_auto_natural, compute_H_auto_natural
+from .hess import compute_Wa_Wb_dots
+from .cov_auto import compute_V_auto_natural, compute_H_auto_natural
 
 # ===============================================================
 # === Utility functions =========================================
@@ -849,9 +849,9 @@ def compare_VH_analytic_vs_auto(theta_hat, Y, Z, params_scale, kappa4=3.0, verbo
 
 if __name__ == "__main__":
     import random
-    from dgp import simulate_VAR_attention
-    from dgp import flatten_params
-    from mle_optimize import mle_optimize
+    from .dgp import simulate_VAR_attention
+    from .dgp import flatten_params
+    from .mle_optimize import mle_optimize
 
     # jax.config.update("jax_enable_x64", True)
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import sys
+from pathlib import Path
+
 import pandas as pd
 
 def summarize_empirical_coverage(file_path: str, latex: bool):
@@ -23,7 +25,8 @@ def summarize_empirical_coverage(file_path: str, latex: bool):
         - grand_summary
     """
     # --- Load results ---
-    df = pd.read_csv(file_path)
+    csv_path = Path(file_path)
+    df = pd.read_csv(csv_path)
 
 
     # --- Convert numeric columns explicitly ---
@@ -97,14 +100,14 @@ def summarize_empirical_coverage(file_path: str, latex: bool):
 
     if latex:
         param_ECP_summary.T.to_latex(
-            file_path + "_param_ECP_summary.tex",
+            csv_path.parent / f"{csv_path.name}_param_ECP_summary.tex",
             index=True,
             escape=False,
             float_format=lambda x: f"{x:.3f}"
         )
 
         param_RMSE_summary.T.to_latex(
-            file_path + "_param_RMSE_summary.tex",
+            csv_path.parent / f"{csv_path.name}_param_RMSE_summary.tex",
             index=True,
             escape=False,
             float_format=lambda x: f"{x:.3f}"
@@ -133,7 +136,7 @@ def summarize_empirical_coverage(file_path: str, latex: bool):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python run_summary.py <path_to_csv>")
+        print("Usage: python scripts/summarize_ecp.py <path_to_csv>")
         sys.exit(1)
 
     csv_path = sys.argv[1]

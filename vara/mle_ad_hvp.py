@@ -3,8 +3,8 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.sparse.linalg import cg
 
-from loglik_attn import loglik_reparam
-from grad import loglik_grad_analytical
+from .loglik_attn import loglik_reparam
+from .grad import loglik_grad_analytical
 
 import pandas as pd
 
@@ -295,8 +295,8 @@ if __name__ == "__main__":
     import math
     import matplotlib.pyplot as plt
 
-    from dgp import simulate_VAR_attention
-    from dgp import flatten_params
+    from .dgp import simulate_VAR_attention
+    from .dgp import flatten_params
 
     # jax.config.update("jax_enable_x64", True)
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)

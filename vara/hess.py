@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from loglik_attn import build_attention
+from .loglik_attn import build_attention
 
 # =====================================================
 # Helpers
@@ -393,8 +393,8 @@ def get_block(H, p, row_block, col_block):
 if __name__ == "__main__":
 
     import random
-    from dgp import simulate_VAR_attention, flatten_params
-    from loglik_attn import loglik_reparam
+    from .dgp import simulate_VAR_attention, flatten_params
+    from .loglik_attn import loglik_reparam
 
     jnp.set_printoptions(threshold=10_000, linewidth=1000, suppress=True, precision=10)
 

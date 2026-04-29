@@ -1,2 +1,11 @@
-*.csv
+__pycache__/
+.pytest_cache/
+.ropeproject/
+.codex/
+outputs/
+results_coverage_@*.csv
 *.npz
+*.pdf
+*.tex
+*~
+#*#

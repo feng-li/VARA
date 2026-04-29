@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
-from loglik_attn import loglik_t_natural, loglik_natural_from_t
-from loglik_attn import loglik_t_reparam_consistent, loglik_reparam_from_t_consistent
+from .loglik_attn import loglik_t_natural, loglik_natural_from_t
+from .loglik_attn import loglik_t_reparam_consistent, loglik_reparam_from_t_consistent
 
 def compute_scores_t_auto_natural(theta_hat, Y, Z, params_scale):
     """

@@ -2,7 +2,7 @@ import jax
 from jax import jit
 import jax.numpy as jnp
 import optax
-from loglik_attn import build_attention     # moved import here
+from .loglik_attn import build_attention     # moved import here
 
 
 # ------------------------------------------------------------
@@ -164,8 +164,8 @@ if __name__ == "__main__":
     import random
     import matplotlib.pyplot as plt
 
-    from dgp import simulate_VAR_attention
-    from dgp import flatten_params
+    from .dgp import simulate_VAR_attention
+    from .dgp import flatten_params
 
     # jax.config.update("jax_enable_x64", True)
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)

@@ -1,13 +1,17 @@
-from memory_profiler import profile
+try:
+    from memory_profiler import profile
+except ImportError:
+    def profile(func):
+        return func
 
 import random
 import jax
 import jax.numpy as jnp
 import numpy as np
-from loglik_attn import loglik_reparam
-from grad import loglik_grad_analytical
-from hess import loglik_hess_analytical
-from dgp import plot_likelihood_profiles
+from .loglik_attn import loglik_reparam
+from .grad import loglik_grad_analytical
+from .hess import loglik_hess_analytical
+from .dgp import plot_likelihood_profiles
 
 import pandas as pd
 
@@ -495,8 +499,8 @@ def build_param_name_map(order, block_order):
 # ---------- Example usage ----------
 if __name__ == "__main__":
 
-    from dgp import flatten_params
-    from mle_optimize import mle_optimize
+    from .dgp import flatten_params
+    from .mle_optimize import mle_optimize
 
     # jax.config.update("jax_enable_x64", True)
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)

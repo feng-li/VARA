@@ -1,4 +1,8 @@
-from memory_profiler import profile
+try:
+    from memory_profiler import profile
+except ImportError:
+    def profile(func):
+        return func
 
 import jax
 import jax.numpy as jnp
@@ -9,9 +13,9 @@ import matplotlib.pyplot as plt
 import psutil
 import os
 
-from loglik_attn import build_attention
-from loglik_attn import loglik_reparam
-from hess import compute_Wa_Wb_dots
+from .loglik_attn import build_attention
+from .loglik_attn import loglik_reparam
+from .hess import compute_Wa_Wb_dots
 
 def mem_gb():
     return psutil.Process(os.getpid()).memory_info().rss / 1024**3

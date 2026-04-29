@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from loglik_attn import loglik_reparam
+from .loglik_attn import loglik_reparam
 
 
 def mle_optimize(
@@ -81,7 +81,7 @@ def mle_optimize(
 
 
 if __name__ == "__main__":
-    from dgp import simulate_VAR_attention, flatten_params
+    from .dgp import simulate_VAR_attention, flatten_params
 
     # Set random number seed
     key = jax.random.PRNGKey(0)
