@@ -48,16 +48,14 @@ Generated files are written under `outputs/` instead of cluttering the repositor
 
 The model is
 
-$$Y_t = \operatorname{diag}(\beta)Y_{t-1} + \operatorname{diag}(\gamma_a)W_aY_{t-1} + \operatorname{diag}(\gamma_b)W_bY_t + \varepsilon_t.$$
+$$Y_t = \text{diag}(\beta)Y_{t-1} + \text{diag}(\gamma_a)W_aY_{t-1} + \varepsilon_t.$$
 
-Where:
+where:
 
 - $Y_t \in \mathbb{R}^p$ is the vector of endogenous series at time $t$.
 - $\beta$ controls own-lag effects.
 - $W_a$ captures lagged cross-series dependence.
 - $\gamma_a$ scales the lagged attention term.
-- $W_b$ captures contemporaneous dependence.
-- $\gamma_b$ scales the contemporaneous attention term.
 - $\varepsilon_t$ is the innovation vector.
 
 ## Notes
