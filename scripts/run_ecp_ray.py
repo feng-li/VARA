@@ -456,6 +456,18 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 # === Main ======================================================
 # ===============================================================
 
+def _parse_int_list(value):
+    return [int(x.strip()) for x in value.split(",") if x.strip()]
+
+
+def _parse_float_list(value):
+    return [float(x.strip()) for x in value.split(",") if x.strip()]
+
+
+def _parse_str_list(value):
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
 if __name__ == "__main__":
     import argparse
     import random
@@ -471,6 +483,44 @@ if __name__ == "__main__":
         default=True,
         help="Use Ray parallelization. Use --no-use-ray for sequential execution.",
     )
+    parser.add_argument(
+        "--R-list",
+        dest="R_list",
+        type=str,
+        default="100",
+        help="Comma-separated replication counts to run, e.g. --R-list 100,200.",
+    )
+    parser.add_argument(
+        "--p-list",
+        type=str,
+        default="10,20",
+        help="Comma-separated response dimensions to run, e.g. --p-list 10,20.",
+    )
+    parser.add_argument(
+        "--q-list",
+        type=str,
+        default="50,70",
+        help="Comma-separated feature dimensions to run, e.g. --q-list 50,70.",
+    )
+    parser.add_argument(
+        "--T-list",
+        dest="T_list",
+        type=str,
+        default="500,1000",
+        help="Comma-separated sample sizes to run, e.g. --T-list 500,1000.",
+    )
+    parser.add_argument(
+        "--alpha-list",
+        type=str,
+        default="0.05,0.1",
+        help="Comma-separated significance levels to run, e.g. --alpha-list 0.05,0.1.",
+    )
+    parser.add_argument(
+        "--dist-list",
+        type=str,
+        default="normal",
+        help="Comma-separated innovation distributions to run, e.g. --dist-list normal,t5.",
+    )
     args = parser.parse_args()
 
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
@@ -481,12 +531,15 @@ if __name__ == "__main__":
     print(f"=== Using a global seed: {seed}")
     key = jax.random.PRNGKey(seed)
 
-    R_list = [100]
-    p_list = [10]
-    q_list = [50]
-    T_list = [1000]
-    alpha_list = [0.1]
-    dist_list = ["normal"]
+    R_list = _parse_int_list(args.R_list)
+    p_list = _parse_int_list(args.p_list)
+    q_list = _parse_int_list(args.q_list)
+    T_list = _parse_int_list(args.T_list)
+    alpha_list = _parse_float_list(args.alpha_list)
+    dist_list = _parse_str_list(args.dist_list)
+    invalid_dist = sorted(set(dist_list) - {"normal", "t5"})
+    if invalid_dist:
+        raise ValueError(f"Unsupported dist values: {invalid_dist}. Use normal,t5.")
 
     algorithm = "lbfgs"   # "auto_gradhess", "analytical_gradhess"
     # algorithm = "auto_gradhess"
