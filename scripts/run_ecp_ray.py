@@ -457,17 +457,27 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 # ===============================================================
 
 if __name__ == "__main__":
+    import argparse
     import random
     try:
         from .summarize_ecp import summarize_empirical_coverage
     except ImportError:
         from summarize_ecp import summarize_empirical_coverage
 
+    parser = argparse.ArgumentParser(description="Run empirical coverage simulations.")
+    parser.add_argument(
+        "--use-ray",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use Ray parallelization. Use --no-use-ray for sequential execution.",
+    )
+    args = parser.parse_args()
+
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
-    USE_RAY = True
-    # seed = random.randint(0, 10000)
-    seed = 5682
+    USE_RAY = args.use_ray
+    seed = random.randint(0, 10000)
+    # seed = 5682, 1873
     print(f"=== Using a global seed: {seed}")
     key = jax.random.PRNGKey(seed)
 

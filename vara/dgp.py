@@ -16,6 +16,7 @@ import os
 from .loglik_attn import build_attention
 from .loglik_attn import loglik_reparam
 from .hess import compute_Wa_Wb_dots
+from .cov import Gamma0_stationary_with_lyapunov_doubling
 
 def mem_gb():
     """Return the current process resident memory usage in gigabytes."""
@@ -147,7 +148,7 @@ def draw_good_Z_for_eta(
     max_tries=200,
     min_offdiag_std=0.15,
     max_abs_score=3.0,
-    min_eta_signal=0.05,
+    min_eta_signal=0.1,
     verbose=True,
 ):
     """
@@ -159,12 +160,16 @@ def draw_good_Z_for_eta(
     its information is driven by gamma_a * W_a_dot. Some randomly drawn Z designs
     make this direction nearly flat, which hurts Theorem 1 verification for eta_a.
 
-    Screening rules
+    Selection rule
     ---------------
-    Accept Z only if:
+    Evaluate all ``max_tries`` candidates and select the candidate with the
+    largest eta information proxy among designs that pass:
       1) off-diagonal similarity scores have enough spread,
       2) no score is too extreme,
       3) the eta-direction signal ||diag(gamma_a) W_dot|| is not too small.
+
+    If no candidate passes all screens, fall back to the candidate with the
+    largest eta information proxy among all draws.
 
     Returns
     -------
@@ -175,9 +180,15 @@ def draw_good_Z_for_eta(
     """
     best_Z = None
     best_info = None
-    best_score = -jnp.inf
+    best_good_Z = None
+    best_good_info = None
+    best_good_score = float("-inf")
+    best_any_score = float("-inf")
 
-    gamma_a = params_true["gamma_a"]
+    gamma_a_raw = params_true["gamma_a"]
+    beta_raw = params_true.get("beta", jnp.zeros_like(gamma_a_raw))
+    sigma2 = params_true.get("sigma2", jnp.ones_like(gamma_a_raw))
+    beta, gamma_a, _ = ensure_stationarity(beta_raw, gamma_a_raw, margin=0.98)
     eta_a = params_true["eta_a"]
 
     for attempt in range(max_tries):
@@ -192,7 +203,13 @@ def draw_good_Z_for_eta(
             Z, eta_a, params_scale["eta_a"]
         )
 
-        eta_signal = jnp.linalg.norm(gamma_a[:, None] * Wdot)
+        eta_deriv = gamma_a[:, None] * Wdot
+        G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * Wa)
+        Gamma0 = Gamma0_stationary_with_lyapunov_doubling(G, sigma2)
+        sigma2_inv = 1.0 / sigma2
+
+        eta_signal = jnp.linalg.norm(eta_deriv)
+        eta_info = jnp.sum((sigma2_inv[:, None] * eta_deriv) * (eta_deriv @ Gamma0))
         off_std = jnp.std(off)
         max_score = jnp.max(jnp.abs(off))
 
@@ -207,35 +224,35 @@ def draw_good_Z_for_eta(
             "offdiag_std": float(off_std),
             "max_abs_score": float(max_score),
             "eta_signal": float(eta_signal),
+            "eta_info": float(eta_info),
             "accepted": good_design,
         }
 
-        # keep the best candidate even if none passes
-        score_value = float(off_std + 0.5 * eta_signal - 0.1 * max_score)
-        if score_value > best_score:
-            best_score = score_value
+        score_value = float(eta_info)
+        if score_value > best_any_score:
+            best_any_score = score_value
             best_Z = Z
             best_info = info
 
-        if good_design:
-            if verbose:
-                print(
-                    "[Z design accepted] "
-                    f"attempt={info['attempt']}, "
-                    f"offdiag_std={info['offdiag_std']:.4f}, "
-                    f"max_abs_score={info['max_abs_score']:.4f}, "
-                    f"eta_signal={info['eta_signal']:.4f}"
-                )
-            return Z, info
+        if good_design and score_value > best_good_score:
+            best_good_score = score_value
+            best_good_Z = Z
+            best_good_info = info
 
     if verbose:
+        selected_info = best_good_info if best_good_info is not None else best_info
+        message = "[Z design accepted: best eta information]" if best_good_info is not None else "[Z design fallback: no candidate passed screening]"
         print(
-            "[Z design fallback: no candidate passed screening] "
-            f"best attempt={best_info['attempt']}, "
-            f"offdiag_std={best_info['offdiag_std']:.4f}, "
-            f"max_abs_score={best_info['max_abs_score']:.4f}, "
-            f"eta_signal={best_info['eta_signal']:.4f}"
+            f"{message} "
+            f"attempt={selected_info['attempt']}, "
+            f"offdiag_std={selected_info['offdiag_std']:.4f}, "
+            f"max_abs_score={selected_info['max_abs_score']:.4f}, "
+            f"eta_signal={selected_info['eta_signal']:.4f}, "
+            f"eta_info={selected_info['eta_info']:.4f}"
         )
+
+    if best_good_Z is not None:
+        return best_good_Z, best_good_info
     return best_Z, best_info
 
 
