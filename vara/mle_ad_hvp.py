@@ -9,6 +9,13 @@ from .grad import loglik_grad_analytical
 import pandas as pd
 
 
+def _active_vector(values, update_idx):
+    """Return a vector restricted to update_idx unless it is already restricted."""
+    if values.shape[0] == update_idx.size:
+        return values
+    return values[update_idx]
+
+
 def make_hvp(theta_full, update_idx, grad_fn, Y, Z, params_scale):
     """
     Construct a Hessian–vector product (HVP) function on the reduced parameter space.
@@ -44,7 +51,7 @@ def make_hvp(theta_full, update_idx, grad_fn, Y, Z, params_scale):
         )
 
         # Restrict back to reduced space
-        return Hv_full[update_idx]
+        return _active_vector(Hv_full, update_idx)
 
     return hvp
 
@@ -131,7 +138,7 @@ def mle_newton(Y, Z, theta_init, params_scale,
 
     for it in range(max_iter):
         g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
-        g = g_full[update_idx]
+        g = _active_vector(g_full, update_idx)
         g_norm = jnp.linalg.norm(g)
 
         # gradient clipping

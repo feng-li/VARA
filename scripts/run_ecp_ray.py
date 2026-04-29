@@ -18,7 +18,7 @@ try:
 except ImportError:
     from _bootstrap import RESULTS_DIR
 
-from vara.dgp import simulate_VAR_attention, flatten_params, draw_good_Z_for_eta
+from vara.dgp import simulate_VAR_attention, flatten_params, draw_good_Z_for_eta, ensure_stationarity
 from vara.fit import estimate
 from vara.cov import (
     compute_projected_asymptotic_covariance_from_theta_hat,
@@ -54,6 +54,13 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
         "sigma2": list(range(1 + 2 * p, 1 + 3 * p)),
     }
 
+    params_true = dict(params_true)
+    beta, gamma_a, _ = ensure_stationarity(
+        params_true["beta"], params_true["gamma_a"], margin=0.98
+    )
+    params_true["beta"] = beta
+    params_true["gamma_a"] = gamma_a
+
     # --- Convert σ² → σ̃² (softplus inverse) ---
     sigma2_tilde_true = jnp.log(jnp.expm1(params_true["sigma2"]))
     params_reparam = params_true.copy()
@@ -71,7 +78,7 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
     last_inside = jnp.zeros(d, dtype=bool)
     last_ci_length = jnp.full(d, jnp.nan)
     last_theta_hat = jnp.full(d, jnp.nan)
-    last_z_stats = jnp.full((4,), jnp.nan)
+    last_z_stats = jnp.full((d,), jnp.nan)
     last_status = -1
 
     for attempt in range(max_tries):
@@ -125,9 +132,6 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
         status = int(convergence["status"])
 
         if status == 0:
-
-            eta_max = 2.0
-            theta_hat_eval = theta_hat.at[0].set(jnp.clip(theta_hat[0], -eta_max, eta_max))
 
             z_eta, _ = compute_z_stat_from_theta_hat(
                 Y=Y,
@@ -231,7 +235,8 @@ class ReplicationActor:
             return result
         except Exception as e:
             print(f"[Ray actor error] {e}")
-            d = 1 + 3 * kwargs["p"] if "p" in kwargs else 1 + 3 * args[3]
+            p_arg = kwargs["p"] if "p" in kwargs else args[4]
+            d = 1 + 3 * p_arg
             return (
                 jnp.zeros(d, dtype=bool),
                 jnp.full((d,), jnp.nan),
@@ -264,7 +269,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     print(f"Response dim p : {p}")
     print(f"Feature dim  q : {q}")
     print(f"Replications R : {R}")
-    print(f"Random seed    : {seed}")
+    print(f"Random key     : {key}")
     print("=" * 70, "\n")
 
     subkeys = jax.random.split(key, R)
@@ -288,6 +293,13 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
             maxval=params_dgp["sigma2"]["maxval"]
         ),
     )
+    beta, gamma_a, stat_info = ensure_stationarity(
+        params_true["beta"], params_true["gamma_a"], margin=0.98
+    )
+    params_true["beta"] = beta
+    params_true["gamma_a"] = gamma_a
+    if bool(stat_info["rescaled"]):
+        print("Stationarity rescaled true beta/gamma_a for coverage target.")
 
     # Z = draw_Z(pkeys[0], p, q)
     Z, Z_info = draw_good_Z_for_eta(
@@ -546,30 +558,6 @@ if __name__ == "__main__":
                 "coverage": float(coverage[i]),
                 "rmse": float(rmse[i]),
                 "avg_len": float(avg_len[i]),
-                "start_time": start_ts,
-                "finish_time": finish_ts,
-                "elapsed_min": round(elapsed, 2),
-            })
-
-        z_names = ["eta_a", "gamma_a[1]", "beta[1]", "sigma2[1]"]
-        for i, name in enumerate(z_names):
-            records.append({
-                "R": R,
-                "p": p,
-                "q": q,
-                "dist": dist,
-                "seed": seed,
-                "T": T,
-                "alpha": alpha,
-                "nominal": 1 - alpha,
-                "param_group": "theorem_verification",
-                "param": name,
-                "coverage": float("nan"),
-                "rmse": float("nan"),
-                "avg_len": float("nan"),
-                "z_mean": float(z_mean[i]),
-                "z_var": float(z_var[i]),
-                "z_reject_5": float(z_reject_5[i]),
                 "start_time": start_ts,
                 "finish_time": finish_ts,
                 "elapsed_min": round(elapsed, 2),

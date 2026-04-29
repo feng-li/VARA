@@ -74,9 +74,7 @@ def yule_walker_loss(theta, Z, Gamma0_hat, Gamma1_hat, params_scale,
     p = Gamma0_hat.shape[0]
 
     # unpack theta vector
-    # eta_a = theta[0]
-    eta_max = 2
-    eta_a = jnp.clip(theta[0], -eta_max, eta_max)
+    eta_a = theta[0]
     gamma_a = theta[1:1+p]
     beta = theta[1+p:1+2*p]
     # sigma2 skipped for YW (not needed)

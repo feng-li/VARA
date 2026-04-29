@@ -575,9 +575,7 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 
     T, p = Y.shape
 
-    # eta_a = theta_hat[0]
-    eta_max = 2
-    eta_a = jnp.clip(theta_hat[0], -eta_max, eta_max)
+    eta_a = theta_hat[0]
 
     gamma_a = theta_hat[1:1+p]
     beta = theta_hat[1+p:1+2*p]

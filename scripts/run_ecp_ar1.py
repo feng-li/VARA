@@ -33,7 +33,6 @@ for _ in tqdm(range(R), desc="Simulating AR(1) coverage"):
 
     # ----- 5. Construct 95% confidence interval -----
     z = scipy.stats.norm.ppf(1 - alpha / 2.0)
-    z = 1.64  # 95% level
     L = phi_hat - z * se_phi
     U = phi_hat + z * se_phi
     interval_lengths.append(U - L)

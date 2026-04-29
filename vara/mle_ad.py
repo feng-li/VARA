@@ -16,6 +16,21 @@ from .dgp import plot_likelihood_profiles
 import pandas as pd
 
 
+def _active_vector(values, update_idx):
+    """Return a vector restricted to update_idx unless it is already restricted."""
+    if values.shape[0] == update_idx.size:
+        return values
+    return values[update_idx]
+
+
+def _active_matrix(values, update_idx):
+    """Return a matrix restricted to update_idx unless it is already restricted."""
+    n_active = update_idx.size
+    if values.shape == (n_active, n_active):
+        return values
+    return values[jnp.ix_(update_idx, update_idx)]
+
+
 # @profile
 def mle_newton(Y, Z, theta_init, params_scale,
                algorithm="analytical_gradhess", update_idx=slice(None),
@@ -104,7 +119,7 @@ def mle_newton(Y, Z, theta_init, params_scale,
 
     for it in range(max_iter):
         g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
-        g = g_full[update_idx]
+        g = _active_vector(g_full, update_idx)
         g_norm = jnp.linalg.norm(g)
 
         # gradient clipping
@@ -116,7 +131,7 @@ def mle_newton(Y, Z, theta_init, params_scale,
 
         # breakpoint()
         H_full = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
-        H = H_full[jnp.ix_(update_idx, update_idx)]
+        H = _active_matrix(H_full, update_idx)
 
         try:
             lambda_damp = 0.3
@@ -354,7 +369,7 @@ def mle_newton_gibbs(
         rel_change = float(abs_change / jnp.maximum(1.0, jnp.linalg.norm(theta_full)))
 
         g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
-        g_active = g_full[update_idx]
+        g_active = _active_vector(g_full, update_idx)
         g_norm = float(jnp.linalg.norm(g_active))
 
         records.append({
@@ -375,14 +390,14 @@ def mle_newton_gibbs(
 
         if rel_change < tol or g_norm < tol:
             H_full = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
-            H_active = H_full[jnp.ix_(update_idx, update_idx)]
+            H_active = _active_matrix(H_full, update_idx)
             trace = pd.DataFrame(records)
             return theta_full[update_idx], g_active, H_active, dict(status=0, trace=trace)
 
     H_full = loglik_hess(theta_full, Y, Z, params_scale, update_idx)
-    H_active = H_full[jnp.ix_(update_idx, update_idx)]
+    H_active = _active_matrix(H_full, update_idx)
     g_full = loglik_grad(theta_full, Y, Z, params_scale, update_idx)
-    g_active = g_full[update_idx]
+    g_active = _active_vector(g_full, update_idx)
     trace = pd.DataFrame(records)
 
     return theta_full[update_idx], g_active, H_active, dict(status=1, trace=trace)
