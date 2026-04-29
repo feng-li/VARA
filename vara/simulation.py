@@ -1,3 +1,21 @@
+"""Simulation helpers for the VARA numerical experiments.
+
+This module contains reusable pieces that are shared by simulation scripts:
+
+* parameter draws for the paper-style DGP,
+* memory-aware attention operations for large ``p``,
+* VARA data simulation,
+* full QMLE and two-stage estimation wrappers, and
+* compact replication summaries for RMSE/ECP tables.
+
+Notation follows the repository's code convention. Relative to the paper:
+paper gamma = ``eta_a``, paper alpha = ``beta``, paper beta = ``gamma_a``,
+and paper sigma squared = ``sigma2``.
+
+All parameter dictionaries use natural-scale ``sigma2`` unless a function
+explicitly says it builds optimizer-scale theta.
+"""
+
 from __future__ import annotations
 
 import math
@@ -19,6 +37,10 @@ Z_CRIT_975 = 1.959963984540054
 
 
 def p_for_setting(T: int, setting: str) -> int:
+    """Return the response dimension used by a paper simulation setting.
+
+    ``low`` uses ``floor(sqrt(T))``. ``high`` uses ``floor(T ** 1.5)``.
+    """
     if setting == "low":
         return int(math.floor(math.sqrt(T)))
     if setting == "high":
@@ -27,6 +49,7 @@ def p_for_setting(T: int, setting: str) -> int:
 
 
 def kappa4_for_dist(dist: str) -> float:
+    """Return the fourth moment of the standardized innovation distribution."""
     if dist == "normal":
         return 3.0
     if dist == "laplace":
@@ -37,6 +60,7 @@ def kappa4_for_dist(dist: str) -> float:
 
 
 def make_block_order(p: int) -> Dict[str, List[int]]:
+    """Return theta block indices for ``(eta_a, gamma_a, beta, sigma2)``."""
     return {
         "eta_a": [0],
         "gamma_a": list(range(1, 1 + p)),
@@ -46,7 +70,18 @@ def make_block_order(p: int) -> Dict[str, List[int]]:
 
 
 def flatten_simulation_params(params: Dict[str, Any], p: int) -> jnp.ndarray:
-    """Flatten natural-scale params in code order: eta_a, gamma_a, beta, sigma2."""
+    """Flatten natural-scale parameters in optimizer block order.
+
+    Parameters
+    ----------
+    params
+        Dictionary with ``eta_a`` scalar and length-``p`` arrays
+        ``gamma_a``, ``beta``, and ``sigma2``.
+    p
+        Response dimension. Kept in the signature for symmetry with callers
+        that construct block orders, but the array lengths are read from
+        ``params``.
+    """
     return jnp.concatenate([
         jnp.atleast_1d(params["eta_a"]),
         jnp.asarray(params["gamma_a"]),
@@ -56,7 +91,12 @@ def flatten_simulation_params(params: Dict[str, Any], p: int) -> jnp.ndarray:
 
 
 def reparam_theta_from_params(params: Dict[str, Any], p: int) -> jnp.ndarray:
-    """Build optimizer-scale theta: eta_a, gamma_a, beta, softplus^{-1}(sigma2)."""
+    """Build optimizer-scale theta from natural-scale parameters.
+
+    The optimizer estimates unconstrained variance coordinates, so this uses
+    ``softplus^{-1}(sigma2)`` for the last block while leaving all other
+    parameters on their natural scale.
+    """
     sigma2_tilde = jnp.log(jnp.expm1(params["sigma2"]))
     return jnp.concatenate([
         jnp.atleast_1d(params["eta_a"]),
@@ -67,7 +107,12 @@ def reparam_theta_from_params(params: Dict[str, Any], p: int) -> jnp.ndarray:
 
 
 def draw_simulation_params(key: jax.Array, p: int) -> Dict[str, Any]:
-    """Draw DGP parameters once for a simulation setting."""
+    """Draw one paper-style DGP parameter vector for a simulation setting.
+
+    The draw uses ``eta_a = 0.5``, independent uniform draws for ``gamma_a``
+    and ``beta`` on ``[-0.2, 0.2]``, and ``sigma2`` on ``[0.25, 1.0]``.
+    ``beta`` and ``gamma_a`` are rescaled only if needed for stationarity.
+    """
     k_beta_paper, k_alpha_paper, k_sig = jax.random.split(key, 3)
     params = {
         "eta_a": jnp.asarray(0.5),
@@ -89,7 +134,12 @@ def attention_rows(
     start: int,
     stop: int,
 ) -> jnp.ndarray:
-    """Return attention rows W[start:stop, :] without forming all of W."""
+    """Return attention rows ``W[start:stop, :]`` without forming all of ``W``.
+
+    Rows are computed from feature similarities ``Z_i' Z_j / sqrt(q)`` with
+    the diagonal masked out before applying softmax. This is the primitive used
+    by batched large-``p`` simulation and two-stage estimation.
+    """
     p, q = Z.shape
     Zb = Z[start:stop]
     scores = (Zb @ Z.T) / jnp.sqrt(q)
@@ -110,7 +160,12 @@ def attention_matvec(
     batch_size: int = 512,
     dense_threshold: int = 2500,
 ) -> jnp.ndarray:
-    """Compute W(eta) @ v, batching rows for large p."""
+    """Compute ``W(eta) @ v`` with optional row batching.
+
+    For moderate ``p`` this delegates to ``build_attention`` and forms the
+    dense attention matrix. For large ``p`` it streams row blocks to avoid
+    allocating the full ``p x p`` matrix.
+    """
     p = Z.shape[0]
     if p <= dense_threshold:
         W = build_attention(Z, eta, params_scale["eta_a"])
@@ -132,7 +187,11 @@ def attention_weighted_lags(
     batch_size: int = 512,
     dense_threshold: int = 2500,
 ) -> jnp.ndarray:
-    """Compute X2[:, k] = sum_j w_{k,j}(eta) Y_lag[:, j] for every k."""
+    """Compute the attention-weighted lag regressor for all coordinates.
+
+    Returns an array ``X2`` with ``X2[:, k] = sum_j W[k, j] * Y_lag[:, j]``.
+    This is the second regressor in the componentwise two-stage regressions.
+    """
     T_eff, p = Y_lag.shape
     if p <= dense_threshold:
         W = build_attention(Z, eta, params_scale["eta_a"])
@@ -148,6 +207,11 @@ def attention_weighted_lags(
 
 
 def draw_standard_innovations(key: jax.Array, shape: Tuple[int, int], dist: str) -> jnp.ndarray:
+    """Draw mean-zero, variance-one innovations.
+
+    Supported values are ``normal``, ``laplace``, and ``t5``. The Student-t
+    draw is rescaled to unit variance.
+    """
     if dist == "normal":
         return jax.random.normal(key, shape)
     if dist == "laplace":
@@ -174,7 +238,13 @@ def simulate_vara(
     batch_size: int = 512,
     dense_threshold: int = 2500,
 ) -> jnp.ndarray:
-    """Simulate the VARA DGP, including standard Laplace noise."""
+    """Simulate observations from the VARA DGP.
+
+    The recursion is
+    ``Y_t = beta * Y_{t-1} + gamma_a * (W(eta_a) @ Y_{t-1}) + eps_t``.
+    Innovations are drawn with unit variance and then scaled coordinatewise by
+    ``sqrt(sigma2)``. The initial state is zero.
+    """
     params = dict(params)
     beta, gamma_a, _ = ensure_stationarity(params["beta"], params["gamma_a"], margin=0.98)
     eta = float(params["eta_a"])
@@ -209,7 +279,13 @@ def fit_all_components_two_stage(
     batch_size: int = 512,
     dense_threshold: int = 2500,
 ) -> Dict[str, jnp.ndarray]:
-    """Vectorized two-stage OLS and componentwise standard errors for all k."""
+    """Fit componentwise OLS regressions at a fixed eta value.
+
+    For each coordinate ``k``, the regression uses two regressors:
+    ``Y_lag[:, k]`` and the attention-weighted lag ``X2[:, k]``. Returned
+    names follow paper notation: ``alpha_hat`` estimates code ``beta`` and
+    ``beta_hat`` estimates code ``gamma_a``.
+    """
     T, p = Y.shape
     T_eff = T - 1
     Y_lag = Y[:-1]
@@ -271,6 +347,12 @@ def concentrated_eta_loglik(
     batch_size: int = 512,
     dense_threshold: int = 2500,
 ) -> jnp.ndarray:
+    """Evaluate the concentrated Gaussian log-likelihood for ``eta_a``.
+
+    Given eta, the coordinate-specific slope and variance parameters are
+    profiled out by ``fit_all_components_two_stage``. Constants that do not
+    affect eta maximization are omitted.
+    """
     T_eff = Y.shape[0] - 1
     fit = fit_all_components_two_stage(
         Y, Z, eta, params_scale,
@@ -283,6 +365,7 @@ def concentrated_eta_loglik(
 
 
 def golden_section_maximize(fn, lower: float, upper: float, tol: float = 1e-4, max_iter: int = 100):
+    """Maximize a scalar function on a bounded interval by golden-section search."""
     gr = (math.sqrt(5.0) - 1.0) / 2.0
     a, b = float(lower), float(upper)
     c = b - gr * (b - a)
@@ -316,6 +399,11 @@ def estimate_eta_concentrated(
     batch_size: int = 512,
     dense_threshold: int = 2500,
 ):
+    """Estimate ``eta_a`` by a grid search followed by local refinement.
+
+    The returned ``info`` dictionary records the best grid point, objective
+    value, and whether the grid optimum occurred at the search boundary.
+    """
     lower, upper = eta_bounds
     grid = jnp.linspace(lower, upper, grid_size)
 
@@ -366,6 +454,7 @@ def finite_diff_second_derivative_eta(
     batch_size: int,
     dense_threshold: int,
 ) -> jnp.ndarray:
+    """Approximate the second derivative of the concentrated eta objective."""
     lower, upper = eta_bounds
     eta_center = float(eta_center)
     if eta_center - h < lower or eta_center + h > upper:
@@ -401,6 +490,11 @@ def estimate_eta_curvature(
     batch_size: int,
     dense_threshold: int,
 ):
+    """Estimate the normalized curvature used for eta standard errors.
+
+    Returns ``(-l''(eta) / (T_eff * p), l''(eta))`` where ``l`` is the
+    concentrated eta log-likelihood.
+    """
     T_eff = Y.shape[0] - 1
     l2 = finite_diff_second_derivative_eta(
         eta_center, Y, Z, params_scale, h, eta_bounds, ridge, batch_size, dense_threshold
@@ -433,7 +527,13 @@ def pack_result_row(
     report_gamma_ecp: bool = True,
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Create one compact replication-level row with simulation RMSE/ECP ingredients."""
+    """Create one compact replication-level result row.
+
+    The row stores scalar eta error/coverage and coordinate-averaged MSE, ECP,
+    and confidence interval length for paper alpha, beta, and sigma squared.
+    Use ``report_gamma_ecp=False`` for high-dimensional runs where eta
+    coverage is not reported.
+    """
     zcrit = float(jax.scipy.stats.norm.ppf(1.0 - alpha / 2.0))
 
     eta_true = float(params_true["eta_a"])
@@ -511,7 +611,12 @@ def run_qmle_on_dataset(
     algorithm: str,
     perturb_scale: float,
 ) -> Tuple[Dict[str, Any], int]:
-    """Run full QMLE and return estimates/se in paper notation."""
+    """Run full QMLE for one simulated dataset.
+
+    The optimizer is initialized near the true optimizer-scale theta. Returned
+    estimates are converted into the paper-facing names used by summaries:
+    ``alpha_hat`` for code ``beta`` and ``beta_hat`` for code ``gamma_a``.
+    """
     _, p = Y.shape
     theta_true_reparam = reparam_theta_from_params(params_true, p)
     block_order = make_block_order(p)
@@ -574,7 +679,13 @@ def run_two_stage_on_dataset(
     batch_size: int,
     dense_threshold: int,
 ) -> Tuple[Dict[str, Any], int]:
-    """Run concentrated pilot + componentwise second-stage estimator."""
+    """Run the two-stage estimator on one simulated dataset.
+
+    First estimate ``eta_a`` with the concentrated objective. Then estimate
+    coordinate-specific slopes and variances by componentwise OLS at the
+    estimated eta. For low-dimensional settings, eta standard errors are based
+    on a finite-difference curvature estimate.
+    """
     T, p = Y.shape
     T_eff = T - 1
 
@@ -662,7 +773,12 @@ def full_single_replication(
     batch_size: int,
     dense_threshold: int,
 ) -> List[Dict[str, Any]]:
-    """Simulate one dataset and run all requested methods on that same dataset."""
+    """Simulate one dataset and run all requested estimation methods.
+
+    Returns one compact result row per method. Exceptions are caught at the
+    method level so a failed QMLE run does not prevent the two-stage estimator
+    from being reported for the same simulated dataset.
+    """
     sim_key, qmle_key = jax.random.split(key)
     kappa4 = kappa4_for_dist(dist)
 
@@ -758,7 +874,12 @@ def full_single_replication(
 
 
 def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
-    """Summarize compact replication rows into table metrics."""
+    """Aggregate replication rows into setting-level RMSE/ECP summaries.
+
+    The expected input is the row format produced by ``pack_result_row``.
+    Output columns are named with paper parameter labels:
+    ``gamma`` for eta, ``alpha`` for code beta, and ``beta`` for code gamma_a.
+    """
     records = []
     group_cols = ["setting", "dist", "T", "p", "q", "method"]
 
@@ -803,7 +924,7 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def make_paper_table(summary: pd.DataFrame) -> pd.DataFrame:
-    """Return a long paper-style table with Metric / Parameter columns."""
+    """Convert the wide summary into a long paper-style table."""
     rows = []
     for _, r in summary.iterrows():
         for metric in ["RMSE", "ECP"]:

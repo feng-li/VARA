@@ -304,7 +304,7 @@ def main():
     parser.add_argument("--R", type=int, default=500)
     parser.add_argument("--T-list", type=str, default="100,200,500")
     parser.add_argument("--settings", type=str, default="low,high", help="Comma list: low,high")
-    parser.add_argument("--dist-list", type=str, default="normal,laplace")
+    parser.add_argument("--dist-list", type=str, default="normal,laplace,t5")
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument("--alpha", type=float, default=0.05)
 
