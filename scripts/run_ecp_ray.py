@@ -449,6 +449,26 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
             f"P(|Z|>1.96)={float(z_reject_5[i]): .4f}"
         )
 
+    def _mean_se(values):
+        values = jnp.ravel(values)
+        values = values[jnp.isfinite(values)]
+        n = int(values.size)
+        if n == 0:
+            return n, float("nan"), float("nan")
+        mean = float(jnp.mean(values))
+        if n == 1:
+            return n, mean, 0.0
+        centered = values - mean
+        sd = jnp.sqrt(jnp.sum(centered ** 2) / (n - 1))
+        se = float(sd / jnp.sqrt(n))
+        return n, mean, se
+
+    print("\nBlock summary (pooled standardized Z statistics):")
+    print(f"{'block':<10s} {'n':>8s} {'mean (se)':>20s}")
+    for group_name, sl in idx.items():
+        n, mean, se = _mean_se(z_stats_all[:, sl])
+        print(f"{group_name:<10s} {n:8d} {mean: .4f} ({se:.4f})")
+
     return (
         coverage,
         avg_length,
