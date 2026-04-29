@@ -57,12 +57,47 @@ def compute_scores_t_auto_reparam(theta_hat_reparam, Y, Z, params_scale):
 
 
 def compute_V_auto_reparam(theta_hat_reparam, Y, Z, params_scale):
+    """
+    Form the autodiff score covariance on the reparameterized scale.
+
+    Parameters
+    ----------
+    theta_hat_reparam : jax.Array
+        Parameter vector on the optimization scale.
+    Y, Z : jax.Array
+        Observed data and feature matrix.
+    params_scale : dict
+        Scaling constants for the attention map.
+
+    Returns
+    -------
+    jax.Array
+        Matrix ``sum_t s_t s_t^T`` where ``s_t`` is the reparameterized
+        per-time score contribution.
+    """
     scores = compute_scores_t_auto_reparam(theta_hat_reparam, Y, Z, params_scale)
     V_auto = scores.T @ scores
     return V_auto
 
 
 def compute_H_auto_reparam(theta_hat_reparam, Y, Z, params_scale):
+    """
+    Compute the autodiff Hessian on the reparameterized scale.
+
+    Parameters
+    ----------
+    theta_hat_reparam : jax.Array
+        Parameter vector on the optimization scale.
+    Y, Z : jax.Array
+        Observed data and feature matrix.
+    params_scale : dict
+        Scaling constants for the attention map.
+
+    Returns
+    -------
+    jax.Array
+        Negative Hessian of the reparameterized total log-likelihood.
+    """
     hess_fn = jax.hessian(loglik_reparam_from_t_consistent)
     H_auto = -hess_fn(theta_hat_reparam, Y, Z, params_scale)
     return H_auto

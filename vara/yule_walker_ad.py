@@ -9,6 +9,21 @@ from .loglik_attn import build_attention     # moved import here
 # Compute sample auto-covariances Γ_lag
 # ------------------------------------------------------------
 def compute_autocovariances(Y, lag=0):
+    """
+    Compute the sample autocovariance matrix at a given lag.
+
+    Parameters
+    ----------
+    Y : jax.Array
+        Data matrix with shape ``(T, p)``.
+    lag : int, default=0
+        Autocovariance lag. Must satisfy ``0 <= lag < T``.
+
+    Returns
+    -------
+    jax.Array
+        ``(p, p)`` sample autocovariance matrix at the requested lag.
+    """
     T, p = Y.shape
     if lag < 0 or lag >= T:
         raise ValueError("lag must be in [0, T-1]")
@@ -27,6 +42,34 @@ def compute_autocovariances(Y, lag=0):
 # ------------------------------------------------------------
 def yule_walker_loss(theta, Z, Gamma0_hat, Gamma1_hat, params_scale,
                      loss_mode="full", key=None):
+    """
+    Compute the Yule-Walker moment-matching loss.
+
+    The loss compares the empirical lag-1 covariance ``Gamma1_hat`` with the
+    model-implied quantity ``G @ Gamma0_hat`` under the current parameter
+    vector. Several approximations to the full Frobenius norm are available
+    for cheaper experimentation.
+
+    Parameters
+    ----------
+    theta : jax.Array
+        Full parameter vector on the optimization scale.
+    Z : jax.Array
+        Feature matrix used to build the attention weights.
+    Gamma0_hat, Gamma1_hat : jax.Array
+        Empirical lag-0 and lag-1 covariance matrices.
+    params_scale : dict
+        Scaling constants for the attention map.
+    loss_mode : {"full", "row1", "randomK", "hutchinson"}, default="full"
+        Approximation strategy for the residual Frobenius norm.
+    key : jax.random.PRNGKey | None, default=None
+        Random key used by the stochastic approximation modes.
+
+    Returns
+    -------
+    jax.Array
+        Scalar loss value.
+    """
 
     p = Gamma0_hat.shape[0]
 
@@ -88,6 +131,33 @@ def yule_walker_loss(theta, Z, Gamma0_hat, Gamma1_hat, params_scale,
 def yule_walker(Y, Z, theta_init, params_scale, update_idx,
         lr=1e-2,
         steps=200):
+    """
+    Fit selected parameters by minimizing the Yule-Walker loss with Adam.
+
+    Parameters
+    ----------
+    Y : jax.Array
+        Data matrix with shape ``(T, p)``.
+    Z : jax.Array
+        Feature matrix used in the attention map.
+    theta_init : jax.Array
+        Full initial parameter vector on the optimization scale.
+    params_scale : dict
+        Scaling constants for the attention map.
+    update_idx : array-like
+        Indices of the entries in ``theta_init`` that should be updated.
+    lr : float, default=1e-2
+        Adam learning rate.
+    steps : int, default=200
+        Maximum number of optimization steps.
+
+    Returns
+    -------
+    tuple
+        ``(theta_shortvec, grad_ll, hess_ll, convergence)`` matching the
+        interface used by the rest of the estimation code. The current
+        implementation returns empty gradient/Hessian placeholders.
+    """
 
     Gamma0_hat = compute_autocovariances(Y, 0)
     Gamma1_hat = compute_autocovariances(Y, 1)

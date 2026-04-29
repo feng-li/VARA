@@ -174,6 +174,27 @@ def loglik_t_natural(theta, y_t, y_tm1, Z, params_scale, T):
 
 
 def loglik_natural_from_t(theta, Y, Z, params_scale):
+    """
+    Rebuild the natural-scale total log-likelihood from per-time terms.
+
+    This wrapper is mainly used for autodiff validation, so that gradients
+    and Hessians can be compared against analytical expressions built from
+    the single-time contribution :func:`loglik_t_natural`.
+
+    Parameters
+    ----------
+    theta : jax.Array
+        Natural-scale parameter vector.
+    Y, Z : jax.Array
+        Observed data and feature matrix.
+    params_scale : dict
+        Scaling constants for the attention map.
+
+    Returns
+    -------
+    jax.Array
+        Scalar total log-likelihood obtained by summing over ``t = 1, ..., T-1``.
+    """
     T, _ = Y.shape
     vals = []
     for t in range(1, T):
@@ -215,6 +236,24 @@ def loglik_t_reparam_consistent(theta, y_t, y_tm1, Z, params_scale, T):
 
 
 def loglik_reparam_from_t_consistent(theta, Y, Z, params_scale):
+    """
+    Rebuild the reparameterized total log-likelihood from per-time terms.
+
+    Parameters
+    ----------
+    theta : jax.Array
+        Optimization-scale parameter vector.
+    Y, Z : jax.Array
+        Observed data and feature matrix.
+    params_scale : dict
+        Scaling constants for the attention map.
+
+    Returns
+    -------
+    jax.Array
+        Scalar total log-likelihood consistent with
+        :func:`loglik_t_reparam_consistent`.
+    """
     T, _ = Y.shape
     vals = []
     for t in range(1, T):

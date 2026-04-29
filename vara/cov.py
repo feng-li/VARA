@@ -10,12 +10,38 @@ from .cov_auto import compute_V_auto_natural, compute_H_auto_natural
 # === Utility functions =========================================
 # ===============================================================
 def vec(X):
-    """Vectorize matrix X in column-major order."""
+    """
+    Vectorize a matrix in column-major order.
+
+    Parameters
+    ----------
+    X : array_like
+        Matrix to reshape.
+
+    Returns
+    -------
+    jax.Array
+        Column-stacked vector with shape ``(m * n, 1)``.
+    """
     return X.T.reshape(-1, 1)
 
 
 def unvec(v, shape):
-    """Inverse of vec() — reshape vector to given shape."""
+    """
+    Invert :func:`vec` for a target matrix shape.
+
+    Parameters
+    ----------
+    v : array_like
+        Vectorized matrix produced by :func:`vec`.
+    shape : tuple[int, int]
+        Desired matrix shape ``(rows, cols)``.
+
+    Returns
+    -------
+    jax.Array
+        Matrix with the requested shape.
+    """
     return v.reshape((shape[1], shape[0])).T
 
 # ===============================================================
@@ -202,6 +228,39 @@ def assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
 # === Assemble analytical H =====================================
 # ===============================================================
 def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True):
+    """
+    Assemble the analytical sensitivity matrix ``H``.
+
+    This routine starts from :func:`assemble_V` and then applies the
+    fourth-moment correction to the variance block so that the resulting
+    matrix matches the analytical Hessian-based sensitivity used in the
+    sandwich variance formulas.
+
+    Parameters
+    ----------
+    Wa, Wa_dot : jax.Array
+        Attention matrix and its derivative with respect to ``eta_a``.
+    gamma_a : jax.Array
+        Lagged attention coefficients of shape ``(p,)``.
+    G : jax.Array
+        Transition matrix in the VAR recursion.
+    Gamma0 : jax.Array
+        Stationary covariance matrix of the process.
+    sigma2 : jax.Array
+        Innovation variances of shape ``(p,)``.
+    T : int
+        Sample size used to scale the analytical expressions.
+    kappa4 : float, default=3.0
+        Fourth moment of the innovation distribution.
+    full : bool, default=True
+        When ``True``, return a dense matrix. Otherwise return the block
+        dictionary representation used by the matrix-free helpers.
+
+    Returns
+    -------
+    jax.Array | dict[str, jax.Array]
+        Sensitivity matrix in the requested representation.
+    """
     p = sigma2.shape[0]
     V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
     sigma_inv4 = 1.0 / (sigma2 ** 2)
@@ -465,6 +524,19 @@ def estimate_Avar_explicit(H, V, apply_H, apply_V, p,):
 
 
 def compute_Avar(H, V):
+    """
+    Compute the sandwich covariance ``H^{-1} V H^{-1}``.
+
+    Parameters
+    ----------
+    H, V : jax.Array
+        Dense sensitivity and score covariance matrices.
+
+    Returns
+    -------
+    jax.Array
+        Asymptotic covariance matrix on the same parameter scale as ``H``.
+    """
 
     HinvV = jnp.linalg.solve(H, V)
     Avar = jnp.linalg.solve(H, HinvV.T).T
@@ -473,6 +545,33 @@ def compute_Avar(H, V):
 
 
 def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0.05, verbose=False):
+    """
+    Compute Wald-style uncertainty estimates for a fitted parameter vector.
+
+    Parameters
+    ----------
+    Y : jax.Array
+        Observed data matrix with shape ``(T, p)``.
+    Z : jax.Array
+        Feature matrix used to build the attention weights.
+    theta_hat : jax.Array
+        Estimated parameter vector on the natural scale
+        ``(eta_a, gamma_a, beta, sigma2)``.
+    params_scale : dict
+        Scaling constants used by the attention map.
+    kappa4 : float, default=3.0
+        Assumed fourth moment of the innovation distribution.
+    alpha : float, default=0.05
+        Two-sided confidence level parameter.
+    verbose : bool, default=False
+        If ``True``, print eigenvalue diagnostics for the scaled ``V`` and ``H``.
+
+    Returns
+    -------
+    dict[str, jax.Array]
+        Dictionary with the point estimate, standard errors, and lower/upper
+        Wald confidence limits.
+    """
 
     T, p = Y.shape
 
@@ -728,6 +827,25 @@ def compute_projected_asymptotic_covariance(A, V, H, p, scaling="theory", eps=1e
 
 
 def build_VH_from_theta_hat(Y, Z, theta_hat, params_scale, kappa4=3.0):
+    """
+    Build dense analytical ``V`` and ``H`` matrices from a natural-scale estimate.
+
+    Parameters
+    ----------
+    Y, Z : jax.Array
+        Observed data and feature matrix.
+    theta_hat : jax.Array
+        Parameter estimate on the natural scale.
+    params_scale : dict
+        Scaling constants for the attention map.
+    kappa4 : float, default=3.0
+        Assumed innovation fourth moment.
+
+    Returns
+    -------
+    tuple[jax.Array, jax.Array]
+        Dense ``(V, H)`` matrices evaluated at ``theta_hat``.
+    """
     T, p = Y.shape
 
     eta_a = theta_hat[0]
@@ -749,6 +867,32 @@ def build_VH_from_theta_hat(Y, Z, theta_hat, params_scale, kappa4=3.0):
 
 def compute_projected_asymptotic_covariance_from_theta_hat(Y, Z, theta_hat, A, params_scale,
                                                            kappa4=3.0, scaling="theory", eps=1e-8):
+    """
+    Project the asymptotic covariance after rebuilding ``V`` and ``H`` from data.
+
+    Parameters
+    ----------
+    Y, Z : jax.Array
+        Observed data and feature matrix.
+    theta_hat : jax.Array
+        Natural-scale parameter estimate.
+    A : jax.Array
+        Projection matrix selecting the linear functional of interest.
+    params_scale : dict
+        Scaling constants for the attention map.
+    kappa4 : float, default=3.0
+        Assumed innovation fourth moment.
+    scaling : {"theory", "adaptive"}, default="theory"
+        Scaling rule passed to :func:`compute_projected_asymptotic_covariance`.
+    eps : float, default=1e-8
+        Numerical floor used by adaptive scaling.
+
+    Returns
+    -------
+    tuple[jax.Array, dict]
+        Projected covariance matrix and a diagnostics dictionary containing the
+        reconstructed ``V``/``H`` plus the intermediate scaling objects.
+    """
     T, p = Y.shape
     V, H = build_VH_from_theta_hat(Y, Z, theta_hat, params_scale, kappa4=kappa4)
     J_T, extras = compute_projected_asymptotic_covariance(

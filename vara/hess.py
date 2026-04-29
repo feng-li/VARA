@@ -7,7 +7,19 @@ from .loglik_attn import build_attention
 # =====================================================
 
 def Sigma_inv_from_sigma2(sigma2):
-    """Compute inverse diagonal covariance matrix."""
+    """
+    Construct ``diag(1 / sigma2)`` explicitly.
+
+    Parameters
+    ----------
+    sigma2 : jax.Array
+        Positive variance vector of shape ``(p,)``.
+
+    Returns
+    -------
+    jax.Array
+        Diagonal inverse covariance matrix with shape ``(p, p)``.
+    """
     return jnp.diag(1.0 / sigma2)
 
 
@@ -21,7 +33,21 @@ def softplus_sigma2(theta, p):
 
 
 def Sigma_inv_from_tilde(theta, p):
-    """Convenience helper: compute Σ⁻¹ given θ with σ̃²."""
+    """
+    Build the inverse diagonal covariance from reparameterized variances.
+
+    Parameters
+    ----------
+    theta : jax.Array
+        Full parameter vector whose last ``p`` entries are ``sigma2_tilde``.
+    p : int
+        Number of series.
+
+    Returns
+    -------
+    jax.Array
+        Diagonal matrix ``diag(1 / softplus(sigma2_tilde))``.
+    """
     sigma2_tilde = theta[1 + 2 * p : 1 + 3 * p]
     sigma2 = jax.nn.softplus(sigma2_tilde)
     return jnp.diag(1.0 / sigma2)
@@ -184,7 +210,15 @@ def hess_block_eta_a_sigma2(theta, Y, Z, params_scale):
 
 
 def hess_block_gamma_a_beta(theta, Y, Z, params_scale):
-    """∂²ℓ / ∂β ∂γ_aᵀ — Appendix B.2, Eq. (∂²ℓ/∂β∂γ_a)."""
+    """
+    Compute the cross-Hessian block between ``beta`` and ``gamma_a``.
+
+    Returns
+    -------
+    jax.Array
+        ``(p, p)`` block for ``∂²ℓ / ∂beta ∂gamma_a^T`` on the
+        reparameterized objective scale.
+    """
     T, p = Y.shape
     # eta_a = theta[0]
     eta_max = 2
@@ -299,7 +333,14 @@ def hess_block_eta_a(theta, Y, Z, params_scale):
 
 
 def hess_block_gamma_a(theta, Y, Z, params_scale):
-    """∂²ℓ / ∂γ_a ∂γ_aᵀ ∈ R^{p×p}."""
+    """
+    Compute the ``gamma_a`` diagonal Hessian block.
+
+    Returns
+    -------
+    jax.Array
+        ``(p, p)`` block for ``∂²ℓ / ∂gamma_a ∂gamma_a^T``.
+    """
     T, p = Y.shape
     # eta_a = theta[0]
     eta_max = 2
@@ -316,7 +357,14 @@ def hess_block_gamma_a(theta, Y, Z, params_scale):
 
 
 def hess_block_beta(theta, Y, Z):
-    """∂²ℓ / ∂β ∂βᵀ ∈ R^{p×p}."""
+    """
+    Compute the ``beta`` diagonal Hessian block.
+
+    Returns
+    -------
+    jax.Array
+        ``(p, p)`` block for ``∂²ℓ / ∂beta ∂beta^T``.
+    """
     T, p = Y.shape
     sigma2 = jax.nn.softplus(theta[1+2*p:1+3*p])
     Sigma_inv = Sigma_inv_from_sigma2(sigma2)
@@ -333,7 +381,28 @@ def hess_block_beta(theta, Y, Z):
 # =====================================================
 
 def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(None)):
-    """Assemble full analytical Hessian H(θ̃)."""
+    """
+    Assemble the analytical Hessian of the reparameterized log-likelihood.
+
+    Parameters
+    ----------
+    theta : jax.Array
+        Full parameter vector on the optimization scale.
+    Y, Z : jax.Array
+        Observed data and feature matrix.
+    params_scale : dict
+        Scaling constants for the attention map.
+    kappa4 : float
+        Retained for interface compatibility with other covariance code.
+        The current implementation does not use it directly.
+    update_idx : slice | array-like, default=slice(None)
+        Parameter indices to retain in the returned principal submatrix.
+
+    Returns
+    -------
+    jax.Array
+        Hessian restricted to ``update_idx`` and normalized by ``T - 1``.
+    """
     T, p = Y.shape
     d2 = len(theta)
     H = jnp.zeros((d2, d2))
@@ -377,7 +446,23 @@ def loglik_hess_analytical(theta, Y, Z, params_scale, kappa4, update_idx=slice(N
 # =====================================================
 
 def get_block(H, p, row_block, col_block):
-    """Extract a named Hessian block."""
+    """
+    Extract a named parameter block from a dense Hessian matrix.
+
+    Parameters
+    ----------
+    H : jax.Array
+        Full dense Hessian.
+    p : int
+        Number of series defining the block layout.
+    row_block, col_block : {"eta_a", "gamma_a", "beta", "sigma2"}
+        Block names to select.
+
+    Returns
+    -------
+    jax.Array
+        Requested Hessian submatrix.
+    """
     def idx(name):
         if name == "eta_a": return jnp.array([0])
         elif name == "gamma_a": return jnp.arange(1, 1+p)

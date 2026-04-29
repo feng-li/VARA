@@ -18,6 +18,7 @@ from .loglik_attn import loglik_reparam
 from .hess import compute_Wa_Wb_dots
 
 def mem_gb():
+    """Return the current process resident memory usage in gigabytes."""
     return psutil.Process(os.getpid()).memory_info().rss / 1024**3
 
 
