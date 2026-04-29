@@ -692,7 +692,7 @@ if __name__ == "__main__":
     parser.add_argument("--p-list", type=str, default="")
     parser.add_argument("--p-rule", type=str, default="sqrt", choices=["sqrt", "logT"])
     parser.add_argument("--q", type=int, default=50)
-    parser.add_argument("--dist", type=str, default="normal", choices=["normal", "t5"])
+    parser.add_argument("--dist", type=str, default="normal", choices=["normal", "laplace", "t5"])
     parser.add_argument("--grid-size", type=int, default=81)
     parser.add_argument("--curvature-step", type=float, default=0.02)
     parser.add_argument("--max-cpus-per-task", type=int, default=1)

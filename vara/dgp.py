@@ -302,7 +302,7 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
         eps_raw = z / jnp.sqrt(u / 5.0)
         eps_raw = eps_raw * jnp.sqrt(3.0 / 5.0)
     else:
-        raise ValueError("dist must be 'normal' or 't5'.")
+        raise ValueError("dist must be 'normal', 'laplace' or 't5'.")
 
     eps = eps_raw * jnp.sqrt(sigma2)
 

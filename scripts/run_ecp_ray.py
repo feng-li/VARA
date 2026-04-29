@@ -519,7 +519,7 @@ if __name__ == "__main__":
         "--dist-list",
         type=str,
         default="normal",
-        help="Comma-separated innovation distributions to run, e.g. --dist-list normal,t5.",
+        help="Comma-separated innovation distributions to run, e.g. --dist-list normal,laplace,t5.",
     )
     args = parser.parse_args()
 
@@ -537,9 +537,9 @@ if __name__ == "__main__":
     T_list = _parse_int_list(args.T_list)
     alpha_list = _parse_float_list(args.alpha_list)
     dist_list = _parse_str_list(args.dist_list)
-    invalid_dist = sorted(set(dist_list) - {"normal", "t5"})
+    invalid_dist = sorted(set(dist_list) - {"normal", "laplace", "t5"})
     if invalid_dist:
-        raise ValueError(f"Unsupported dist values: {invalid_dist}. Use normal,t5.")
+        raise ValueError(f"Unsupported dist values: {invalid_dist}. Use normal,t5,laplace.")
 
     algorithm = "lbfgs"   # "auto_gradhess", "analytical_gradhess"
     # algorithm = "auto_gradhess"
