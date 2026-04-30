@@ -364,6 +364,12 @@ def run_full_simulation(
 
 def main():
     parser = argparse.ArgumentParser(description="Run full VARA paper simulations.")
+    parser.add_argument(
+        "--ray-num-cpus",
+        type=int,
+        default=52,
+        help="Total Ray CPU budget. Use 1 to disable Ray and run sequentially.",
+    )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--R", type=int, default=500)
     parser.add_argument("--T-list", type=str, default="100,200,500")
@@ -371,13 +377,6 @@ def main():
     parser.add_argument("--dist-list", type=str, default="normal,laplace,t5")
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument("--alpha", type=float, default=0.05)
-
-    parser.add_argument(
-        "--ray-num-cpus",
-        type=int,
-        default=52,
-        help="Total Ray CPU budget. Use 1 for sequential execution.",
-    )
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
 
     parser.add_argument("--qmle-algorithm", type=str, default="lbfgs")
