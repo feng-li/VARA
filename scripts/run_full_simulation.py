@@ -37,10 +37,9 @@ except Exception:
     except Exception:
         RESULTS_DIR = Path("results")
 
-from vara.dgp import draw_Z, draw_good_Z_for_eta
+from vara.dgp import draw_Z, draw_good_Z_for_eta, ensure_stationarity
 from vara.simulation import (
     PARAMS_SCALE,
-    draw_simulation_params,
     full_single_replication,
     make_paper_table,
     p_for_setting,
@@ -169,7 +168,7 @@ def run_full_simulation(
     ridge: float = 1e-10,
     batch_size: int = 512,
     dense_threshold: int = 2500,
-    screen_z: bool = False,
+    screen_z: bool = True,
     high_max_p: Optional[int] = None,
     results_dir: Path = RESULTS_DIR,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -216,8 +215,18 @@ def run_full_simulation(
                     else grid_size
                 )
 
-                key, k_params, k_Z, k_rep = jax.random.split(key, 4)
-                params_true = draw_simulation_params(k_params, p)
+                key, k_Z, k_gamma, k_beta, k_sig, k_rep = jax.random.split(key, 6)
+                params_true = {
+                    "eta_a": jnp.asarray(0.5),
+                    "gamma_a": jax.random.uniform(k_gamma, (p,), minval=0.15, maxval=0.30),
+                    "beta": jax.random.uniform(k_beta, (p,), minval=-0.20, maxval=0.20),
+                    "sigma2": jax.random.uniform(k_sig, (p,), minval=0.50, maxval=1.00),
+                }
+                beta, gamma_a, stat_info = ensure_stationarity(
+                    params_true["beta"], params_true["gamma_a"], margin=0.98
+                )
+                params_true["beta"] = beta
+                params_true["gamma_a"] = gamma_a
                 if screen_z:
                     Z, Z_info = draw_good_Z_for_eta(
                         key=k_Z,
@@ -246,6 +255,7 @@ def run_full_simulation(
                 print(f"seed         : {seed}")
                 print(f"grid_size    : {grid_size_use}")
                 print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
+                print(f"stationary   : {not bool(stat_info['rescaled'])}")
                 print(f"screen_z     : {screen_z}, Z_info={Z_info}")
                 print("=" * 80)
 
@@ -389,7 +399,12 @@ def main():
     parser.add_argument("--ridge", type=float, default=1e-10)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--dense-threshold", type=int, default=2500)
-    parser.add_argument("--screen-z", action="store_true", default=False)
+    parser.add_argument(
+        "--screen-z",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Screen Z for eta identification. Use --no-screen-z to draw an unscreened design.",
+    )
     parser.add_argument(
         "--high-max-p",
         type=int,
