@@ -57,6 +57,57 @@ def _parse_str_list(value: str) -> List[str]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
+def _unique_in_order(values: Sequence[Any]) -> List[Any]:
+    seen = set()
+    out = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _format_config_values(values: Sequence[Any]) -> str:
+    values = _unique_in_order(values)
+    if not values:
+        return "none"
+    return "-".join(str(value) for value in values)
+
+
+def _full_simulation_output_paths(
+    results_dir: Path,
+    *,
+    R: int,
+    T_list: Sequence[int],
+    settings: Sequence[str],
+    q: int,
+    seed: int,
+    high_max_p: Optional[int],
+    run_tag: str,
+) -> Tuple[Path, Path, Path]:
+    p_values = []
+    for setting in settings:
+        for T in T_list:
+            p = p_for_setting(T, setting)
+            if setting == "high" and high_max_p is not None and p > high_max_p:
+                continue
+            p_values.append(p)
+
+    config_tag = (
+        f"R={R}_"
+        f"p={_format_config_values(p_values)}_"
+        f"q={q}_"
+        f"T={_format_config_values(T_list)}_"
+        f"seed={seed}_"
+        f"{run_tag}"
+    )
+    return (
+        results_dir / f"results_full_simulation_detail_{config_tag}.csv",
+        results_dir / f"summary_full_simulation_{config_tag}.csv",
+        results_dir / f"paper_table_full_simulation_{config_tag}.csv",
+    )
+
+
 @ray.remote
 class FullSimulationActor:
     def run(self, *args, **kwargs):
@@ -135,7 +186,17 @@ def run_full_simulation(
     key = jax.random.PRNGKey(seed)
     all_detail_rows: List[Dict[str, Any]] = []
     setting_summaries: List[pd.DataFrame] = []
-    run_tag = datetime.now().strftime("%Y-%m-%d_%H.%M.%S")
+    run_tag = datetime.now().strftime("%Y%m%d_%H.%M.%S")
+    detail_path, summary_path, paper_path = _full_simulation_output_paths(
+        results_dir,
+        R=R,
+        T_list=T_list,
+        settings=settings,
+        q=q,
+        seed=seed,
+        high_max_p=high_max_p,
+        run_tag=run_tag,
+    )
 
     for setting in settings:
         if setting not in {"low", "high"}:
@@ -270,8 +331,6 @@ def run_full_simulation(
                 print("\nSummary for current setting:")
                 print(summary_current.round(4).to_string(index=False))
 
-                detail_path = results_dir / f"results_full_simulation_detail_{run_tag}.csv"
-                summary_path = results_dir / f"summary_full_simulation_{run_tag}.csv"
                 pd.DataFrame(all_detail_rows).to_csv(detail_path, index=False)
                 pd.concat(setting_summaries, ignore_index=True).to_csv(summary_path, index=False)
                 print(f"Saved incremental detail to: {detail_path}")
@@ -283,9 +342,6 @@ def run_full_simulation(
     df_summary = pd.concat(setting_summaries, ignore_index=True) if setting_summaries else pd.DataFrame()
     df_paper = make_paper_table(df_summary) if len(df_summary) else pd.DataFrame()
 
-    detail_path = results_dir / f"results_full_simulation_detail_{run_tag}.csv"
-    summary_path = results_dir / f"summary_full_simulation_{run_tag}.csv"
-    paper_path = results_dir / f"paper_table_full_simulation_{run_tag}.csv"
     df_detail.to_csv(detail_path, index=False)
     df_summary.to_csv(summary_path, index=False)
     df_paper.to_csv(paper_path, index=False)

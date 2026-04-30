@@ -498,6 +498,13 @@ def _parse_str_list(value):
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
+def _format_config_values(values):
+    values = list(dict.fromkeys(values))
+    if not values:
+        return "none"
+    return "-".join(str(value) for value in values)
+
+
 if __name__ == "__main__":
     import argparse
     import random
@@ -574,8 +581,6 @@ if __name__ == "__main__":
     # algorithm = "auto_gradhess"
     # algorithm = "block_newton"
 
-    out_path = RESULTS_DIR / f"results_coverage_@{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
-
     params_dgp = dict(
         eta_a=0.5,
         gamma_a=dict(minval=0.15, maxval=0.3),
@@ -584,6 +589,17 @@ if __name__ == "__main__":
     )
 
     params_scale = dict(eta_a=1)
+
+    run_tag = datetime.now().strftime("%Y%m%d_%H.%M.%S")
+    config_tag = (
+        f"R={_format_config_values(R_list)}_"
+        f"p={_format_config_values(p_list)}_"
+        f"q={_format_config_values(q_list)}_"
+        f"T={_format_config_values(T_list)}_"
+        f"seed={seed}_"
+        f"{run_tag}"
+    )
+    out_path = RESULTS_DIR / f"results_coverage_{config_tag}.csv"
 
     header_written = False
 

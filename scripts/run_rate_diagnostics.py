@@ -31,12 +31,12 @@ from vara.simulation import (
 
 
 # =====================================================================
-# 1. Rate utilities for Theorem 3
+# 1. Rate utilities for convergence diagnostics
 # =====================================================================
 
-def theorem3_rate_bound(T_eff, p):
+def convergence_rate_bound(T_eff, p):
     """
-    Theorem 3(i) rate for sqrt(T) * (eta_hat_c - eta):
+    Convergence rate for sqrt(T) * (eta_hat_c - eta):
         1 / sqrt(p) + sqrt(log(p) log(Tp) / T).
     """
     T_eff = float(T_eff)
@@ -46,9 +46,9 @@ def theorem3_rate_bound(T_eff, p):
     )
 
 
-def theorem3_condition_numbers(T_eff, p):
+def convergence_condition_numbers(T_eff, p):
     """
-    Return the two rate-condition quantities from Theorem 3.
+    Return the two rate-condition quantities for convergence diagnostics.
 
     Statement (i):  log(p) log(Tp) / T -> 0.
     Statement (ii): p log(p) log(Tp) / T -> 0.
@@ -64,7 +64,7 @@ def theorem3_condition_numbers(T_eff, p):
 # 2. Single replication
 # =====================================================================
 
-def theorem3_single_replication(
+def convergence_single_replication(
     key,
     params_true,
     Z,
@@ -79,15 +79,15 @@ def theorem3_single_replication(
     ridge=1e-10,
 ):
     """
-    One Monte Carlo replication for Theorem 3.
+    One Monte Carlo replication for convergence diagnostics.
 
-    Theorem 3 studies the concentrated estimator of the shared attention
-    parameter gamma. In the current code notation, paper gamma is eta_a.
+    These diagnostics study the concentrated estimator of the shared attention
+    parameter. In the current code notation, paper gamma is eta_a.
 
     Returns a single-row dict with:
       - eta_hat_c and eta error,
-      - Theorem 3(i) rate diagnostics,
-      - Theorem 3(ii) standardized statistics using omega at the truth
+      - convergence-rate diagnostics,
+      - standardized statistics using omega at the truth
         and omega at the estimator.
     """
     params_true = dict(params_true)
@@ -146,12 +146,12 @@ def theorem3_single_replication(
     omega_true_f = float(omega_true) if jnp.isfinite(omega_true) else float("nan")
     omega_hat_f = float(omega_hat) if jnp.isfinite(omega_hat) else float("nan")
 
-    # Theorem 3(i): sqrt(T)(eta_hat - eta) has the displayed O_p rate.
-    rate_i = theorem3_rate_bound(T_eff, p)
+    # Rate convergence: sqrt(T)(eta_hat - eta) has the displayed O_p rate.
+    rate_i = convergence_rate_bound(T_eff, p)
     sqrtT_error = math.sqrt(T_eff) * eta_error
     rate_ratio = abs(sqrtT_error) / (rate_i + 1e-12)
 
-    # Theorem 3(ii): sqrt(Tp)(eta_hat - eta) -> N(0, omega^{-1}).
+    # Normality diagnostic: sqrt(Tp)(eta_hat - eta) -> N(0, omega^{-1}).
     sqrtTp_error = math.sqrt(T_eff * p) * eta_error
 
     z_trueomega = float("nan")
@@ -162,7 +162,7 @@ def theorem3_single_replication(
     if math.isfinite(omega_hat_f) and omega_hat_f > 0:
         z_hatomega = sqrtTp_error * math.sqrt(omega_hat_f)
 
-    cond_i, cond_ii = theorem3_condition_numbers(T_eff, p)
+    cond_i, cond_ii = convergence_condition_numbers(T_eff, p)
 
     return {
         "eta_true": eta_true,
@@ -189,10 +189,10 @@ def theorem3_single_replication(
     }
 
 
-def failed_theorem3_row(T, p, q, dist):
+def failed_convergence_row(T, p, q, dist):
     """Return one failed placeholder row."""
     T_eff = T - 1
-    cond_i, cond_ii = theorem3_condition_numbers(T_eff, p)
+    cond_i, cond_ii = convergence_condition_numbers(T_eff, p)
     return {
         "eta_true": float("nan"),
         "eta_hat": float("nan"),
@@ -200,7 +200,7 @@ def failed_theorem3_row(T, p, q, dist):
         "abs_eta_error": float("nan"),
         "sqrtT_error": float("nan"),
         "sqrtTp_error": float("nan"),
-        "rate_i": theorem3_rate_bound(T_eff, p),
+        "rate_i": convergence_rate_bound(T_eff, p),
         "rate_ratio": float("nan"),
         "omega_true": float("nan"),
         "omega_hat": float("nan"),
@@ -223,13 +223,13 @@ def failed_theorem3_row(T, p, q, dist):
 # =====================================================================
 
 @ray.remote
-class Theorem3ReplicationActor:
+class ConvergenceReplicationActor:
     def __init__(self):
         self._cache = None
 
     def run(self, *args, **kwargs):
         try:
-            result = theorem3_single_replication(*args, **kwargs)
+            result = convergence_single_replication(*args, **kwargs)
             self._cache = None
             gc.collect()
             return result
@@ -239,14 +239,14 @@ class Theorem3ReplicationActor:
             p = kwargs.get("p", args[4] if len(args) > 4 else 0)
             q = kwargs.get("q", args[5] if len(args) > 5 else 0)
             dist = kwargs.get("dist", "unknown")
-            return failed_theorem3_row(T, p, q, dist)
+            return failed_convergence_row(T, p, q, dist)
 
 
 # =====================================================================
 # 4. Monte Carlo driver for one (T, p, q) setting
 # =====================================================================
 
-def run_theorem3_verification(
+def run_convergence_verification(
     seed=2026,
     R=500,
     T=1000,
@@ -260,11 +260,11 @@ def run_theorem3_verification(
     max_cpus_per_task=1,
 ):
     """
-    Run Monte Carlo verification of Theorem 3 for one (T, p, q) setting.
+    Run Monte Carlo convergence diagnostics for one (T, p, q) setting.
 
     Main outputs:
-      - Theorem 3(i): distribution of |sqrt(T)(eta_hat_c-eta)| / rate_i.
-      - Theorem 3(ii): z = sqrt(Tp)(eta_hat_c-eta) sqrt(omega_hat),
+      - rate diagnostic: distribution of |sqrt(T)(eta_hat_c-eta)| / rate_i.
+      - normality diagnostic: z = sqrt(Tp)(eta_hat_c-eta) sqrt(omega_hat),
         which should have mean about 0, variance about 1, and rejection
         probability about 0.05.
     """
@@ -307,10 +307,10 @@ def run_theorem3_verification(
     )
 
     T_eff = T - 1
-    cond_i, cond_ii = theorem3_condition_numbers(T_eff, p)
+    cond_i, cond_ii = convergence_condition_numbers(T_eff, p)
 
     print("\n" + "=" * 70)
-    print("Theorem 3 verification setup")
+    print("Convergence verification setup")
     print("=" * 70)
     print(f"seed       = {seed}")
     print(f"R          = {R}")
@@ -337,7 +337,7 @@ def run_theorem3_verification(
         n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
         print(f"Running with Ray using {n_actors} actors")
         actors = [
-            Theorem3ReplicationActor.options(num_cpus=max_cpus_per_task).remote()
+            ConvergenceReplicationActor.options(num_cpus=max_cpus_per_task).remote()
             for _ in range(n_actors)
         ]
         futures = [
@@ -357,15 +357,15 @@ def run_theorem3_verification(
             for r in range(R)
         ]
         rows = []
-        for r in trange(R, desc="Theorem 3 replications", ncols=100):
+        for r in trange(R, desc="Convergence replications", ncols=100):
             rows.append(ray.get(futures[r]))
         ray.shutdown()
     else:
         print("Running sequentially")
         rows = []
-        for r in trange(R, desc="Theorem 3 replications", ncols=100):
+        for r in trange(R, desc="Convergence replications", ncols=100):
             rows.append(
-                theorem3_single_replication(
+                convergence_single_replication(
                     rep_keys[r],
                     params_true,
                     Z,
@@ -395,7 +395,7 @@ def run_theorem3_verification(
     df_valid = df[df["status"] == 0].copy()
 
     print("\n" + "=" * 70)
-    print("Theorem 3(i): rate diagnostics")
+    print("Convergence rate diagnostics")
     print("Target: rate_ratio = O_p(1), not exploding across larger settings")
     print("=" * 70)
     rate_summary = {
@@ -413,7 +413,7 @@ def run_theorem3_verification(
     print(pd.Series(rate_summary).round(6).to_string())
 
     print("\n" + "=" * 70)
-    print("Theorem 3(ii): asymptotic normality diagnostics")
+    print("Convergence normality diagnostics")
     print("Target: mean ~ 0, variance ~ 1, P(|Z|>1.96) ~ 0.05")
     print("=" * 70)
     z_rows = []
@@ -439,9 +439,9 @@ def run_theorem3_verification(
         .to_string()
     )
 
+    run_tag = datetime.now().strftime("%Y%m%d_%H.%M.%S")
     out_path = RESULTS_DIR / (
-        f"results_theorem3_T{T}_p{p}_q{q}_seed{seed}_"
-        f"{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
+        f"results_convergence_R={R}_p={p}_q={q}_T={T}_seed={seed}_{run_tag}.csv"
     )
     df.to_csv(out_path, index=False)
     print(f"\nSaved detailed results to: {out_path}")
@@ -457,6 +457,13 @@ def _parse_int_list(value):
     return [int(x.strip()) for x in value.split(",") if x.strip()]
 
 
+def _format_config_values(values):
+    values = list(dict.fromkeys(values))
+    if not values:
+        return "none"
+    return "-".join(str(value) for value in values)
+
+
 def _p_from_rule(T, rule):
     if rule == "sqrt":
         return int(math.floor(math.sqrt(T)))
@@ -465,11 +472,11 @@ def _p_from_rule(T, rule):
     raise ValueError("Unsupported p_rule. Use 'sqrt', 'logT', or pass --p-list.")
 
 
-def summarize_theorem3_grid(df):
+def summarize_convergence_grid(df):
     """
-    Summarize Theorem 3 diagnostics across a grid of (T, p) settings.
+    Summarize convergence diagnostics across a grid of (T, p) settings.
 
-    The table is designed to check the two main implications of Theorem 3:
+    The table is designed to check the two main convergence diagnostics:
 
       1. Rate statement: eta_rmse should decrease and the rate_ratio
          distribution should remain bounded as T and p increase.
@@ -479,7 +486,7 @@ def summarize_theorem3_grid(df):
     Parameters
     ----------
     df : pandas.DataFrame
-        Combined row-level simulation output returned by run_theorem3_verification.
+        Combined row-level simulation output returned by run_convergence_verification.
 
     Returns
     -------
@@ -490,7 +497,7 @@ def summarize_theorem3_grid(df):
         checking whether quantities decrease or remain bounded.
     """
     if df.empty:
-        print("No rows available for Theorem 3 grid summary.")
+        print("No rows available for convergence grid summary.")
         return pd.DataFrame(), pd.DataFrame()
 
     group_cols = ["T", "T_eff", "p", "q", "dist"]
@@ -519,7 +526,7 @@ def summarize_theorem3_grid(df):
         z_true = valid["z_trueomega"].dropna()
 
         row.update({
-            # Theorem 3(i): rate / consistency diagnostics
+            # Rate / consistency diagnostics.
             "eta_bias": valid["eta_error"].mean(),
             "eta_rmse": math.sqrt((valid["eta_error"] ** 2).mean()),
             "sqrtT_rmse": math.sqrt((valid["sqrtT_error"] ** 2).mean()),
@@ -530,7 +537,7 @@ def summarize_theorem3_grid(df):
             "rate_ratio_q95": valid["rate_ratio"].quantile(0.95),
             "boundary_share": valid["on_boundary"].mean(),
 
-            # Theorem 3(ii): normality diagnostics using estimated omega
+            # Normality diagnostics using estimated omega.
             "z_hatomega_n": len(z_hat),
             "z_hatomega_mean": z_hat.mean(),
             "z_hatomega_var": z_hat.var(ddof=0),
@@ -560,7 +567,7 @@ def summarize_theorem3_grid(df):
     summary = pd.DataFrame(rows).sort_values(["T", "p"]).reset_index(drop=True)
 
     print("\n" + "=" * 90)
-    print("Theorem 3 grid summary across increasing T and p")
+    print("Convergence grid summary across increasing T and p")
     print("Check: eta_rmse should decrease; rate ratios should stay bounded; z stats target N(0,1).")
     print("=" * 90)
 
@@ -609,7 +616,7 @@ def summarize_theorem3_grid(df):
 
     trend = pd.DataFrame(trend_rows)
     print("\n" + "=" * 90)
-    print("Theorem 3 trend check")
+    print("Convergence trend check")
     print("nonincreasing=True is ideal for RMSE / condition terms; rate ratios mainly need to stay bounded.")
     print("=" * 90)
     print(trend.round(6).to_string(index=False))
@@ -620,7 +627,7 @@ def summarize_theorem3_grid(df):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run Theorem 3 verification.")
+    parser = argparse.ArgumentParser(description="Run convergence diagnostics.")
     parser.add_argument(
         "--ray-num-cpus",
         type=int,
@@ -649,7 +656,7 @@ if __name__ == "__main__":
 
     all_dfs = []
     for offset, (T, p) in enumerate(zip(T_values, p_values)):
-        df, _, _ = run_theorem3_verification(
+        df, _, _ = run_convergence_verification(
             seed=args.seed + offset,
             R=args.R,
             T=T,
@@ -665,20 +672,20 @@ if __name__ == "__main__":
 
     combined = pd.concat(all_dfs, ignore_index=True)
 
-    summary, trend = summarize_theorem3_grid(combined)
+    summary, trend = summarize_convergence_grid(combined)
 
-    combined_path = RESULTS_DIR / (
-        f"results_theorem3_combined_seed{args.seed}_"
-        f"{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
+    run_tag = datetime.now().strftime("%Y%m%d_%H.%M.%S")
+    config_tag = (
+        f"R={args.R}_"
+        f"p={_format_config_values(p_values)}_"
+        f"q={args.q}_"
+        f"T={_format_config_values(T_values)}_"
+        f"seed={args.seed}_"
+        f"{run_tag}"
     )
-    summary_path = RESULTS_DIR / (
-        f"summary_theorem3_grid_seed{args.seed}_"
-        f"{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
-    )
-    trend_path = RESULTS_DIR / (
-        f"summary_theorem3_trend_seed{args.seed}_"
-        f"{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
-    )
+    combined_path = RESULTS_DIR / f"results_convergence_combined_{config_tag}.csv"
+    summary_path = RESULTS_DIR / f"summary_convergence_grid_{config_tag}.csv"
+    trend_path = RESULTS_DIR / f"summary_convergence_trend_{config_tag}.csv"
 
     combined.to_csv(combined_path, index=False)
     summary.to_csv(summary_path, index=False)

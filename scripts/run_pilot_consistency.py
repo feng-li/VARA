@@ -683,10 +683,10 @@ def run_pilot_consistency_verification(
         .round(4)
     )
 
+    run_tag = datetime.now().strftime("%Y%m%d_%H.%M.%S")
     out_path = RESULTS_DIR / (
         f"results_theorem2_{pilot_mode}_"
-        f"T{T}_p{p}_q{q}_seed{seed}_"
-        f"{datetime.now().strftime('%Y-%m-%d_%H.%M.%S')}.csv"
+        f"R={R}_p={p}_q={q}_T={T}_seed={seed}_{run_tag}.csv"
     )
     df.to_csv(out_path, index=False)
     print(f"\nSaved detailed results to: {out_path}")
