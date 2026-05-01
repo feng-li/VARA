@@ -150,6 +150,7 @@ def simulate_vara(
     params_scale: Dict[str, float],
     batch_size: int = 512,
     dense_threshold: int = 2500,
+    precomputed_attention: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """Simulate observations from the VARA DGP.
 
@@ -157,11 +158,18 @@ def simulate_vara(
     ``Y_t = beta * Y_{t-1} + gamma_a * (W(eta_a) @ Y_{t-1}) + eps_t``.
     Innovations are drawn with unit variance and then scaled coordinatewise by
     ``sqrt(sigma2)``. The initial state is zero.
+
+    If ``precomputed_attention`` is supplied, it is reused for every time step.
+    This is useful for large-``p`` simulations when memory is available and the
+    DGP attention matrix is fixed across replications.
     """
     params = dict(params)
     beta, gamma_a, _ = ensure_stationarity(params["beta"], params["gamma_a"], margin=0.98)
     eta = float(params["eta_a"])
     sigma2 = params["sigma2"]
+    W = precomputed_attention
+    if W is not None and W.shape != (p, p):
+        raise ValueError(f"precomputed_attention must have shape ({p}, {p})")
 
     eps_raw = draw_standard_innovations(key, (T, p), dist=dist)
     eps = eps_raw * jnp.sqrt(sigma2)[None, :]
@@ -171,11 +179,14 @@ def simulate_vara(
     ys.append(y_prev)
 
     for t in range(1, T):
-        Wy = attention_matvec(
-            Z, eta, y_prev, params_scale,
-            batch_size=batch_size,
-            dense_threshold=dense_threshold,
-        )
+        if W is None:
+            Wy = attention_matvec(
+                Z, eta, y_prev, params_scale,
+                batch_size=batch_size,
+                dense_threshold=dense_threshold,
+            )
+        else:
+            Wy = W @ y_prev
         y_t = beta * y_prev + gamma_a * Wy + eps[t]
         ys.append(y_t)
         y_prev = y_t
@@ -591,6 +602,7 @@ def full_single_replication(
     ridge: float,
     batch_size: int,
     dense_threshold: int,
+    dgp_attention: Optional[jnp.ndarray] = None,
 ) -> List[Dict[str, Any]]:
     """Simulate one dataset and run all requested estimation methods.
 
@@ -612,6 +624,7 @@ def full_single_replication(
         params_scale=PARAMS_SCALE,
         batch_size=batch_size,
         dense_threshold=dense_threshold,
+        precomputed_attention=dgp_attention,
     )
 
     rows = []
@@ -745,6 +758,7 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
                 "Z_max_abs_score",
                 "Z_eta_signal",
                 "Z_eta_info",
+                "DGP_attention_precomputed",
                 "stationarity_rescaled",
                 "stationary_lhs_before",
                 "stationary_lhs_after",

@@ -37,6 +37,7 @@ except Exception:
     except Exception:
         RESULTS_DIR = Path("results")
 
+from vara.attention import build_attention
 from vara.dgp import draw_Z, draw_good_Z_for_eta, ensure_stationarity
 from vara.simulation import (
     PARAMS_SCALE,
@@ -189,6 +190,7 @@ def make_simulation_setup_table(
     q: int,
     high_max_p: Optional[int],
     screen_z: bool,
+    precompute_dgp_attention: bool,
 ) -> pd.DataFrame:
     rows = []
     z_rule = (
@@ -219,6 +221,7 @@ def make_simulation_setup_table(
                     "stationarity_margin": SIMULATION_STATIONARITY_MARGIN,
                     "Z_screening": bool(screen_z),
                     "Z_screening_rule": z_rule if screen_z else "none",
+                    "DGP_attention_precomputed": bool(precompute_dgp_attention),
                 })
     return pd.DataFrame(rows)
 
@@ -239,6 +242,7 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "Z_max_abs_score",
         "Z_eta_signal",
         "Z_eta_info",
+        "DGP_attention_precomputed",
         "stationarity_rescaled",
         "stationary_lhs_after",
     ]
@@ -289,6 +293,8 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
 class FullSimulationActor:
     def run(self, *args, **kwargs):
         try:
+            if isinstance(kwargs.get("dgp_attention"), ray.ObjectRef):
+                kwargs["dgp_attention"] = ray.get(kwargs["dgp_attention"])
             out = full_single_replication(*args, **kwargs)
             gc.collect()
             return out
@@ -347,6 +353,7 @@ def run_full_simulation(
     batch_size: int = 512,
     dense_threshold: int = 2500,
     screen_z: bool = True,
+    precompute_dgp_attention: bool = False,
     high_max_p: Optional[int] = None,
     results_dir: Path = RESULTS_DIR,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -392,6 +399,7 @@ def run_full_simulation(
         q=q,
         high_max_p=high_max_p,
         screen_z=screen_z,
+        precompute_dgp_attention=precompute_dgp_attention,
     )
 
     for setting in settings:
@@ -431,6 +439,15 @@ def run_full_simulation(
                     Z = draw_Z(k_Z, p, q)
                     Z_info = {"screened": False}
 
+                dgp_attention = None
+                if precompute_dgp_attention:
+                    dgp_attention = build_attention(
+                        Z,
+                        float(params_true["eta_a"]),
+                        PARAMS_SCALE["eta_a"],
+                    )
+                    dgp_attention.block_until_ready()
+
                 print("\n" + "=" * 80)
                 print("Full VARA simulation setting")
                 print("=" * 80)
@@ -444,6 +461,7 @@ def run_full_simulation(
                 print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
                 print(f"stationary   : {not bool(stat_info['rescaled'])}")
                 print(f"screen_z     : {screen_z}, Z_info={Z_info}")
+                print(f"dgp_attention: {'precomputed' if dgp_attention is not None else 'on demand'}")
                 print("=" * 80)
 
                 rep_keys = jax.random.split(k_rep, R)
@@ -461,6 +479,7 @@ def run_full_simulation(
                         FullSimulationActor.options(num_cpus=max_cpus_per_task).remote()
                         for _ in range(n_actors)
                     ]
+                    dgp_attention_arg = ray.put(dgp_attention) if dgp_attention is not None else None
                     futures = [
                         actors[r % n_actors].run.remote(
                             rep=r,
@@ -483,6 +502,7 @@ def run_full_simulation(
                             ridge=ridge,
                             batch_size=batch_size,
                             dense_threshold=dense_threshold,
+                            dgp_attention=dgp_attention_arg,
                         )
                         for r in range(R)
                     ]
@@ -514,6 +534,7 @@ def run_full_simulation(
                             ridge=ridge,
                             batch_size=batch_size,
                             dense_threshold=dense_threshold,
+                            dgp_attention=dgp_attention,
                         ))
 
                 elapsed_setting = (datetime.now() - setting_start).total_seconds()
@@ -526,6 +547,7 @@ def run_full_simulation(
                     row["Z_max_abs_score"] = Z_info.get("max_abs_score", math.nan)
                     row["Z_eta_signal"] = Z_info.get("eta_signal", math.nan)
                     row["Z_eta_info"] = Z_info.get("eta_info", math.nan)
+                    row["DGP_attention_precomputed"] = bool(precompute_dgp_attention)
                     row["stationarity_rescaled"] = bool(stat_info["rescaled"])
                     row["stationary_lhs_before"] = float(stat_info["lhs_before"])
                     row["stationary_lhs_after"] = float(stat_info["lhs_after"])
@@ -609,6 +631,12 @@ def main():
         help="Screen Z for eta identification. Use --no-screen-z to draw an unscreened design.",
     )
     parser.add_argument(
+        "--precompute-dgp-attention",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Build W(eta_true) once per setting and reuse it during DGP simulation.",
+    )
+    parser.add_argument(
         "--high-max-p",
         type=int,
         default=None,
@@ -637,6 +665,7 @@ def main():
         batch_size=args.batch_size,
         dense_threshold=args.dense_threshold,
         screen_z=args.screen_z,
+        precompute_dgp_attention=args.precompute_dgp_attention,
         high_max_p=args.high_max_p,
         results_dir=Path(args.results_dir),
     )

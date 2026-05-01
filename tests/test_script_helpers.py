@@ -68,6 +68,7 @@ class ScriptHelperTests(unittest.TestCase):
             q=50,
             high_max_p=2000,
             screen_z=True,
+            precompute_dgp_attention=True,
         )
         summary = pd.DataFrame([
             {
@@ -89,6 +90,7 @@ class ScriptHelperTests(unittest.TestCase):
                 "eta_boundary_rate": 0.0,
                 "Z_accepted": True,
                 "Z_eta_signal": 0.2,
+                "DGP_attention_precomputed": True,
             },
             {
                 "setting": "high",
@@ -109,6 +111,7 @@ class ScriptHelperTests(unittest.TestCase):
                 "eta_boundary_rate": 0.1,
                 "Z_accepted": True,
                 "Z_eta_signal": 0.3,
+                "DGP_attention_precomputed": True,
             },
         ])
 
@@ -118,6 +121,7 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertEqual(list(tables["high_rmse"]["method"]), ["two_stage"])
         self.assertNotIn("ECP_gamma", tables["high_ecp"].columns)
         self.assertIn("eta_boundary_rate", tables["eta_diagnostics"].columns)
+        self.assertIn("DGP_attention_precomputed", tables["eta_diagnostics"].columns)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from vara.attention import build_attention
 from vara.dgp import draw_Z, ensure_stationarity
 from vara.simulation import (
     PARAMS_SCALE,
@@ -92,6 +93,57 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(Y.shape, (T, p))
         np.testing.assert_allclose(np.asarray(Y[0]), np.zeros(p), atol=1e-7)
         self.assertTrue(bool(jnp.isfinite(Y).all()))
+
+    def test_simulate_vara_matches_precomputed_attention(self):
+        p, q, T = 4, 5, 10
+        key = jax.random.PRNGKey(456)
+        params = {
+            "eta_a": jnp.asarray(0.5),
+            "gamma_a": jnp.array([0.15, 0.2, 0.25, 0.18]),
+            "beta": jnp.array([0.1, -0.1, 0.05, 0.02]),
+            "sigma2": jnp.array([0.5, 0.7, 1.0, 0.8]),
+        }
+        Z = draw_Z(key, p, q)
+        W = build_attention(Z, float(params["eta_a"]), PARAMS_SCALE["eta_a"])
+
+        Y_on_demand = simulate_vara(key, params, Z, T, p, q, "normal", PARAMS_SCALE)
+        Y_precomputed = simulate_vara(
+            key,
+            params,
+            Z,
+            T,
+            p,
+            q,
+            "normal",
+            PARAMS_SCALE,
+            precomputed_attention=W,
+        )
+
+        np.testing.assert_allclose(np.asarray(Y_precomputed), np.asarray(Y_on_demand), rtol=1e-7, atol=1e-7)
+
+    def test_simulate_vara_rejects_wrong_precomputed_attention_shape(self):
+        p, q, T = 3, 4, 8
+        key = jax.random.PRNGKey(789)
+        params = {
+            "eta_a": jnp.asarray(0.5),
+            "gamma_a": jnp.array([0.15, 0.2, 0.25]),
+            "beta": jnp.array([0.1, -0.1, 0.05]),
+            "sigma2": jnp.array([0.5, 0.7, 1.0]),
+        }
+        Z = draw_Z(key, p, q)
+
+        with self.assertRaises(ValueError):
+            simulate_vara(
+                key,
+                params,
+                Z,
+                T,
+                p,
+                q,
+                "normal",
+                PARAMS_SCALE,
+                precomputed_attention=jnp.eye(p + 1),
+            )
 
     def test_golden_section_maximize_finds_quadratic_maximum(self):
         fn = lambda x: -(x - 1.25) ** 2 + 3.0
