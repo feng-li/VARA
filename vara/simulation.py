@@ -732,11 +732,32 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
                 "LEN_beta": float(valid["beta_ci_len"].mean()),
                 "LEN_sigma2": float(valid["sigma2_ci_len"].mean()),
             })
+            if "eta_on_boundary" in valid.columns:
+                rec["eta_boundary_rate"] = float(valid["eta_on_boundary"].fillna(False).mean())
+            else:
+                rec["eta_boundary_rate"] = math.nan
+
+            optional_first_cols = [
+                "Z_screened",
+                "Z_accepted",
+                "Z_attempt",
+                "Z_offdiag_std",
+                "Z_max_abs_score",
+                "Z_eta_signal",
+                "Z_eta_info",
+                "stationarity_rescaled",
+                "stationary_lhs_before",
+                "stationary_lhs_after",
+            ]
+            for col in optional_first_cols:
+                if col in valid.columns:
+                    rec[col] = valid[col].iloc[0]
         else:
             for name in ["gamma", "alpha", "beta", "sigma2"]:
                 rec[f"RMSE_{name}"] = math.nan
                 rec[f"ECP_{name}"] = math.nan
                 rec[f"LEN_{name}"] = math.nan
+            rec["eta_boundary_rate"] = math.nan
         records.append(rec)
 
     return pd.DataFrame(records).sort_values(["setting", "dist", "T", "method"])
