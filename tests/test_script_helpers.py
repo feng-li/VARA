@@ -50,7 +50,7 @@ class ScriptHelperTests(unittest.TestCase):
     def test_draw_simulation_dgp_params_uses_identification_stable_ranges(self):
         params, stat_info = draw_simulation_dgp_params(jax.random.PRNGKey(2026), p=10)
 
-        self.assertAlmostEqual(float(params["eta_a"]), 0.5)
+        self.assertAlmostEqual(float(params["eta_a"]), 1.0)
         self.assertTrue(bool(jnp.all(params["gamma_a"] >= 0.15)))
         self.assertTrue(bool(jnp.all(params["gamma_a"] <= 0.30)))
         self.assertTrue(bool(jnp.all(params["beta"] >= -0.20)))
@@ -69,6 +69,15 @@ class ScriptHelperTests(unittest.TestCase):
             high_max_p=2000,
             screen_z=True,
             precompute_dgp_attention=True,
+            require_good_z=True,
+            dgp_eta_a=1.0,
+            z_max_tries=200,
+            z_score_quantile=0.999,
+            z_max_abs_score=5.0,
+            z_min_eta_signal=0.05,
+            z_min_eta_info=0.05,
+            z_min_attention_x2_std=0.02,
+            z_max_attention_effective_neighbors=1000.0,
         )
         summary = pd.DataFrame([
             {
@@ -90,6 +99,8 @@ class ScriptHelperTests(unittest.TestCase):
                 "eta_boundary_rate": 0.0,
                 "Z_accepted": True,
                 "Z_eta_signal": 0.2,
+                "Z_attention_x2_std_mean": 0.04,
+                "Z_attention_effective_neighbors_mean": 500.0,
                 "DGP_attention_precomputed": True,
             },
             {
@@ -111,6 +122,8 @@ class ScriptHelperTests(unittest.TestCase):
                 "eta_boundary_rate": 0.1,
                 "Z_accepted": True,
                 "Z_eta_signal": 0.3,
+                "Z_attention_x2_std_mean": 0.05,
+                "Z_attention_effective_neighbors_mean": 600.0,
                 "DGP_attention_precomputed": True,
             },
         ])
@@ -121,6 +134,7 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertEqual(list(tables["high_rmse"]["method"]), ["two_stage"])
         self.assertNotIn("ECP_gamma", tables["high_ecp"].columns)
         self.assertIn("eta_boundary_rate", tables["eta_diagnostics"].columns)
+        self.assertIn("Z_attention_x2_std_mean", tables["eta_diagnostics"].columns)
         self.assertIn("DGP_attention_precomputed", tables["eta_diagnostics"].columns)
 
 

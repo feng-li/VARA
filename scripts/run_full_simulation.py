@@ -49,7 +49,7 @@ from vara.simulation import (
 )
 
 
-SIMULATION_ETA_A = 0.5
+SIMULATION_ETA_A = 1.0
 SIMULATION_GAMMA_A_MIN = 0.15
 SIMULATION_GAMMA_A_MAX = 0.30
 SIMULATION_BETA_MIN = -0.20
@@ -60,8 +60,12 @@ SIMULATION_STATIONARITY_MARGIN = 0.98
 
 SIMULATION_Z_MAX_TRIES = 200
 SIMULATION_Z_MIN_OFFDIAG_STD = 0.15
-SIMULATION_Z_MAX_ABS_SCORE = 3.0
+SIMULATION_Z_MAX_ABS_SCORE = 5.0
 SIMULATION_Z_MIN_ETA_SIGNAL = 0.05
+SIMULATION_Z_SCORE_QUANTILE = 0.999
+SIMULATION_Z_MIN_ETA_INFO = 0.05
+SIMULATION_Z_MIN_ATTENTION_X2_STD = 0.02
+SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS = 1000.0
 
 
 def _parse_int_list(value: str) -> List[int]:
@@ -156,11 +160,15 @@ def _simulation_reporting_output_paths(results_dir: Path, config_tag: str) -> Di
     }
 
 
-def draw_simulation_dgp_params(key: jax.Array, p: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def draw_simulation_dgp_params(
+    key: jax.Array,
+    p: int,
+    eta_a: float = SIMULATION_ETA_A,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Draw the strengthened DGP used by the full simulation driver."""
     k_gamma, k_beta, k_sig = jax.random.split(key, 3)
     params_true = {
-        "eta_a": jnp.asarray(SIMULATION_ETA_A),
+        "eta_a": jnp.asarray(eta_a),
         "gamma_a": jax.random.uniform(
             k_gamma, (p,), minval=SIMULATION_GAMMA_A_MIN, maxval=SIMULATION_GAMMA_A_MAX
         ),
@@ -191,13 +199,25 @@ def make_simulation_setup_table(
     high_max_p: Optional[int],
     screen_z: bool,
     precompute_dgp_attention: bool,
+    require_good_z: bool,
+    dgp_eta_a: float,
+    z_max_tries: int,
+    z_score_quantile: float,
+    z_max_abs_score: float,
+    z_min_eta_signal: float,
+    z_min_eta_info: float,
+    z_min_attention_x2_std: float,
+    z_max_attention_effective_neighbors: float,
 ) -> pd.DataFrame:
     rows = []
     z_rule = (
-        f"max_tries={SIMULATION_Z_MAX_TRIES}; "
+        f"max_tries={z_max_tries}; "
         f"min_offdiag_std={SIMULATION_Z_MIN_OFFDIAG_STD}; "
-        f"max_abs_score={SIMULATION_Z_MAX_ABS_SCORE}; "
-        f"min_eta_signal={SIMULATION_Z_MIN_ETA_SIGNAL}"
+        f"q{z_score_quantile:g}_abs_score<={z_max_abs_score}; "
+        f"min_eta_signal={z_min_eta_signal}; "
+        f"min_eta_info={z_min_eta_info}; "
+        f"min_attention_x2_std={z_min_attention_x2_std}; "
+        f"max_effective_neighbors={z_max_attention_effective_neighbors}"
     )
     for setting in settings:
         p_rule = "floor(sqrt(T))" if setting == "low" else "floor(T^1.5)"
@@ -214,13 +234,14 @@ def make_simulation_setup_table(
                     "p": int(p),
                     "q": int(q),
                     "R": int(R),
-                    "gamma": SIMULATION_ETA_A,
+                    "gamma": dgp_eta_a,
                     "alpha_range": f"U({SIMULATION_BETA_MIN:.2f},{SIMULATION_BETA_MAX:.2f})",
                     "beta_range": f"U({SIMULATION_GAMMA_A_MIN:.2f},{SIMULATION_GAMMA_A_MAX:.2f})",
                     "sigma2_range": f"U({SIMULATION_SIGMA2_MIN:.2f},{SIMULATION_SIGMA2_MAX:.2f})",
                     "stationarity_margin": SIMULATION_STATIONARITY_MARGIN,
                     "Z_screening": bool(screen_z),
                     "Z_screening_rule": z_rule if screen_z else "none",
+                    "Z_require_accepted": bool(require_good_z),
                     "DGP_attention_precomputed": bool(precompute_dgp_attention),
                 })
     return pd.DataFrame(rows)
@@ -240,8 +261,16 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "Z_attempt",
         "Z_offdiag_std",
         "Z_max_abs_score",
+        "Z_score_quantile",
+        "Z_abs_score_quantile",
         "Z_eta_signal",
         "Z_eta_info",
+        "Z_attention_x2_std_mean",
+        "Z_attention_x2_std_min",
+        "Z_attention_effective_neighbors_mean",
+        "Z_attention_effective_neighbors_p95",
+        "Z_attention_max_weight_mean",
+        "Z_selection_score",
         "DGP_attention_precomputed",
         "stationarity_rescaled",
         "stationary_lhs_after",
@@ -354,6 +383,15 @@ def run_full_simulation(
     dense_threshold: int = 2500,
     screen_z: bool = True,
     precompute_dgp_attention: bool = False,
+    require_good_z: bool = False,
+    dgp_eta_a: float = SIMULATION_ETA_A,
+    z_max_tries: int = SIMULATION_Z_MAX_TRIES,
+    z_score_quantile: float = SIMULATION_Z_SCORE_QUANTILE,
+    z_max_abs_score: float = SIMULATION_Z_MAX_ABS_SCORE,
+    z_min_eta_signal: float = SIMULATION_Z_MIN_ETA_SIGNAL,
+    z_min_eta_info: float = SIMULATION_Z_MIN_ETA_INFO,
+    z_min_attention_x2_std: float = SIMULATION_Z_MIN_ATTENTION_X2_STD,
+    z_max_attention_effective_neighbors: float = SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS,
     high_max_p: Optional[int] = None,
     results_dir: Path = RESULTS_DIR,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -400,6 +438,15 @@ def run_full_simulation(
         high_max_p=high_max_p,
         screen_z=screen_z,
         precompute_dgp_attention=precompute_dgp_attention,
+        require_good_z=require_good_z,
+        dgp_eta_a=dgp_eta_a,
+        z_max_tries=z_max_tries,
+        z_score_quantile=z_score_quantile,
+        z_max_abs_score=z_max_abs_score,
+        z_min_eta_signal=z_min_eta_signal,
+        z_min_eta_info=z_min_eta_info,
+        z_min_attention_x2_std=z_min_attention_x2_std,
+        z_max_attention_effective_neighbors=z_max_attention_effective_neighbors,
     )
 
     for setting in settings:
@@ -414,6 +461,7 @@ def run_full_simulation(
                     continue
 
                 methods = ["two_stage"] if setting == "high" else ["qmle", "two_stage"]
+                p_rule = "floor(T^1.5)" if setting == "high" else "floor(sqrt(T))"
                 grid_size_use = int(
                     high_grid_size
                     if (setting == "high" and high_grid_size is not None)
@@ -421,7 +469,38 @@ def run_full_simulation(
                 )
 
                 key, k_params, k_Z, k_rep = jax.random.split(key, 4)
-                params_true, stat_info = draw_simulation_dgp_params(k_params, p)
+                params_true, stat_info = draw_simulation_dgp_params(k_params, p, eta_a=dgp_eta_a)
+
+                print("\n" + "=" * 80)
+                print("Full VARA simulation setting")
+                print("=" * 80)
+                print(f"setting      : {setting}")
+                print(f"dist         : {dist}")
+                print(f"T, p, q      : {T}, {p}, {q}")
+                print(f"p_rule       : {p_rule}")
+                print(f"R            : {R}")
+                print(f"methods      : {methods}")
+                print(f"seed         : {seed}")
+                print(f"grid_size    : {grid_size_use}")
+                print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
+                print(f"dgp_eta_a    : {float(params_true['eta_a']):.4f}")
+                print(f"stationary   : {not bool(stat_info['rescaled'])}")
+                print(f"stationary_lhs: {float(stat_info['lhs_after']):.4f}")
+                print(f"screen_z     : {screen_z}")
+                if screen_z:
+                    print(
+                        "Z screening  : "
+                        f"max_tries={z_max_tries}, "
+                        f"q{z_score_quantile:g}_abs_score<={z_max_abs_score}, "
+                        f"min_eta_signal={z_min_eta_signal}, "
+                        f"min_eta_info={z_min_eta_info}, "
+                        f"min_x2_std={z_min_attention_x2_std}, "
+                        f"max_eff_neighbors={z_max_attention_effective_neighbors}, "
+                        f"require_good_z={require_good_z}"
+                    )
+                print(f"dgp_attention: {'precompute requested' if precompute_dgp_attention else 'on demand'}")
+                print("=" * 80)
+
                 if screen_z:
                     Z, Z_info = draw_good_Z_for_eta(
                         key=k_Z,
@@ -429,10 +508,15 @@ def run_full_simulation(
                         q=q,
                         params_true=params_true,
                         params_scale=PARAMS_SCALE,
-                        max_tries=SIMULATION_Z_MAX_TRIES,
+                        max_tries=z_max_tries,
                         min_offdiag_std=SIMULATION_Z_MIN_OFFDIAG_STD,
-                        max_abs_score=SIMULATION_Z_MAX_ABS_SCORE,
-                        min_eta_signal=SIMULATION_Z_MIN_ETA_SIGNAL,
+                        max_abs_score=z_max_abs_score,
+                        min_eta_signal=z_min_eta_signal,
+                        score_quantile=z_score_quantile,
+                        min_eta_info=z_min_eta_info,
+                        min_attention_x2_std=z_min_attention_x2_std,
+                        max_attention_effective_neighbors=z_max_attention_effective_neighbors,
+                        require_accepted=require_good_z,
                         verbose=True,
                     )
                 else:
@@ -448,21 +532,8 @@ def run_full_simulation(
                     )
                     dgp_attention.block_until_ready()
 
-                print("\n" + "=" * 80)
-                print("Full VARA simulation setting")
-                print("=" * 80)
-                print(f"setting      : {setting}")
-                print(f"dist         : {dist}")
-                print(f"T, p, q      : {T}, {p}, {q}")
-                print(f"R            : {R}")
-                print(f"methods      : {methods}")
-                print(f"seed         : {seed}")
-                print(f"grid_size    : {grid_size_use}")
-                print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
-                print(f"stationary   : {not bool(stat_info['rescaled'])}")
-                print(f"screen_z     : {screen_z}, Z_info={Z_info}")
+                print(f"Z_info       : {Z_info}")
                 print(f"dgp_attention: {'precomputed' if dgp_attention is not None else 'on demand'}")
-                print("=" * 80)
 
                 rep_keys = jax.random.split(k_rep, R)
                 setting_start = datetime.now()
@@ -545,8 +616,16 @@ def run_full_simulation(
                     row["Z_attempt"] = Z_info.get("attempt", math.nan)
                     row["Z_offdiag_std"] = Z_info.get("offdiag_std", math.nan)
                     row["Z_max_abs_score"] = Z_info.get("max_abs_score", math.nan)
+                    row["Z_score_quantile"] = Z_info.get("score_quantile", math.nan)
+                    row["Z_abs_score_quantile"] = Z_info.get("abs_score_quantile", math.nan)
                     row["Z_eta_signal"] = Z_info.get("eta_signal", math.nan)
                     row["Z_eta_info"] = Z_info.get("eta_info", math.nan)
+                    row["Z_attention_x2_std_mean"] = Z_info.get("attention_x2_std_mean", math.nan)
+                    row["Z_attention_x2_std_min"] = Z_info.get("attention_x2_std_min", math.nan)
+                    row["Z_attention_effective_neighbors_mean"] = Z_info.get("attention_effective_neighbors_mean", math.nan)
+                    row["Z_attention_effective_neighbors_p95"] = Z_info.get("attention_effective_neighbors_p95", math.nan)
+                    row["Z_attention_max_weight_mean"] = Z_info.get("attention_max_weight_mean", math.nan)
+                    row["Z_selection_score"] = Z_info.get("selection_score", math.nan)
                     row["DGP_attention_precomputed"] = bool(precompute_dgp_attention)
                     row["stationarity_rescaled"] = bool(stat_info["rescaled"])
                     row["stationary_lhs_before"] = float(stat_info["lhs_before"])
@@ -613,6 +692,12 @@ def main():
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument("--alpha", type=float, default=0.05)
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
+    parser.add_argument(
+        "--dgp-eta-a",
+        type=float,
+        default=SIMULATION_ETA_A,
+        help="True DGP eta_a. Paper gamma in repository mapping.",
+    )
 
     parser.add_argument("--qmle-algorithm", type=str, default="lbfgs")
     parser.add_argument("--qmle-perturb-scale", type=float, default=0.05)
@@ -635,6 +720,23 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Build W(eta_true) once per setting and reuse it during DGP simulation.",
+    )
+    parser.add_argument(
+        "--require-good-z",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fail a setting if screened Z does not pass all eta-identification checks.",
+    )
+    parser.add_argument("--z-max-tries", type=int, default=SIMULATION_Z_MAX_TRIES)
+    parser.add_argument("--z-score-quantile", type=float, default=SIMULATION_Z_SCORE_QUANTILE)
+    parser.add_argument("--z-max-abs-score", type=float, default=SIMULATION_Z_MAX_ABS_SCORE)
+    parser.add_argument("--z-min-eta-signal", type=float, default=SIMULATION_Z_MIN_ETA_SIGNAL)
+    parser.add_argument("--z-min-eta-info", type=float, default=SIMULATION_Z_MIN_ETA_INFO)
+    parser.add_argument("--z-min-attention-x2-std", type=float, default=SIMULATION_Z_MIN_ATTENTION_X2_STD)
+    parser.add_argument(
+        "--z-max-attention-effective-neighbors",
+        type=float,
+        default=SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS,
     )
     parser.add_argument(
         "--high-max-p",
@@ -666,6 +768,15 @@ def main():
         dense_threshold=args.dense_threshold,
         screen_z=args.screen_z,
         precompute_dgp_attention=args.precompute_dgp_attention,
+        require_good_z=args.require_good_z,
+        dgp_eta_a=args.dgp_eta_a,
+        z_max_tries=args.z_max_tries,
+        z_score_quantile=args.z_score_quantile,
+        z_max_abs_score=args.z_max_abs_score,
+        z_min_eta_signal=args.z_min_eta_signal,
+        z_min_eta_info=args.z_min_eta_info,
+        z_min_attention_x2_std=args.z_min_attention_x2_std,
+        z_max_attention_effective_neighbors=args.z_max_attention_effective_neighbors,
         high_max_p=args.high_max_p,
         results_dir=Path(args.results_dir),
     )

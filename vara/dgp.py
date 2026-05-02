@@ -149,6 +149,11 @@ def draw_good_Z_for_eta(
     min_offdiag_std=0.15,
     max_abs_score=3.0,
     min_eta_signal=0.1,
+    score_quantile=0.999,
+    min_eta_info=0.0,
+    min_attention_x2_std=0.0,
+    max_attention_effective_neighbors=None,
+    require_accepted=False,
     verbose=True,
 ):
     """
@@ -165,11 +170,14 @@ def draw_good_Z_for_eta(
     Evaluate all ``max_tries`` candidates and select the candidate with the
     largest eta information proxy among designs that pass:
       1) off-diagonal similarity scores have enough spread,
-      2) no score is too extreme,
-      3) the eta-direction signal ||diag(gamma_a) W_dot|| is not too small.
+      2) a robust upper-tail score is not too extreme,
+      3) the eta-direction signal ||diag(gamma_a) W_dot|| is not too small,
+      4) the attention-weighted lag has enough variance,
+      5) attention is not too diffuse in high-dimensional designs.
 
     If no candidate passes all screens, fall back to the candidate with the
-    largest eta information proxy among all draws.
+    largest composite identification score among all draws unless
+    ``require_accepted=True``.
 
     Returns
     -------
@@ -184,6 +192,9 @@ def draw_good_Z_for_eta(
     best_good_info = None
     best_good_score = float("-inf")
     best_any_score = float("-inf")
+    score_quantile = float(score_quantile)
+    if not (0.0 < score_quantile <= 1.0):
+        raise ValueError("score_quantile must be in (0, 1].")
 
     gamma_a_raw = params_true["gamma_a"]
     beta_raw = params_true.get("beta", jnp.zeros_like(gamma_a_raw))
@@ -211,24 +222,58 @@ def draw_good_Z_for_eta(
         eta_signal = jnp.linalg.norm(eta_deriv)
         eta_info = jnp.sum((sigma2_inv[:, None] * eta_deriv) * (eta_deriv @ Gamma0))
         off_std = jnp.std(off)
-        max_score = jnp.max(jnp.abs(off))
+        abs_off = jnp.abs(off)
+        max_score = jnp.max(abs_off)
+        score_tail = jnp.quantile(abs_off, score_quantile)
+
+        row_l2 = jnp.sum(Wa ** 2, axis=1)
+        eff_neighbors = 1.0 / jnp.maximum(row_l2, 1e-12)
+        gamma0_diag_proxy = sigma2 / jnp.maximum(
+            1.0 - jnp.minimum((jnp.abs(beta) + jnp.abs(gamma_a)) ** 2, 0.99),
+            1e-6,
+        )
+        x2_var_proxy = Wa ** 2 @ gamma0_diag_proxy
+        x2_std_proxy = jnp.sqrt(jnp.maximum(x2_var_proxy, 0.0))
+        attention_x2_std_mean = jnp.mean(x2_std_proxy)
+        attention_x2_std_min = jnp.min(x2_std_proxy)
+        attention_effective_neighbors_mean = jnp.mean(eff_neighbors)
+        attention_effective_neighbors_p95 = jnp.quantile(eff_neighbors, 0.95)
+        attention_max_weight_mean = jnp.mean(jnp.max(Wa, axis=1))
 
         good_design = bool(
             (off_std > min_offdiag_std) and
-            (max_score < max_abs_score) and
-            (eta_signal > min_eta_signal)
+            (score_tail < max_abs_score) and
+            (eta_signal > min_eta_signal) and
+            (eta_info > min_eta_info) and
+            (attention_x2_std_mean > min_attention_x2_std) and
+            (
+                max_attention_effective_neighbors is None or
+                attention_effective_neighbors_mean < max_attention_effective_neighbors
+            )
         )
 
         info = {
             "attempt": attempt + 1,
             "offdiag_std": float(off_std),
             "max_abs_score": float(max_score),
+            "score_quantile": score_quantile,
+            "abs_score_quantile": float(score_tail),
             "eta_signal": float(eta_signal),
             "eta_info": float(eta_info),
+            "attention_x2_std_mean": float(attention_x2_std_mean),
+            "attention_x2_std_min": float(attention_x2_std_min),
+            "attention_effective_neighbors_mean": float(attention_effective_neighbors_mean),
+            "attention_effective_neighbors_p95": float(attention_effective_neighbors_p95),
+            "attention_max_weight_mean": float(attention_max_weight_mean),
             "accepted": good_design,
         }
 
-        score_value = float(eta_info)
+        score_value = float(
+            eta_info
+            * jnp.maximum(attention_x2_std_mean, 1e-12)
+            / jnp.sqrt(jnp.maximum(attention_effective_neighbors_mean, 1.0))
+        )
+        info["selection_score"] = score_value
         if score_value > best_any_score:
             best_any_score = score_value
             best_Z = Z
@@ -247,12 +292,21 @@ def draw_good_Z_for_eta(
             f"attempt={selected_info['attempt']}, "
             f"offdiag_std={selected_info['offdiag_std']:.4f}, "
             f"max_abs_score={selected_info['max_abs_score']:.4f}, "
+            f"q{selected_info['score_quantile']:.3f}_abs_score={selected_info['abs_score_quantile']:.4f}, "
             f"eta_signal={selected_info['eta_signal']:.4f}, "
-            f"eta_info={selected_info['eta_info']:.4f}"
+            f"eta_info={selected_info['eta_info']:.4f}, "
+            f"x2_std_mean={selected_info['attention_x2_std_mean']:.4f}, "
+            f"eff_neighbors_mean={selected_info['attention_effective_neighbors_mean']:.1f}"
         )
 
     if best_good_Z is not None:
         return best_good_Z, best_good_info
+    if require_accepted:
+        raise RuntimeError(
+            "No candidate Z passed eta-identification screening. "
+            "Try increasing eta_a, using structured/sparser attention, relaxing "
+            "the screening thresholds, or increasing max_tries."
+        )
     return best_Z, best_info
 
 
