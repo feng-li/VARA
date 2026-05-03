@@ -464,8 +464,25 @@ def _select_best_z_result(
     info["parallel_accepted_chunks"] = len(accepted)
 
     if require_good_z and not accepted:
+        best_msg = (
+            f"Best rejected candidate: attempt={info.get('attempt')}, "
+            f"offdiag_std={info.get('offdiag_std', math.nan):.4f}, "
+            f"max_abs_score={info.get('max_abs_score', math.nan):.4f}, "
+            f"q{info.get('score_quantile', math.nan):.3f}_abs_score={info.get('abs_score_quantile', math.nan):.4f}, "
+            f"eta_signal={info.get('eta_signal', math.nan):.4f}, "
+            f"eta_info={info.get('eta_info', math.nan):.4f}, "
+            f"x2_std_mean={info.get('attention_x2_std_mean', math.nan):.4f}, "
+            f"eff_neighbors_mean={info.get('attention_effective_neighbors_mean', math.nan):.1f}, "
+            f"eff_neighbors_limit={info.get('attention_effective_neighbors_limit', math.nan):.1f}, "
+            f"approximate={bool(info.get('approximate', False))}, "
+            f"approx_rows={info.get('approx_rows', math.nan)}, "
+            f"approx_pairs={info.get('approx_pairs', math.nan)}, "
+            f"parallel_chunks={len(results)}, "
+            f"parallel_accepted_chunks={len(accepted)}."
+        )
         raise RuntimeError(
             "No candidate Z passed eta-identification screening. "
+            f"{best_msg} "
             "Try increasing eta_a, using structured/sparser attention, relaxing "
             "the screening thresholds, or increasing max_tries."
         )
