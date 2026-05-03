@@ -752,6 +752,10 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
 
             optional_first_cols = [
                 "Z_screened",
+                "Z_parallel",
+                "Z_parallel_workers",
+                "Z_parallel_chunks",
+                "Z_parallel_accepted_chunks",
                 "Z_accepted",
                 "Z_attempt",
                 "Z_offdiag_std",
@@ -764,6 +768,7 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
                 "Z_attention_x2_std_min",
                 "Z_attention_effective_neighbors_mean",
                 "Z_attention_effective_neighbors_p95",
+                "Z_attention_effective_neighbors_limit",
                 "Z_attention_max_weight_mean",
                 "Z_selection_score",
                 "DGP_attention_precomputed",

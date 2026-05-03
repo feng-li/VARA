@@ -66,6 +66,7 @@ SIMULATION_Z_SCORE_QUANTILE = 0.999
 SIMULATION_Z_MIN_ETA_INFO = 0.05
 SIMULATION_Z_MIN_ATTENTION_X2_STD = 0.02
 SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS = 1000.0
+SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBOR_FRACTION = 0.25
 
 
 def _parse_int_list(value: str) -> List[int]:
@@ -91,6 +92,11 @@ def _format_config_values(values: Sequence[Any]) -> str:
     if not values:
         return "none"
     return "-".join(str(value) for value in values)
+
+
+def _print_progress(message: str) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 def _full_simulation_config_tag(
@@ -208,6 +214,7 @@ def make_simulation_setup_table(
     z_min_eta_info: float,
     z_min_attention_x2_std: float,
     z_max_attention_effective_neighbors: float,
+    z_max_attention_effective_neighbor_fraction: float,
 ) -> pd.DataFrame:
     rows = []
     z_rule = (
@@ -217,7 +224,8 @@ def make_simulation_setup_table(
         f"min_eta_signal={z_min_eta_signal}; "
         f"min_eta_info={z_min_eta_info}; "
         f"min_attention_x2_std={z_min_attention_x2_std}; "
-        f"max_effective_neighbors={z_max_attention_effective_neighbors}"
+        f"max_effective_neighbors=max({z_max_attention_effective_neighbors},"
+        f"{z_max_attention_effective_neighbor_fraction}*p)"
     )
     for setting in settings:
         p_rule = "floor(sqrt(T))" if setting == "low" else "floor(T^1.5)"
@@ -257,6 +265,10 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "valid_rate",
         "eta_boundary_rate",
         "Z_screened",
+        "Z_parallel",
+        "Z_parallel_workers",
+        "Z_parallel_chunks",
+        "Z_parallel_accepted_chunks",
         "Z_accepted",
         "Z_attempt",
         "Z_offdiag_std",
@@ -269,6 +281,7 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "Z_attention_x2_std_min",
         "Z_attention_effective_neighbors_mean",
         "Z_attention_effective_neighbors_p95",
+        "Z_attention_effective_neighbors_limit",
         "Z_attention_max_weight_mean",
         "Z_selection_score",
         "DGP_attention_precomputed",
@@ -361,6 +374,151 @@ class FullSimulationActor:
             return rows
 
 
+@ray.remote
+def draw_good_z_chunk_remote(
+    *,
+    key,
+    p: int,
+    q: int,
+    params_true,
+    params_scale,
+    attempt_start: int,
+    max_tries: int,
+    min_offdiag_std: float,
+    max_abs_score: float,
+    min_eta_signal: float,
+    score_quantile: float,
+    min_eta_info: float,
+    min_attention_x2_std: float,
+    max_attention_effective_neighbors: Optional[float],
+    max_attention_effective_neighbor_fraction: Optional[float],
+):
+    """Score a contiguous chunk of candidate Z designs."""
+    return draw_good_Z_for_eta(
+        key=key,
+        p=p,
+        q=q,
+        params_true=params_true,
+        params_scale=params_scale,
+        max_tries=max_tries,
+        min_offdiag_std=min_offdiag_std,
+        max_abs_score=max_abs_score,
+        min_eta_signal=min_eta_signal,
+        score_quantile=score_quantile,
+        min_eta_info=min_eta_info,
+        min_attention_x2_std=min_attention_x2_std,
+        max_attention_effective_neighbors=max_attention_effective_neighbors,
+        max_attention_effective_neighbor_fraction=max_attention_effective_neighbor_fraction,
+        attempt_start=attempt_start,
+        require_accepted=False,
+        verbose=False,
+    )
+
+
+def _select_best_z_result(
+    results: Sequence[Tuple[jnp.ndarray, Dict[str, Any]]],
+    *,
+    require_good_z: bool,
+) -> Tuple[jnp.ndarray, Dict[str, Any]]:
+    accepted = [(Z, info) for Z, info in results if bool(info.get("accepted", False))]
+    pool = accepted if accepted else list(results)
+    if not pool:
+        raise RuntimeError("No candidate Z was evaluated.")
+
+    Z, info = max(pool, key=lambda item: float(item[1].get("selection_score", float("-inf"))))
+    info = dict(info)
+    info["parallel_chunks"] = len(results)
+    info["parallel_accepted_chunks"] = len(accepted)
+
+    if require_good_z and not accepted:
+        raise RuntimeError(
+            "No candidate Z passed eta-identification screening. "
+            "Try increasing eta_a, using structured/sparser attention, relaxing "
+            "the screening thresholds, or increasing max_tries."
+        )
+    return Z, info
+
+
+def _print_selected_z_info(info: Dict[str, Any]) -> None:
+    message = (
+        "[Z design accepted: best eta information]"
+        if bool(info.get("accepted", False))
+        else "[Z design fallback: no candidate passed screening]"
+    )
+    print(
+        f"{message} "
+        f"attempt={info.get('attempt')}, "
+        f"offdiag_std={info.get('offdiag_std', math.nan):.4f}, "
+        f"max_abs_score={info.get('max_abs_score', math.nan):.4f}, "
+        f"q{info.get('score_quantile', math.nan):.3f}_abs_score={info.get('abs_score_quantile', math.nan):.4f}, "
+        f"eta_signal={info.get('eta_signal', math.nan):.4f}, "
+        f"eta_info={info.get('eta_info', math.nan):.4f}, "
+        f"x2_std_mean={info.get('attention_x2_std_mean', math.nan):.4f}, "
+        f"eff_neighbors_mean={info.get('attention_effective_neighbors_mean', math.nan):.1f}, "
+        f"eff_neighbors_limit={info.get('attention_effective_neighbors_limit', math.nan):.1f}"
+    )
+
+
+def draw_good_Z_for_eta_with_ray(
+    *,
+    key,
+    p: int,
+    q: int,
+    params_true,
+    params_scale,
+    max_tries: int,
+    min_offdiag_std: float,
+    max_abs_score: float,
+    min_eta_signal: float,
+    score_quantile: float,
+    min_eta_info: float,
+    min_attention_x2_std: float,
+    max_attention_effective_neighbors: Optional[float],
+    max_attention_effective_neighbor_fraction: Optional[float],
+    require_accepted: bool,
+    ray_num_cpus: int,
+    max_cpus_per_task: int,
+    verbose: bool = True,
+) -> Tuple[jnp.ndarray, Dict[str, Any]]:
+    """Parallel candidate-Z screening using the active global Ray cluster."""
+    if max_tries < 1:
+        raise ValueError("max_tries must be >= 1.")
+    n_workers = max(1, min(max_tries, int(ray_num_cpus / max_cpus_per_task)))
+    chunk_size = int(math.ceil(max_tries / n_workers))
+
+    futures = []
+    for worker_idx in range(n_workers):
+        attempt_start = worker_idx * chunk_size
+        tries = min(chunk_size, max_tries - attempt_start)
+        if tries <= 0:
+            continue
+        futures.append(draw_good_z_chunk_remote.options(num_cpus=max_cpus_per_task).remote(
+            key=key,
+            p=p,
+            q=q,
+            params_true=params_true,
+            params_scale=params_scale,
+            attempt_start=attempt_start,
+            max_tries=tries,
+            min_offdiag_std=min_offdiag_std,
+            max_abs_score=max_abs_score,
+            min_eta_signal=min_eta_signal,
+            score_quantile=score_quantile,
+            min_eta_info=min_eta_info,
+            min_attention_x2_std=min_attention_x2_std,
+            max_attention_effective_neighbors=max_attention_effective_neighbors,
+            max_attention_effective_neighbor_fraction=max_attention_effective_neighbor_fraction,
+        ))
+
+    results = ray.get(futures)
+    Z, info = _select_best_z_result(results, require_good_z=require_accepted)
+    info["parallel"] = True
+    info["parallel_workers"] = len(futures)
+    if verbose:
+        _print_selected_z_info(info)
+    return Z, info
+
+
 def run_full_simulation(
     *,
     seed: int = 2026,
@@ -392,6 +550,7 @@ def run_full_simulation(
     z_min_eta_info: float = SIMULATION_Z_MIN_ETA_INFO,
     z_min_attention_x2_std: float = SIMULATION_Z_MIN_ATTENTION_X2_STD,
     z_max_attention_effective_neighbors: float = SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS,
+    z_max_attention_effective_neighbor_fraction: float = SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBOR_FRACTION,
     high_max_p: Optional[int] = None,
     results_dir: Path = RESULTS_DIR,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -447,7 +606,20 @@ def run_full_simulation(
         z_min_eta_info=z_min_eta_info,
         z_min_attention_x2_std=z_min_attention_x2_std,
         z_max_attention_effective_neighbors=z_max_attention_effective_neighbors,
+        z_max_attention_effective_neighbor_fraction=z_max_attention_effective_neighbor_fraction,
     )
+
+    ray_started_here = False
+    if use_ray and not ray.is_initialized():
+        _print_progress(f"Starting Ray: ray_num_cpus={ray_num_cpus}, max_cpus_per_task={max_cpus_per_task}")
+        ray.init(
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            num_cpus=ray_num_cpus,
+            _node_ip_address="127.0.0.1",
+        )
+        ray_started_here = True
+        _print_progress("Ray started")
 
     for setting in settings:
         if setting not in {"low", "high"}:
@@ -469,7 +641,10 @@ def run_full_simulation(
                 )
 
                 key, k_params, k_Z, k_rep = jax.random.split(key, 4)
+                _print_progress(f"Starting setting: setting={setting}, dist={dist}, T={T}, p={p}, q={q}")
+                _print_progress("Drawing DGP parameters")
                 params_true, stat_info = draw_simulation_dgp_params(k_params, p, eta_a=dgp_eta_a)
+                _print_progress("DGP parameters ready")
 
                 print("\n" + "=" * 80)
                 print("Full VARA simulation setting")
@@ -495,42 +670,73 @@ def run_full_simulation(
                         f"min_eta_signal={z_min_eta_signal}, "
                         f"min_eta_info={z_min_eta_info}, "
                         f"min_x2_std={z_min_attention_x2_std}, "
-                        f"max_eff_neighbors={z_max_attention_effective_neighbors}, "
-                        f"require_good_z={require_good_z}"
+                        f"max_eff_neighbors=max({z_max_attention_effective_neighbors},"
+                        f"{z_max_attention_effective_neighbor_fraction}*p), "
+                        f"require_good_z={require_good_z}, "
+                        f"parallel_z={use_ray}"
                     )
                 print(f"dgp_attention: {'precompute requested' if precompute_dgp_attention else 'on demand'}")
                 print("=" * 80)
 
                 if screen_z:
-                    Z, Z_info = draw_good_Z_for_eta(
-                        key=k_Z,
-                        p=p,
-                        q=q,
-                        params_true=params_true,
-                        params_scale=PARAMS_SCALE,
-                        max_tries=z_max_tries,
-                        min_offdiag_std=SIMULATION_Z_MIN_OFFDIAG_STD,
-                        max_abs_score=z_max_abs_score,
-                        min_eta_signal=z_min_eta_signal,
-                        score_quantile=z_score_quantile,
-                        min_eta_info=z_min_eta_info,
-                        min_attention_x2_std=z_min_attention_x2_std,
-                        max_attention_effective_neighbors=z_max_attention_effective_neighbors,
-                        require_accepted=require_good_z,
-                        verbose=True,
-                    )
+                    z_mode = "parallel Ray" if use_ray else "sequential"
+                    _print_progress(f"Starting Z screening ({z_mode}): max_tries={z_max_tries}")
+                    if use_ray:
+                        Z, Z_info = draw_good_Z_for_eta_with_ray(
+                            key=k_Z,
+                            p=p,
+                            q=q,
+                            params_true=params_true,
+                            params_scale=PARAMS_SCALE,
+                            max_tries=z_max_tries,
+                            min_offdiag_std=SIMULATION_Z_MIN_OFFDIAG_STD,
+                            max_abs_score=z_max_abs_score,
+                            min_eta_signal=z_min_eta_signal,
+                            score_quantile=z_score_quantile,
+                            min_eta_info=z_min_eta_info,
+                            min_attention_x2_std=z_min_attention_x2_std,
+                            max_attention_effective_neighbors=z_max_attention_effective_neighbors,
+                            max_attention_effective_neighbor_fraction=z_max_attention_effective_neighbor_fraction,
+                            require_accepted=require_good_z,
+                            ray_num_cpus=ray_num_cpus,
+                            max_cpus_per_task=max_cpus_per_task,
+                            verbose=True,
+                        )
+                    else:
+                        Z, Z_info = draw_good_Z_for_eta(
+                            key=k_Z,
+                            p=p,
+                            q=q,
+                            params_true=params_true,
+                            params_scale=PARAMS_SCALE,
+                            max_tries=z_max_tries,
+                            min_offdiag_std=SIMULATION_Z_MIN_OFFDIAG_STD,
+                            max_abs_score=z_max_abs_score,
+                            min_eta_signal=z_min_eta_signal,
+                            score_quantile=z_score_quantile,
+                            min_eta_info=z_min_eta_info,
+                            min_attention_x2_std=z_min_attention_x2_std,
+                            max_attention_effective_neighbors=z_max_attention_effective_neighbors,
+                            max_attention_effective_neighbor_fraction=z_max_attention_effective_neighbor_fraction,
+                            require_accepted=require_good_z,
+                            verbose=True,
+                        )
                 else:
+                    _print_progress("Drawing unscreened Z")
                     Z = draw_Z(k_Z, p, q)
                     Z_info = {"screened": False}
+                _print_progress(f"Z ready: accepted={bool(Z_info.get('accepted', False))}")
 
                 dgp_attention = None
                 if precompute_dgp_attention:
+                    _print_progress("Starting DGP attention precompute")
                     dgp_attention = build_attention(
                         Z,
                         float(params_true["eta_a"]),
                         PARAMS_SCALE["eta_a"],
                     )
                     dgp_attention.block_until_ready()
+                    _print_progress("DGP attention precompute finished")
 
                 print(f"Z_info       : {Z_info}")
                 print(f"dgp_attention: {'precomputed' if dgp_attention is not None else 'on demand'}")
@@ -539,18 +745,15 @@ def run_full_simulation(
                 setting_start = datetime.now()
 
                 if use_ray:
-                    ray.init(
-                        ignore_reinit_error=True,
-                        include_dashboard=False,
-                        num_cpus=ray_num_cpus,
-                        _node_ip_address="127.0.0.1",
-                    )
+                    _print_progress(f"Starting Ray replications: R={R}")
                     n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
+                    _print_progress(f"Creating {n_actors} replication actors")
                     actors = [
                         FullSimulationActor.options(num_cpus=max_cpus_per_task).remote()
                         for _ in range(n_actors)
                     ]
                     dgp_attention_arg = ray.put(dgp_attention) if dgp_attention is not None else None
+                    _print_progress("Submitting replication tasks")
                     futures = [
                         actors[r % n_actors].run.remote(
                             rep=r,
@@ -580,8 +783,8 @@ def run_full_simulation(
                     setting_rows: List[Dict[str, Any]] = []
                     for r in trange(R, desc=f"{setting}/{dist}/T={T}", ncols=100):
                         setting_rows.extend(ray.get(futures[r]))
-                    ray.shutdown()
                 else:
+                    _print_progress(f"Starting sequential replications: R={R}")
                     setting_rows = []
                     for r in trange(R, desc=f"{setting}/{dist}/T={T}", ncols=100):
                         setting_rows.extend(full_single_replication(
@@ -609,9 +812,15 @@ def run_full_simulation(
                         ))
 
                 elapsed_setting = (datetime.now() - setting_start).total_seconds()
+                _print_progress(f"Replications finished in {elapsed_setting:.2f} seconds")
+                _print_progress("Annotating replication rows")
                 for row in setting_rows:
                     row["setting_elapsed_sec"] = elapsed_setting
                     row["Z_screened"] = bool(screen_z)
+                    row["Z_parallel"] = bool(Z_info.get("parallel", False))
+                    row["Z_parallel_workers"] = Z_info.get("parallel_workers", math.nan)
+                    row["Z_parallel_chunks"] = Z_info.get("parallel_chunks", math.nan)
+                    row["Z_parallel_accepted_chunks"] = Z_info.get("parallel_accepted_chunks", math.nan)
                     row["Z_accepted"] = bool(Z_info.get("accepted", False))
                     row["Z_attempt"] = Z_info.get("attempt", math.nan)
                     row["Z_offdiag_std"] = Z_info.get("offdiag_std", math.nan)
@@ -624,6 +833,7 @@ def run_full_simulation(
                     row["Z_attention_x2_std_min"] = Z_info.get("attention_x2_std_min", math.nan)
                     row["Z_attention_effective_neighbors_mean"] = Z_info.get("attention_effective_neighbors_mean", math.nan)
                     row["Z_attention_effective_neighbors_p95"] = Z_info.get("attention_effective_neighbors_p95", math.nan)
+                    row["Z_attention_effective_neighbors_limit"] = Z_info.get("attention_effective_neighbors_limit", math.nan)
                     row["Z_attention_max_weight_mean"] = Z_info.get("attention_max_weight_mean", math.nan)
                     row["Z_selection_score"] = Z_info.get("selection_score", math.nan)
                     row["DGP_attention_precomputed"] = bool(precompute_dgp_attention)
@@ -632,6 +842,7 @@ def run_full_simulation(
                     row["stationary_lhs_after"] = float(stat_info["lhs_after"])
 
                 all_detail_rows.extend(setting_rows)
+                _print_progress("Summarizing current setting")
                 df_setting = pd.DataFrame(setting_rows)
                 summary_current = summarize_setting(df_setting)
                 setting_summaries.append(summary_current)
@@ -639,23 +850,33 @@ def run_full_simulation(
                 print("\nSummary for current setting:")
                 print(summary_current.round(4).to_string(index=False))
 
+                _print_progress("Saving incremental results")
                 pd.DataFrame(all_detail_rows).to_csv(detail_path, index=False)
                 pd.concat(setting_summaries, ignore_index=True).to_csv(summary_path, index=False)
                 print(f"Saved incremental detail to: {detail_path}")
                 print(f"Saved incremental summary to: {summary_path}")
+                _print_progress(f"Finished setting: setting={setting}, dist={dist}, T={T}")
 
                 gc.collect()
 
+    if ray_started_here:
+        _print_progress("Shutting down Ray")
+        ray.shutdown()
+        _print_progress("Ray shut down")
+
+    _print_progress("Building final result tables")
     df_detail = pd.DataFrame(all_detail_rows)
     df_summary = pd.concat(setting_summaries, ignore_index=True) if setting_summaries else pd.DataFrame()
     df_paper = make_paper_table(df_summary) if len(df_summary) else pd.DataFrame()
     df_reporting = make_simulation_reporting_tables(df_summary, setup_table)
 
+    _print_progress("Saving final result tables")
     df_detail.to_csv(detail_path, index=False)
     df_summary.to_csv(summary_path, index=False)
     df_paper.to_csv(paper_path, index=False)
     for name, table in df_reporting.items():
         table.to_csv(reporting_paths[name], index=False)
+    _print_progress("Final result tables saved")
 
     print("\n" + "=" * 80)
     print("Full VARA simulation summary")
@@ -739,6 +960,12 @@ def main():
         default=SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS,
     )
     parser.add_argument(
+        "--z-max-attention-effective-neighbor-fraction",
+        type=float,
+        default=SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBOR_FRACTION,
+        help="Adaptive high-p effective-neighbor cap as a fraction of p.",
+    )
+    parser.add_argument(
         "--high-max-p",
         type=int,
         default=None,
@@ -777,6 +1004,7 @@ def main():
         z_min_eta_info=args.z_min_eta_info,
         z_min_attention_x2_std=args.z_min_attention_x2_std,
         z_max_attention_effective_neighbors=args.z_max_attention_effective_neighbors,
+        z_max_attention_effective_neighbor_fraction=args.z_max_attention_effective_neighbor_fraction,
         high_max_p=args.high_max_p,
         results_dir=Path(args.results_dir),
     )

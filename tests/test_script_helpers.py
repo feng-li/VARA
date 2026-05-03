@@ -78,6 +78,7 @@ class ScriptHelperTests(unittest.TestCase):
             z_min_eta_info=0.05,
             z_min_attention_x2_std=0.02,
             z_max_attention_effective_neighbors=1000.0,
+            z_max_attention_effective_neighbor_fraction=0.25,
         )
         summary = pd.DataFrame([
             {
@@ -101,6 +102,7 @@ class ScriptHelperTests(unittest.TestCase):
                 "Z_eta_signal": 0.2,
                 "Z_attention_x2_std_mean": 0.04,
                 "Z_attention_effective_neighbors_mean": 500.0,
+                "Z_attention_effective_neighbors_limit": 1000.0,
                 "DGP_attention_precomputed": True,
             },
             {
@@ -124,6 +126,7 @@ class ScriptHelperTests(unittest.TestCase):
                 "Z_eta_signal": 0.3,
                 "Z_attention_x2_std_mean": 0.05,
                 "Z_attention_effective_neighbors_mean": 600.0,
+                "Z_attention_effective_neighbors_limit": 1000.0,
                 "DGP_attention_precomputed": True,
             },
         ])
@@ -135,6 +138,7 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertNotIn("ECP_gamma", tables["high_ecp"].columns)
         self.assertIn("eta_boundary_rate", tables["eta_diagnostics"].columns)
         self.assertIn("Z_attention_x2_std_mean", tables["eta_diagnostics"].columns)
+        self.assertIn("Z_attention_effective_neighbors_limit", tables["eta_diagnostics"].columns)
         self.assertIn("DGP_attention_precomputed", tables["eta_diagnostics"].columns)
 
 

@@ -153,6 +153,8 @@ def draw_good_Z_for_eta(
     min_eta_info=0.0,
     min_attention_x2_std=0.0,
     max_attention_effective_neighbors=None,
+    max_attention_effective_neighbor_fraction=None,
+    attempt_start=0,
     require_accepted=False,
     verbose=True,
 ):
@@ -195,6 +197,12 @@ def draw_good_Z_for_eta(
     score_quantile = float(score_quantile)
     if not (0.0 < score_quantile <= 1.0):
         raise ValueError("score_quantile must be in (0, 1].")
+    effective_neighbor_limits = []
+    if max_attention_effective_neighbors is not None:
+        effective_neighbor_limits.append(float(max_attention_effective_neighbors))
+    if max_attention_effective_neighbor_fraction is not None and max_attention_effective_neighbor_fraction > 0:
+        effective_neighbor_limits.append(float(max_attention_effective_neighbor_fraction) * float(p))
+    effective_neighbor_limit = max(effective_neighbor_limits) if effective_neighbor_limits else None
 
     gamma_a_raw = params_true["gamma_a"]
     beta_raw = params_true.get("beta", jnp.zeros_like(gamma_a_raw))
@@ -202,7 +210,8 @@ def draw_good_Z_for_eta(
     beta, gamma_a, _ = ensure_stationarity(beta_raw, gamma_a_raw, margin=0.98)
     eta_a = params_true["eta_a"]
 
-    for attempt in range(max_tries):
+    for local_attempt in range(max_tries):
+        attempt = int(attempt_start) + local_attempt
         subkey = jax.random.fold_in(key, attempt)
         Z = draw_Z(subkey, p, q)
 
@@ -247,8 +256,8 @@ def draw_good_Z_for_eta(
             (eta_info > min_eta_info) and
             (attention_x2_std_mean > min_attention_x2_std) and
             (
-                max_attention_effective_neighbors is None or
-                attention_effective_neighbors_mean < max_attention_effective_neighbors
+                effective_neighbor_limit is None or
+                attention_effective_neighbors_mean < effective_neighbor_limit
             )
         )
 
@@ -264,6 +273,7 @@ def draw_good_Z_for_eta(
             "attention_x2_std_min": float(attention_x2_std_min),
             "attention_effective_neighbors_mean": float(attention_effective_neighbors_mean),
             "attention_effective_neighbors_p95": float(attention_effective_neighbors_p95),
+            "attention_effective_neighbors_limit": float(effective_neighbor_limit) if effective_neighbor_limit is not None else float("nan"),
             "attention_max_weight_mean": float(attention_max_weight_mean),
             "accepted": good_design,
         }
@@ -296,7 +306,8 @@ def draw_good_Z_for_eta(
             f"eta_signal={selected_info['eta_signal']:.4f}, "
             f"eta_info={selected_info['eta_info']:.4f}, "
             f"x2_std_mean={selected_info['attention_x2_std_mean']:.4f}, "
-            f"eff_neighbors_mean={selected_info['attention_effective_neighbors_mean']:.1f}"
+            f"eff_neighbors_mean={selected_info['attention_effective_neighbors_mean']:.1f}, "
+            f"eff_neighbors_limit={selected_info['attention_effective_neighbors_limit']:.1f}"
         )
 
     if best_good_Z is not None:
