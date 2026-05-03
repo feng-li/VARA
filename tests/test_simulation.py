@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from vara.attention import build_attention
-from vara.dgp import draw_Z, ensure_stationarity
+from vara.dgp import draw_Z, draw_good_Z_for_eta, ensure_stationarity
 from vara.simulation import (
     PARAMS_SCALE,
     draw_standard_innovations,
@@ -144,6 +144,34 @@ class SimulationTests(unittest.TestCase):
                 PARAMS_SCALE,
                 precomputed_attention=jnp.eye(p + 1),
             )
+
+    def test_draw_good_Z_for_eta_uses_approximate_screen_when_requested(self):
+        p, q = 6, 4
+        key = jax.random.PRNGKey(987)
+        params = {
+            "eta_a": jnp.asarray(1.0),
+            "gamma_a": jnp.full((p,), 0.2),
+            "beta": jnp.zeros((p,)),
+            "sigma2": jnp.ones((p,)),
+        }
+
+        Z, info = draw_good_Z_for_eta(
+            key,
+            p,
+            q,
+            params,
+            PARAMS_SCALE,
+            max_tries=1,
+            approximate_threshold=1,
+            approx_rows=3,
+            approx_pairs=10,
+            verbose=False,
+        )
+
+        self.assertEqual(Z.shape, (p, q))
+        self.assertTrue(info["approximate"])
+        self.assertEqual(info["approx_rows"], 3)
+        self.assertEqual(info["approx_pairs"], 10)
 
     def test_golden_section_maximize_finds_quadratic_maximum(self):
         fn = lambda x: -(x - 1.25) ** 2 + 3.0

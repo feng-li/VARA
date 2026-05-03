@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import jax.lax as lax
 from jax.random import multivariate_normal, normal
 import numpy as np
-import matplotlib.pyplot as plt
 import psutil
 import os
 
@@ -139,6 +138,234 @@ def draw_Z(key, p, q):
     return Z
 
 
+def _effective_neighbor_limit(
+    p,
+    max_attention_effective_neighbors,
+    max_attention_effective_neighbor_fraction,
+):
+    limits = []
+    if max_attention_effective_neighbors is not None:
+        limits.append(float(max_attention_effective_neighbors))
+    if max_attention_effective_neighbor_fraction is not None and max_attention_effective_neighbor_fraction > 0:
+        limits.append(float(max_attention_effective_neighbor_fraction) * float(p))
+    return max(limits) if limits else None
+
+
+def _score_Z_for_eta_approx(
+    Z,
+    *,
+    key,
+    attempt,
+    row_idx,
+    pair_i,
+    pair_j,
+    params_true,
+    params_scale,
+    min_offdiag_std,
+    max_abs_score,
+    min_eta_signal,
+    score_quantile,
+    min_eta_info,
+    min_attention_x2_std,
+    effective_neighbor_limit,
+):
+    p, q = Z.shape
+    eta_a = params_true["eta_a"]
+    gamma_a_raw = params_true["gamma_a"]
+    beta_raw = params_true.get("beta", jnp.zeros_like(gamma_a_raw))
+    sigma2 = params_true.get("sigma2", jnp.ones_like(gamma_a_raw))
+    beta, gamma_a, _ = ensure_stationarity(beta_raw, gamma_a_raw, margin=0.98)
+
+    scale = params_scale["eta_a"]
+    sqrt_q = jnp.sqrt(q)
+    m = row_idx.shape[0]
+
+    off = jnp.sum(Z[pair_i] * Z[pair_j], axis=1) / sqrt_q
+    abs_off = jnp.abs(off)
+    off_std = jnp.std(off)
+    max_score = jnp.max(abs_off)
+    score_tail = jnp.quantile(abs_off, score_quantile)
+
+    Z_rows = Z[row_idx]
+    scores = (Z_rows @ Z.T) / sqrt_q
+    diag_mask = row_idx[:, None] == jnp.arange(p)[None, :]
+    scores = jnp.where(diag_mask, -1e6, scores)
+    Wa = jax.nn.softmax(eta_a * scale * scores, axis=1)
+
+    weighted_scores = jnp.sum(Wa * scores, axis=1)
+    Wdot = scale * Wa * (scores - weighted_scores[:, None])
+    eta_deriv = gamma_a[row_idx, None] * Wdot
+
+    sample_scale = p / jnp.maximum(m, 1)
+    eta_signal = jnp.sqrt(sample_scale) * jnp.linalg.norm(eta_deriv)
+
+    gamma0_diag_proxy = sigma2 / jnp.maximum(
+        1.0 - jnp.minimum((jnp.abs(beta) + jnp.abs(gamma_a)) ** 2, 0.99),
+        1e-6,
+    )
+    sigma2_inv_rows = 1.0 / sigma2[row_idx]
+    eta_info = sample_scale * jnp.sum(
+        (sigma2_inv_rows[:, None] * eta_deriv) *
+        (eta_deriv * gamma0_diag_proxy[None, :])
+    )
+
+    row_l2 = jnp.sum(Wa ** 2, axis=1)
+    eff_neighbors = 1.0 / jnp.maximum(row_l2, 1e-12)
+    x2_var_proxy = Wa ** 2 @ gamma0_diag_proxy
+    x2_std_proxy = jnp.sqrt(jnp.maximum(x2_var_proxy, 0.0))
+    attention_x2_std_mean = jnp.mean(x2_std_proxy)
+    attention_x2_std_min = jnp.min(x2_std_proxy)
+    attention_effective_neighbors_mean = jnp.mean(eff_neighbors)
+    attention_effective_neighbors_p95 = jnp.quantile(eff_neighbors, 0.95)
+    attention_max_weight_mean = jnp.mean(jnp.max(Wa, axis=1))
+
+    good_design = bool(
+        (off_std > min_offdiag_std) and
+        (score_tail < max_abs_score) and
+        (eta_signal > min_eta_signal) and
+        (eta_info > min_eta_info) and
+        (attention_x2_std_mean > min_attention_x2_std) and
+        (
+            effective_neighbor_limit is None or
+            attention_effective_neighbors_mean < effective_neighbor_limit
+        )
+    )
+
+    score_value = float(
+        eta_info
+        * jnp.maximum(attention_x2_std_mean, 1e-12)
+        / jnp.sqrt(jnp.maximum(attention_effective_neighbors_mean, 1.0))
+    )
+    return {
+        "attempt": attempt + 1,
+        "offdiag_std": float(off_std),
+        "max_abs_score": float(max_score),
+        "score_quantile": float(score_quantile),
+        "abs_score_quantile": float(score_tail),
+        "eta_signal": float(eta_signal),
+        "eta_info": float(eta_info),
+        "attention_x2_std_mean": float(attention_x2_std_mean),
+        "attention_x2_std_min": float(attention_x2_std_min),
+        "attention_effective_neighbors_mean": float(attention_effective_neighbors_mean),
+        "attention_effective_neighbors_p95": float(attention_effective_neighbors_p95),
+        "attention_effective_neighbors_limit": float(effective_neighbor_limit) if effective_neighbor_limit is not None else float("nan"),
+        "attention_max_weight_mean": float(attention_max_weight_mean),
+        "selection_score": score_value,
+        "accepted": good_design,
+        "approximate": True,
+        "approx_rows": int(m),
+        "approx_pairs": int(pair_i.shape[0]),
+    }
+
+
+def draw_good_Z_for_eta_approx(
+    key,
+    p,
+    q,
+    params_true,
+    params_scale,
+    max_tries=200,
+    min_offdiag_std=0.15,
+    max_abs_score=3.0,
+    min_eta_signal=0.1,
+    score_quantile=0.999,
+    min_eta_info=0.0,
+    min_attention_x2_std=0.0,
+    max_attention_effective_neighbors=None,
+    max_attention_effective_neighbor_fraction=None,
+    attempt_start=0,
+    approx_rows=512,
+    approx_pairs=200_000,
+    require_accepted=False,
+    verbose=True,
+):
+    """Approximate high-p Z screening using sampled rows and sampled pairs."""
+    score_quantile = float(score_quantile)
+    if not (0.0 < score_quantile <= 1.0):
+        raise ValueError("score_quantile must be in (0, 1].")
+
+    n_rows = int(min(max(1, approx_rows), p))
+    n_pairs = int(max(1, approx_pairs))
+    effective_neighbor_limit = _effective_neighbor_limit(
+        p,
+        max_attention_effective_neighbors,
+        max_attention_effective_neighbor_fraction,
+    )
+
+    k_rows, k_pair_i, k_pair_j = jax.random.split(jax.random.fold_in(key, 2_147_483_647), 3)
+    row_idx = jax.random.choice(k_rows, p, shape=(n_rows,), replace=False)
+    pair_i = jax.random.randint(k_pair_i, (n_pairs,), minval=0, maxval=p)
+    pair_j_raw = jax.random.randint(k_pair_j, (n_pairs,), minval=0, maxval=p - 1)
+    pair_j = pair_j_raw + (pair_j_raw >= pair_i)
+
+    best_Z = None
+    best_info = None
+    best_good_Z = None
+    best_good_info = None
+    best_good_score = float("-inf")
+    best_any_score = float("-inf")
+
+    for local_attempt in range(max_tries):
+        attempt = int(attempt_start) + local_attempt
+        subkey = jax.random.fold_in(key, attempt)
+        Z = draw_Z(subkey, p, q)
+        info = _score_Z_for_eta_approx(
+            Z,
+            key=subkey,
+            attempt=attempt,
+            row_idx=row_idx,
+            pair_i=pair_i,
+            pair_j=pair_j,
+            params_true=params_true,
+            params_scale=params_scale,
+            min_offdiag_std=min_offdiag_std,
+            max_abs_score=max_abs_score,
+            min_eta_signal=min_eta_signal,
+            score_quantile=score_quantile,
+            min_eta_info=min_eta_info,
+            min_attention_x2_std=min_attention_x2_std,
+            effective_neighbor_limit=effective_neighbor_limit,
+        )
+        score_value = float(info["selection_score"])
+        if score_value > best_any_score:
+            best_any_score = score_value
+            best_Z = Z
+            best_info = info
+
+        if bool(info["accepted"]) and score_value > best_good_score:
+            best_good_score = score_value
+            best_good_Z = Z
+            best_good_info = info
+
+    if verbose:
+        selected_info = best_good_info if best_good_info is not None else best_info
+        message = "[Z design accepted: approximate eta information]" if best_good_info is not None else "[Z design fallback: approximate screening found no accepted candidate]"
+        print(
+            f"{message} "
+            f"attempt={selected_info['attempt']}, "
+            f"offdiag_std={selected_info['offdiag_std']:.4f}, "
+            f"max_abs_score={selected_info['max_abs_score']:.4f}, "
+            f"q{selected_info['score_quantile']:.3f}_abs_score={selected_info['abs_score_quantile']:.4f}, "
+            f"eta_signal={selected_info['eta_signal']:.4f}, "
+            f"eta_info={selected_info['eta_info']:.4f}, "
+            f"x2_std_mean={selected_info['attention_x2_std_mean']:.4f}, "
+            f"eff_neighbors_mean={selected_info['attention_effective_neighbors_mean']:.1f}, "
+            f"eff_neighbors_limit={selected_info['attention_effective_neighbors_limit']:.1f}, "
+            f"approx_rows={selected_info['approx_rows']}, "
+            f"approx_pairs={selected_info['approx_pairs']}"
+        )
+
+    if best_good_Z is not None:
+        return best_good_Z, best_good_info
+    if require_accepted:
+        raise RuntimeError(
+            "No candidate Z passed approximate eta-identification screening. "
+            "Try increasing eta_a, relaxing the screening thresholds, increasing "
+            "max_tries, or increasing approx_rows/approx_pairs."
+        )
+    return best_Z, best_info
+
+
 def draw_good_Z_for_eta(
     key,
     p,
@@ -155,6 +382,9 @@ def draw_good_Z_for_eta(
     max_attention_effective_neighbors=None,
     max_attention_effective_neighbor_fraction=None,
     attempt_start=0,
+    approximate_threshold=None,
+    approx_rows=512,
+    approx_pairs=200_000,
     require_accepted=False,
     verbose=True,
 ):
@@ -188,6 +418,29 @@ def draw_good_Z_for_eta(
     info : dict
         Diagnostics for the accepted design.
     """
+    if approximate_threshold is not None and approximate_threshold > 0 and p >= approximate_threshold:
+        return draw_good_Z_for_eta_approx(
+            key=key,
+            p=p,
+            q=q,
+            params_true=params_true,
+            params_scale=params_scale,
+            max_tries=max_tries,
+            min_offdiag_std=min_offdiag_std,
+            max_abs_score=max_abs_score,
+            min_eta_signal=min_eta_signal,
+            score_quantile=score_quantile,
+            min_eta_info=min_eta_info,
+            min_attention_x2_std=min_attention_x2_std,
+            max_attention_effective_neighbors=max_attention_effective_neighbors,
+            max_attention_effective_neighbor_fraction=max_attention_effective_neighbor_fraction,
+            attempt_start=attempt_start,
+            approx_rows=approx_rows,
+            approx_pairs=approx_pairs,
+            require_accepted=require_accepted,
+            verbose=verbose,
+        )
+
     best_Z = None
     best_info = None
     best_good_Z = None
@@ -659,6 +912,7 @@ def plot_likelihood_profiles(
 if __name__ == "__main__":
 
     import random
+    import matplotlib.pyplot as plt
     from .params import make_block_order
 
     # Set random number seed

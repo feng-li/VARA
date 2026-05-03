@@ -79,6 +79,9 @@ class ScriptHelperTests(unittest.TestCase):
             z_min_attention_x2_std=0.02,
             z_max_attention_effective_neighbors=1000.0,
             z_max_attention_effective_neighbor_fraction=0.25,
+            z_approx_threshold=5000,
+            z_approx_rows=512,
+            z_approx_pairs=200_000,
         )
         summary = pd.DataFrame([
             {
@@ -99,6 +102,10 @@ class ScriptHelperTests(unittest.TestCase):
                 "valid_rate": 1.0,
                 "eta_boundary_rate": 0.0,
                 "Z_accepted": True,
+                "Z_approximate": False,
+                "Z_approx_rows": float("nan"),
+                "Z_approx_pairs": float("nan"),
+                "Z_approx_threshold": 5000,
                 "Z_eta_signal": 0.2,
                 "Z_attention_x2_std_mean": 0.04,
                 "Z_attention_effective_neighbors_mean": 500.0,
@@ -123,6 +130,10 @@ class ScriptHelperTests(unittest.TestCase):
                 "valid_rate": 1.0,
                 "eta_boundary_rate": 0.1,
                 "Z_accepted": True,
+                "Z_approximate": True,
+                "Z_approx_rows": 512,
+                "Z_approx_pairs": 200_000,
+                "Z_approx_threshold": 5000,
                 "Z_eta_signal": 0.3,
                 "Z_attention_x2_std_mean": 0.05,
                 "Z_attention_effective_neighbors_mean": 600.0,
@@ -139,6 +150,8 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertIn("eta_boundary_rate", tables["eta_diagnostics"].columns)
         self.assertIn("Z_attention_x2_std_mean", tables["eta_diagnostics"].columns)
         self.assertIn("Z_attention_effective_neighbors_limit", tables["eta_diagnostics"].columns)
+        self.assertIn("Z_approximate", tables["eta_diagnostics"].columns)
+        self.assertIn("Z_approx_rows", tables["eta_diagnostics"].columns)
         self.assertIn("DGP_attention_precomputed", tables["eta_diagnostics"].columns)
 
 
