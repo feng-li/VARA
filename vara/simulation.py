@@ -151,6 +151,8 @@ def simulate_vara(
     batch_size: int = 512,
     dense_threshold: int = 2500,
     precomputed_attention: Optional[jnp.ndarray] = None,
+    attention_mode: str = "dense",
+    attention_top_k: Optional[int] = None,
 ) -> jnp.ndarray:
     """Simulate observations from the VARA DGP.
 
@@ -184,6 +186,8 @@ def simulate_vara(
                 Z, eta, y_prev, params_scale,
                 batch_size=batch_size,
                 dense_threshold=dense_threshold,
+                attention_mode=attention_mode,
+                attention_top_k=attention_top_k,
             )
         else:
             Wy = W @ y_prev
@@ -228,6 +232,8 @@ def estimate_eta_concentrated(
     ridge: float = 1e-10,
     batch_size: int = 512,
     dense_threshold: int = 2500,
+    attention_mode: str = "dense",
+    attention_top_k: Optional[int] = None,
 ):
     """Estimate ``eta_a`` by a grid search followed by local refinement.
 
@@ -244,6 +250,8 @@ def estimate_eta_concentrated(
             ridge=ridge,
             batch_size=batch_size,
             dense_threshold=dense_threshold,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
         ))
     vals = jnp.array(vals)
     best_idx = int(jnp.argmax(vals))
@@ -262,6 +270,8 @@ def estimate_eta_concentrated(
         ridge=ridge,
         batch_size=batch_size,
         dense_threshold=dense_threshold,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
     eta_hat, obj = golden_section_maximize(fn, local_lower, local_upper)
     info = {
@@ -283,6 +293,8 @@ def finite_diff_second_derivative_eta(
     ridge: float = 1e-10,
     batch_size: int = 512,
     dense_threshold: int = 2500,
+    attention_mode: str = "dense",
+    attention_top_k: Optional[int] = None,
 ) -> jnp.ndarray:
     """Approximate the second derivative of the concentrated eta objective."""
     lower, upper = eta_bounds
@@ -294,16 +306,22 @@ def finite_diff_second_derivative_eta(
         eta_center, Y, Z, params_scale, ridge,
         batch_size=batch_size,
         dense_threshold=dense_threshold,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
     fm = concentrated_eta_loglik(
         eta_center - h, Y, Z, params_scale, ridge,
         batch_size=batch_size,
         dense_threshold=dense_threshold,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
     fp = concentrated_eta_loglik(
         eta_center + h, Y, Z, params_scale, ridge,
         batch_size=batch_size,
         dense_threshold=dense_threshold,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
     return (fp - 2.0 * f0 + fm) / (h ** 2)
 
@@ -319,6 +337,8 @@ def estimate_eta_curvature(
     ridge: float = 1e-10,
     batch_size: int = 512,
     dense_threshold: int = 2500,
+    attention_mode: str = "dense",
+    attention_top_k: Optional[int] = None,
 ):
     """Estimate the normalized curvature used for eta standard errors.
 
@@ -327,7 +347,8 @@ def estimate_eta_curvature(
     """
     T_eff = Y.shape[0] - 1
     l2 = finite_diff_second_derivative_eta(
-        eta_center, Y, Z, params_scale, h, eta_bounds, ridge, batch_size, dense_threshold
+        eta_center, Y, Z, params_scale, h, eta_bounds, ridge, batch_size,
+        dense_threshold, attention_mode, attention_top_k
     )
     return -l2 / (T_eff * p), l2
 
@@ -508,6 +529,8 @@ def run_two_stage_on_dataset(
     ridge: float,
     batch_size: int,
     dense_threshold: int,
+    attention_mode: str = "dense",
+    attention_top_k: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], int]:
     """Run the two-stage estimator on one simulated dataset.
 
@@ -528,6 +551,8 @@ def run_two_stage_on_dataset(
         ridge=ridge,
         batch_size=batch_size,
         dense_threshold=dense_threshold,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
     eta_hat_f = float(eta_hat)
 
@@ -539,6 +564,8 @@ def run_two_stage_on_dataset(
         ridge=ridge,
         batch_size=batch_size,
         dense_threshold=dense_threshold,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
 
     sigma2_hat = fit["sigma2_hat"]
@@ -559,6 +586,8 @@ def run_two_stage_on_dataset(
             ridge=ridge,
             batch_size=batch_size,
             dense_threshold=dense_threshold,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
         )
         if jnp.isfinite(omega_hat) and float(omega_hat) > 0:
             se_eta = 1.0 / jnp.sqrt(T_eff * p * omega_hat)
@@ -603,6 +632,8 @@ def full_single_replication(
     batch_size: int,
     dense_threshold: int,
     dgp_attention: Optional[jnp.ndarray] = None,
+    attention_mode: str = "dense",
+    attention_top_k: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Simulate one dataset and run all requested estimation methods.
 
@@ -625,6 +656,8 @@ def full_single_replication(
         batch_size=batch_size,
         dense_threshold=dense_threshold,
         precomputed_attention=dgp_attention,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
 
     rows = []
@@ -660,6 +693,8 @@ def full_single_replication(
                     ridge=ridge,
                     batch_size=batch_size,
                     dense_threshold=dense_threshold,
+                    attention_mode=attention_mode,
+                    attention_top_k=attention_top_k,
                 )
                 extra = estimates.pop("extra", {})
                 report_gamma_ecp = setting == "low"

@@ -83,6 +83,8 @@ class ScriptHelperTests(unittest.TestCase):
             z_approx_threshold=5000,
             z_approx_rows=512,
             z_approx_pairs=200_000,
+            attention_mode="dense",
+            attention_top_k=None,
         )
         summary = pd.DataFrame([
             {
@@ -113,6 +115,8 @@ class ScriptHelperTests(unittest.TestCase):
                 "Z_attention_effective_neighbors_mean": 500.0,
                 "Z_attention_effective_neighbors_limit": 1000.0,
                 "DGP_attention_precomputed": True,
+                "attention_mode": "dense",
+                "attention_top_k": float("nan"),
             },
             {
                 "setting": "high",
@@ -142,6 +146,8 @@ class ScriptHelperTests(unittest.TestCase):
                 "Z_attention_effective_neighbors_mean": 600.0,
                 "Z_attention_effective_neighbors_limit": 1000.0,
                 "DGP_attention_precomputed": True,
+                "attention_mode": "dense",
+                "attention_top_k": float("nan"),
             },
         ])
 
@@ -157,6 +163,7 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertIn("Z_approximate", tables["eta_diagnostics"].columns)
         self.assertIn("Z_approx_rows", tables["eta_diagnostics"].columns)
         self.assertIn("DGP_attention_precomputed", tables["eta_diagnostics"].columns)
+        self.assertIn("attention_mode", tables["eta_diagnostics"].columns)
 
 
 if __name__ == "__main__":

@@ -83,6 +83,8 @@ SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBOR_FRACTION = 0.25
 SIMULATION_Z_APPROX_THRESHOLD = 5000
 SIMULATION_Z_APPROX_ROWS = 512
 SIMULATION_Z_APPROX_PAIRS = 200_000
+SIMULATION_ATTENTION_MODE = "dense"
+SIMULATION_ATTENTION_TOP_K = None
 
 
 def _parse_int_list(value: str) -> List[int]:
@@ -235,6 +237,8 @@ def make_simulation_setup_table(
     z_approx_threshold: int,
     z_approx_rows: int,
     z_approx_pairs: int,
+    attention_mode: str,
+    attention_top_k: Optional[int],
 ) -> pd.DataFrame:
     rows = []
     z_rule = (
@@ -274,6 +278,8 @@ def make_simulation_setup_table(
                     "Z_screening": bool(screen_z),
                     "Z_screening_rule": z_rule if screen_z else "none",
                     "Z_require_accepted": bool(require_good_z),
+                    "attention_mode": attention_mode,
+                    "attention_top_k": attention_top_k if attention_top_k is not None else "",
                     "DGP_attention_precomputed": bool(precompute_dgp_attention),
                 })
     return pd.DataFrame(rows)
@@ -317,6 +323,8 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "Z_attention_max_weight_mean",
         "Z_selection_score",
         "DGP_attention_precomputed",
+        "attention_mode",
+        "attention_top_k",
         "stationarity_rescaled",
         "stationary_lhs_after",
     ]
@@ -448,6 +456,8 @@ def draw_good_z_chunk_remote(
     approximate_threshold: Optional[int],
     approx_rows: int,
     approx_pairs: int,
+    attention_mode: str,
+    attention_top_k: Optional[int],
     ray_debug: bool = False,
 ):
     """Score a contiguous chunk of candidate Z designs."""
@@ -479,6 +489,8 @@ def draw_good_z_chunk_remote(
         approximate_threshold=approximate_threshold,
         approx_rows=approx_rows,
         approx_pairs=approx_pairs,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
         require_accepted=False,
         verbose=False,
     )
@@ -594,6 +606,8 @@ def draw_good_Z_for_eta_with_ray(
     approximate_threshold: Optional[int],
     approx_rows: int,
     approx_pairs: int,
+    attention_mode: str,
+    attention_top_k: Optional[int],
     require_accepted: bool,
     ray_num_cpus: int,
     max_cpus_per_task: int,
@@ -635,6 +649,8 @@ def draw_good_Z_for_eta_with_ray(
             approximate_threshold=approximate_threshold,
             approx_rows=approx_rows,
             approx_pairs=approx_pairs,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
             ray_debug=ray_debug,
         ))
 
@@ -718,6 +734,8 @@ def run_full_simulation(
     z_approx_threshold: int = SIMULATION_Z_APPROX_THRESHOLD,
     z_approx_rows: int = SIMULATION_Z_APPROX_ROWS,
     z_approx_pairs: int = SIMULATION_Z_APPROX_PAIRS,
+    attention_mode: str = SIMULATION_ATTENTION_MODE,
+    attention_top_k: Optional[int] = SIMULATION_ATTENTION_TOP_K,
     ray_debug: bool = False,
     high_max_p: Optional[int] = None,
     results_dir: Path = RESULTS_DIR,
@@ -730,6 +748,10 @@ def run_full_simulation(
         raise RuntimeError(f"Ray could not be imported: {RAY_IMPORT_ERROR!r}")
     if use_ray and max_cpus_per_task > ray_num_cpus:
         raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
+    if attention_mode not in {"dense", "topk"}:
+        raise ValueError("attention_mode must be 'dense' or 'topk'.")
+    if attention_mode == "topk" and attention_top_k is None:
+        raise ValueError("--attention-top-k must be set when --attention-mode=topk.")
 
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -766,7 +788,7 @@ def run_full_simulation(
         q=q,
         high_max_p=high_max_p,
         screen_z=screen_z,
-        precompute_dgp_attention=precompute_dgp_attention,
+        precompute_dgp_attention=precompute_dgp_attention and attention_mode != "topk",
         require_good_z=require_good_z,
         dgp_eta_a=dgp_eta_a,
         z_max_tries=z_max_tries,
@@ -781,6 +803,8 @@ def run_full_simulation(
         z_approx_threshold=z_approx_threshold,
         z_approx_rows=z_approx_rows,
         z_approx_pairs=z_approx_pairs,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
 
     ray_started_here = False
@@ -833,6 +857,7 @@ def run_full_simulation(
                 print(f"grid_size    : {grid_size_use}")
                 print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
                 print(f"ray_debug    : {ray_debug}")
+                print(f"attention    : {attention_mode}" + (f", top_k={attention_top_k}" if attention_mode == "topk" else ""))
                 print(f"dgp_eta_a    : {float(params_true['eta_a']):.4f}")
                 print(f"stationary   : {not bool(stat_info['rescaled'])}")
                 print(f"stationary_lhs: {float(stat_info['lhs_after']):.4f}")
@@ -880,6 +905,8 @@ def run_full_simulation(
                             approximate_threshold=z_approx_threshold,
                             approx_rows=z_approx_rows,
                             approx_pairs=z_approx_pairs,
+                            attention_mode=attention_mode,
+                            attention_top_k=attention_top_k,
                             require_accepted=require_good_z,
                             ray_num_cpus=ray_num_cpus,
                             max_cpus_per_task=max_cpus_per_task,
@@ -906,6 +933,8 @@ def run_full_simulation(
                             approximate_threshold=z_approx_threshold,
                             approx_rows=z_approx_rows,
                             approx_pairs=z_approx_pairs,
+                            attention_mode=attention_mode,
+                            attention_top_k=attention_top_k,
                             require_accepted=require_good_z,
                             verbose=True,
                         )
@@ -916,12 +945,16 @@ def run_full_simulation(
                 _print_progress(f"Z ready: accepted={bool(Z_info.get('accepted', False))}")
 
                 dgp_attention = None
-                if precompute_dgp_attention:
+                if precompute_dgp_attention and attention_mode == "topk":
+                    _print_progress("Skipping DGP attention precompute for top-k attention")
+                elif precompute_dgp_attention:
                     _print_progress("Starting DGP attention precompute")
                     dgp_attention = build_attention(
                         Z,
                         float(params_true["eta_a"]),
                         PARAMS_SCALE["eta_a"],
+                        attention_mode=attention_mode,
+                        top_k=attention_top_k,
                     )
                     dgp_attention.block_until_ready()
                     _print_progress("DGP attention precompute finished")
@@ -965,6 +998,8 @@ def run_full_simulation(
                             batch_size=batch_size,
                             dense_threshold=dense_threshold,
                             dgp_attention=dgp_attention_arg,
+                            attention_mode=attention_mode,
+                            attention_top_k=attention_top_k,
                             ray_debug=ray_debug,
                         )
                         for r in range(R)
@@ -998,6 +1033,8 @@ def run_full_simulation(
                             batch_size=batch_size,
                             dense_threshold=dense_threshold,
                             dgp_attention=dgp_attention,
+                            attention_mode=attention_mode,
+                            attention_top_k=attention_top_k,
                         ))
 
                 elapsed_setting = (datetime.now() - setting_start).total_seconds()
@@ -1033,7 +1070,9 @@ def run_full_simulation(
                     row["Z_attention_effective_neighbors_limit"] = Z_info.get("attention_effective_neighbors_limit", math.nan)
                     row["Z_attention_max_weight_mean"] = Z_info.get("attention_max_weight_mean", math.nan)
                     row["Z_selection_score"] = Z_info.get("selection_score", math.nan)
-                    row["DGP_attention_precomputed"] = bool(precompute_dgp_attention)
+                    row["DGP_attention_precomputed"] = dgp_attention is not None
+                    row["attention_mode"] = attention_mode
+                    row["attention_top_k"] = attention_top_k if attention_top_k is not None else math.nan
                     row["stationarity_rescaled"] = bool(stat_info["rescaled"])
                     row["stationary_lhs_before"] = float(stat_info["lhs_before"])
                     row["stationary_lhs_after"] = float(stat_info["lhs_after"])
@@ -1127,6 +1166,18 @@ def main():
     parser.add_argument("--ridge", type=float, default=1e-10)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--dense-threshold", type=int, default=2500)
+    parser.add_argument(
+        "--attention-mode",
+        choices=["dense", "topk"],
+        default=SIMULATION_ATTENTION_MODE,
+        help="Attention backend for DGP simulation, eta likelihood, and Z screening.",
+    )
+    parser.add_argument(
+        "--attention-top-k",
+        type=int,
+        default=SIMULATION_ATTENTION_TOP_K,
+        help="Number of neighbors for --attention-mode topk.",
+    )
     parser.add_argument(
         "--screen-z",
         action=argparse.BooleanOptionalAction,
@@ -1239,6 +1290,8 @@ def main():
         z_approx_threshold=args.z_approx_threshold,
         z_approx_rows=args.z_approx_rows,
         z_approx_pairs=args.z_approx_pairs,
+        attention_mode=args.attention_mode,
+        attention_top_k=args.attention_top_k,
         ray_debug=args.ray_debug,
         high_max_p=args.high_max_p,
         results_dir=Path(args.results_dir),

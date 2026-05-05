@@ -47,6 +47,31 @@ class TwoStageTests(unittest.TestCase):
         self.assertEqual(value.shape, ())
         self.assertTrue(bool(jnp.isfinite(value)))
 
+    def test_topk_two_stage_path_returns_finite_estimates(self):
+        p, q, T = 5, 4, 20
+        params_scale = {"eta_a": 1.0}
+        Z = jax.random.normal(jax.random.PRNGKey(3), (p, q))
+        Y = jax.random.normal(jax.random.PRNGKey(4), (T, p))
+
+        fit = fit_all_components_two_stage(
+            Y, Z, 0.25, params_scale,
+            attention_mode="topk",
+            attention_top_k=2,
+            batch_size=2,
+            dense_threshold=1,
+        )
+        value = concentrated_eta_loglik(
+            0.25, Y, Z, params_scale,
+            attention_mode="topk",
+            attention_top_k=2,
+            batch_size=2,
+            dense_threshold=1,
+        )
+
+        self.assertTrue(bool(jnp.isfinite(value)))
+        self.assertTrue(bool(jnp.isfinite(fit["alpha_hat"]).all()))
+        self.assertTrue(bool(jnp.isfinite(fit["beta_hat"]).all()))
+
 
 if __name__ == "__main__":
     unittest.main()

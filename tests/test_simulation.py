@@ -173,6 +173,60 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(info["approx_rows"], 3)
         self.assertEqual(info["approx_pairs"], 10)
 
+    def test_draw_good_Z_for_eta_records_topk_screening(self):
+        p, q = 6, 4
+        key = jax.random.PRNGKey(654)
+        params = {
+            "eta_a": jnp.asarray(1.0),
+            "gamma_a": jnp.full((p,), 0.2),
+            "beta": jnp.zeros((p,)),
+            "sigma2": jnp.ones((p,)),
+        }
+
+        _, info = draw_good_Z_for_eta(
+            key,
+            p,
+            q,
+            params,
+            PARAMS_SCALE,
+            max_tries=1,
+            approximate_threshold=1,
+            approx_rows=3,
+            approx_pairs=10,
+            attention_mode="topk",
+            attention_top_k=2,
+            verbose=False,
+        )
+
+        self.assertEqual(info["attention_mode"], "topk")
+        self.assertEqual(info["attention_top_k"], 2)
+
+    def test_draw_good_Z_for_eta_records_topk_exact_screening(self):
+        p, q = 5, 4
+        key = jax.random.PRNGKey(321)
+        params = {
+            "eta_a": jnp.asarray(1.0),
+            "gamma_a": jnp.full((p,), 0.2),
+            "beta": jnp.zeros((p,)),
+            "sigma2": jnp.ones((p,)),
+        }
+
+        _, info = draw_good_Z_for_eta(
+            key,
+            p,
+            q,
+            params,
+            PARAMS_SCALE,
+            max_tries=1,
+            attention_mode="topk",
+            attention_top_k=2,
+            verbose=False,
+        )
+
+        self.assertFalse(info["approximate"])
+        self.assertEqual(info["attention_mode"], "topk")
+        self.assertEqual(info["attention_top_k"], 2)
+
     def test_golden_section_maximize_finds_quadratic_maximum(self):
         fn = lambda x: -(x - 1.25) ** 2 + 3.0
 

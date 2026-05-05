@@ -168,6 +168,8 @@ def _score_Z_for_eta_approx(
     min_attention_x2_std,
     min_attention_x2_std_adaptive_factor,
     effective_neighbor_limit,
+    attention_mode="dense",
+    attention_top_k=None,
 ):
     p, q = Z.shape
     eta_a = params_true["eta_a"]
@@ -186,15 +188,28 @@ def _score_Z_for_eta_approx(
     max_score = jnp.max(abs_off)
     score_tail = jnp.quantile(abs_off, score_quantile)
 
-    Z_rows = Z[row_idx]
-    scores = (Z_rows @ Z.T) / sqrt_q
-    diag_mask = row_idx[:, None] == jnp.arange(p)[None, :]
-    scores = jnp.where(diag_mask, -1e6, scores)
-    Wa = jax.nn.softmax(eta_a * scale * scores, axis=1)
+    if attention_mode == "topk":
+        Z_rows = Z[row_idx]
+        raw_scores = (Z_rows @ Z.T) / sqrt_q
+        diag_mask = row_idx[:, None] == jnp.arange(p)[None, :]
+        all_scores = jnp.where(diag_mask, -1e6, eta_a * scale * raw_scores)
+        k = int(min(max(1, attention_top_k), max(p - 1, 1)))
+        top_scores, top_idx = jax.lax.top_k(all_scores, k)
+        scores = jnp.take_along_axis(raw_scores, top_idx, axis=1)
+        Wa = jax.nn.softmax(top_scores, axis=1)
+        weighted_scores = jnp.sum(Wa * scores, axis=1)
+        Wdot = scale * Wa * (scores - weighted_scores[:, None])
+        eta_deriv = gamma_a[row_idx, None] * Wdot
+    else:
+        Z_rows = Z[row_idx]
+        scores = (Z_rows @ Z.T) / sqrt_q
+        diag_mask = row_idx[:, None] == jnp.arange(p)[None, :]
+        scores = jnp.where(diag_mask, -1e6, scores)
+        Wa = jax.nn.softmax(eta_a * scale * scores, axis=1)
 
-    weighted_scores = jnp.sum(Wa * scores, axis=1)
-    Wdot = scale * Wa * (scores - weighted_scores[:, None])
-    eta_deriv = gamma_a[row_idx, None] * Wdot
+        weighted_scores = jnp.sum(Wa * scores, axis=1)
+        Wdot = scale * Wa * (scores - weighted_scores[:, None])
+        eta_deriv = gamma_a[row_idx, None] * Wdot
 
     sample_scale = p / jnp.maximum(m, 1)
     eta_signal = jnp.sqrt(sample_scale) * jnp.linalg.norm(eta_deriv)
@@ -220,14 +235,21 @@ def _score_Z_for_eta_approx(
         effective_min_attention_x2_std = jnp.asarray(float(min_attention_x2_std))
 
     sigma2_inv_rows = 1.0 / sigma2[row_idx]
+    if attention_mode == "topk":
+        gamma0_for_info = gamma0_diag_proxy[top_idx]
+    else:
+        gamma0_for_info = gamma0_diag_proxy[None, :]
     eta_info = sample_scale * jnp.sum(
         (sigma2_inv_rows[:, None] * eta_deriv) *
-        (eta_deriv * gamma0_diag_proxy[None, :])
+        (eta_deriv * gamma0_for_info)
     )
 
     row_l2 = jnp.sum(Wa ** 2, axis=1)
     eff_neighbors = 1.0 / jnp.maximum(row_l2, 1e-12)
-    x2_var_proxy = Wa ** 2 @ gamma0_diag_proxy
+    if attention_mode == "topk":
+        x2_var_proxy = jnp.sum(Wa ** 2 * gamma0_diag_proxy[top_idx], axis=1)
+    else:
+        x2_var_proxy = Wa ** 2 @ gamma0_diag_proxy
     x2_std_proxy = jnp.sqrt(jnp.maximum(x2_var_proxy, 0.0))
     attention_x2_std_mean = jnp.mean(x2_std_proxy)
     attention_x2_std_min = jnp.min(x2_std_proxy)
@@ -279,6 +301,8 @@ def _score_Z_for_eta_approx(
         "approximate": True,
         "approx_rows": int(m),
         "approx_pairs": int(pair_i.shape[0]),
+        "attention_mode": attention_mode,
+        "attention_top_k": int(attention_top_k) if attention_top_k is not None else -1,
     }
 
 
@@ -301,10 +325,17 @@ def draw_good_Z_for_eta_approx(
     attempt_start=0,
     approx_rows=512,
     approx_pairs=200_000,
+    attention_mode="dense",
+    attention_top_k=None,
     require_accepted=False,
     verbose=True,
 ):
     """Approximate high-p Z screening using sampled rows and sampled pairs."""
+    if attention_mode not in {"dense", "topk"}:
+        raise ValueError("attention_mode must be 'dense' or 'topk'.")
+    if attention_mode == "topk" and attention_top_k is None:
+        raise ValueError("attention_top_k must be provided when attention_mode='topk'.")
+
     score_quantile = float(score_quantile)
     if not (0.0 < score_quantile <= 1.0):
         raise ValueError("score_quantile must be in (0, 1].")
@@ -350,6 +381,8 @@ def draw_good_Z_for_eta_approx(
             min_attention_x2_std=min_attention_x2_std,
             min_attention_x2_std_adaptive_factor=min_attention_x2_std_adaptive_factor,
             effective_neighbor_limit=effective_neighbor_limit,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
         )
         score_value = float(info["selection_score"])
         if score_value > best_any_score:
@@ -412,6 +445,8 @@ def draw_good_Z_for_eta(
     approximate_threshold=None,
     approx_rows=512,
     approx_pairs=200_000,
+    attention_mode="dense",
+    attention_top_k=None,
     require_accepted=False,
     verbose=True,
 ):
@@ -445,6 +480,11 @@ def draw_good_Z_for_eta(
     info : dict
         Diagnostics for the accepted design.
     """
+    if attention_mode not in {"dense", "topk"}:
+        raise ValueError("attention_mode must be 'dense' or 'topk'.")
+    if attention_mode == "topk" and attention_top_k is None:
+        raise ValueError("attention_top_k must be provided when attention_mode='topk'.")
+
     if approximate_threshold is not None and approximate_threshold > 0 and p >= approximate_threshold:
         return draw_good_Z_for_eta_approx(
             key=key,
@@ -465,6 +505,8 @@ def draw_good_Z_for_eta(
             attempt_start=attempt_start,
             approx_rows=approx_rows,
             approx_pairs=approx_pairs,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
             require_accepted=require_accepted,
             verbose=verbose,
         )
@@ -490,6 +532,25 @@ def draw_good_Z_for_eta(
     sigma2 = params_true.get("sigma2", jnp.ones_like(gamma_a_raw))
     beta, gamma_a, _ = ensure_stationarity(beta_raw, gamma_a_raw, margin=0.98)
     eta_a = params_true["eta_a"]
+    gamma0_diag_proxy = sigma2 / jnp.maximum(
+        1.0 - jnp.minimum((jnp.abs(beta) + jnp.abs(gamma_a)) ** 2, 0.99),
+        1e-6,
+    )
+    if (
+        effective_neighbor_limit is not None and
+        min_attention_x2_std_adaptive_factor is not None and
+        min_attention_x2_std_adaptive_factor > 0
+    ):
+        adaptive_x2_min = min_attention_x2_std_adaptive_factor * jnp.sqrt(
+            jnp.mean(gamma0_diag_proxy) / jnp.maximum(float(effective_neighbor_limit), 1.0)
+        )
+        effective_min_attention_x2_std = jnp.minimum(
+            float(min_attention_x2_std),
+            adaptive_x2_min,
+        )
+    else:
+        adaptive_x2_min = jnp.asarray(jnp.nan)
+        effective_min_attention_x2_std = jnp.asarray(float(min_attention_x2_std))
 
     for local_attempt in range(max_tries):
         attempt = int(attempt_start) + local_attempt
@@ -500,9 +561,27 @@ def draw_good_Z_for_eta(
         off_mask = ~jnp.eye(p, dtype=bool)
         off = S[off_mask]
 
-        Wa, Wdot, _ = compute_Wa_Wb_dots(
-            Z, eta_a, params_scale["eta_a"]
-        )
+        if attention_mode == "topk":
+            k = int(min(max(1, attention_top_k), max(p - 1, 1)))
+            top_scores, top_idx = jax.lax.top_k(
+                jnp.where(jnp.eye(p, dtype=bool), -1e6, eta_a * params_scale["eta_a"] * S),
+                k,
+            )
+            top_raw_scores = jnp.take_along_axis(S, top_idx, axis=1)
+            top_weights = jax.nn.softmax(top_scores, axis=1)
+            top_weighted_scores = jnp.sum(top_weights * top_raw_scores, axis=1)
+            top_Wdot = (
+                params_scale["eta_a"] *
+                top_weights *
+                (top_raw_scores - top_weighted_scores[:, None])
+            )
+            rows = jnp.arange(p)[:, None]
+            Wa = jnp.zeros((p, p), dtype=Z.dtype).at[rows, top_idx].set(top_weights)
+            Wdot = jnp.zeros((p, p), dtype=Z.dtype).at[rows, top_idx].set(top_Wdot)
+        else:
+            Wa, Wdot, _ = compute_Wa_Wb_dots(
+                Z, eta_a, params_scale["eta_a"]
+            )
 
         eta_deriv = gamma_a[:, None] * Wdot
         G = (beta[:, None] * jnp.eye(p)) + (gamma_a[:, None] * Wa)
@@ -518,10 +597,6 @@ def draw_good_Z_for_eta(
 
         row_l2 = jnp.sum(Wa ** 2, axis=1)
         eff_neighbors = 1.0 / jnp.maximum(row_l2, 1e-12)
-        gamma0_diag_proxy = sigma2 / jnp.maximum(
-            1.0 - jnp.minimum((jnp.abs(beta) + jnp.abs(gamma_a)) ** 2, 0.99),
-            1e-6,
-        )
         x2_var_proxy = Wa ** 2 @ gamma0_diag_proxy
         x2_std_proxy = jnp.sqrt(jnp.maximum(x2_var_proxy, 0.0))
         attention_x2_std_mean = jnp.mean(x2_std_proxy)
@@ -535,7 +610,7 @@ def draw_good_Z_for_eta(
             (score_tail < max_abs_score) and
             (eta_signal > min_eta_signal) and
             (eta_info > min_eta_info) and
-            (attention_x2_std_mean > min_attention_x2_std) and
+            (attention_x2_std_mean > effective_min_attention_x2_std) and
             (
                 effective_neighbor_limit is None or
                 attention_effective_neighbors_mean < effective_neighbor_limit
@@ -552,11 +627,22 @@ def draw_good_Z_for_eta(
             "eta_info": float(eta_info),
             "attention_x2_std_mean": float(attention_x2_std_mean),
             "attention_x2_std_min": float(attention_x2_std_min),
+            "attention_x2_std_requested_min": float(min_attention_x2_std),
+            "attention_x2_std_effective_min": float(effective_min_attention_x2_std),
+            "attention_x2_std_adaptive_min": float(adaptive_x2_min),
+            "attention_x2_std_adaptive_factor": (
+                float(min_attention_x2_std_adaptive_factor)
+                if min_attention_x2_std_adaptive_factor is not None
+                else float("nan")
+            ),
             "attention_effective_neighbors_mean": float(attention_effective_neighbors_mean),
             "attention_effective_neighbors_p95": float(attention_effective_neighbors_p95),
             "attention_effective_neighbors_limit": float(effective_neighbor_limit) if effective_neighbor_limit is not None else float("nan"),
             "attention_max_weight_mean": float(attention_max_weight_mean),
             "accepted": good_design,
+            "approximate": False,
+            "attention_mode": attention_mode,
+            "attention_top_k": int(attention_top_k) if attention_top_k is not None else -1,
         }
 
         score_value = float(
