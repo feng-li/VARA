@@ -154,7 +154,6 @@ def _effective_neighbor_limit(
 def _score_Z_for_eta_approx(
     Z,
     *,
-    key,
     attempt,
     row_idx,
     pair_i,
@@ -167,6 +166,7 @@ def _score_Z_for_eta_approx(
     score_quantile,
     min_eta_info,
     min_attention_x2_std,
+    min_attention_x2_std_adaptive_factor,
     effective_neighbor_limit,
 ):
     p, q = Z.shape
@@ -203,6 +203,22 @@ def _score_Z_for_eta_approx(
         1.0 - jnp.minimum((jnp.abs(beta) + jnp.abs(gamma_a)) ** 2, 0.99),
         1e-6,
     )
+    if (
+        effective_neighbor_limit is not None and
+        min_attention_x2_std_adaptive_factor is not None and
+        min_attention_x2_std_adaptive_factor > 0
+    ):
+        adaptive_x2_min = min_attention_x2_std_adaptive_factor * jnp.sqrt(
+            jnp.mean(gamma0_diag_proxy) / jnp.maximum(float(effective_neighbor_limit), 1.0)
+        )
+        effective_min_attention_x2_std = jnp.minimum(
+            float(min_attention_x2_std),
+            adaptive_x2_min,
+        )
+    else:
+        adaptive_x2_min = jnp.asarray(jnp.nan)
+        effective_min_attention_x2_std = jnp.asarray(float(min_attention_x2_std))
+
     sigma2_inv_rows = 1.0 / sigma2[row_idx]
     eta_info = sample_scale * jnp.sum(
         (sigma2_inv_rows[:, None] * eta_deriv) *
@@ -224,7 +240,7 @@ def _score_Z_for_eta_approx(
         (score_tail < max_abs_score) and
         (eta_signal > min_eta_signal) and
         (eta_info > min_eta_info) and
-        (attention_x2_std_mean > min_attention_x2_std) and
+        (attention_x2_std_mean > effective_min_attention_x2_std) and
         (
             effective_neighbor_limit is None or
             attention_effective_neighbors_mean < effective_neighbor_limit
@@ -246,6 +262,14 @@ def _score_Z_for_eta_approx(
         "eta_info": float(eta_info),
         "attention_x2_std_mean": float(attention_x2_std_mean),
         "attention_x2_std_min": float(attention_x2_std_min),
+        "attention_x2_std_requested_min": float(min_attention_x2_std),
+        "attention_x2_std_effective_min": float(effective_min_attention_x2_std),
+        "attention_x2_std_adaptive_min": float(adaptive_x2_min),
+        "attention_x2_std_adaptive_factor": (
+            float(min_attention_x2_std_adaptive_factor)
+            if min_attention_x2_std_adaptive_factor is not None
+            else float("nan")
+        ),
         "attention_effective_neighbors_mean": float(attention_effective_neighbors_mean),
         "attention_effective_neighbors_p95": float(attention_effective_neighbors_p95),
         "attention_effective_neighbors_limit": float(effective_neighbor_limit) if effective_neighbor_limit is not None else float("nan"),
@@ -271,6 +295,7 @@ def draw_good_Z_for_eta_approx(
     score_quantile=0.999,
     min_eta_info=0.0,
     min_attention_x2_std=0.0,
+    min_attention_x2_std_adaptive_factor=None,
     max_attention_effective_neighbors=None,
     max_attention_effective_neighbor_fraction=None,
     attempt_start=0,
@@ -311,7 +336,6 @@ def draw_good_Z_for_eta_approx(
         Z = draw_Z(subkey, p, q)
         info = _score_Z_for_eta_approx(
             Z,
-            key=subkey,
             attempt=attempt,
             row_idx=row_idx,
             pair_i=pair_i,
@@ -324,6 +348,7 @@ def draw_good_Z_for_eta_approx(
             score_quantile=score_quantile,
             min_eta_info=min_eta_info,
             min_attention_x2_std=min_attention_x2_std,
+            min_attention_x2_std_adaptive_factor=min_attention_x2_std_adaptive_factor,
             effective_neighbor_limit=effective_neighbor_limit,
         )
         score_value = float(info["selection_score"])
@@ -349,6 +374,7 @@ def draw_good_Z_for_eta_approx(
             f"eta_signal={selected_info['eta_signal']:.4f}, "
             f"eta_info={selected_info['eta_info']:.4f}, "
             f"x2_std_mean={selected_info['attention_x2_std_mean']:.4f}, "
+            f"x2_std_min_required={selected_info['attention_x2_std_effective_min']:.4f}, "
             f"eff_neighbors_mean={selected_info['attention_effective_neighbors_mean']:.1f}, "
             f"eff_neighbors_limit={selected_info['attention_effective_neighbors_limit']:.1f}, "
             f"approx_rows={selected_info['approx_rows']}, "
@@ -379,6 +405,7 @@ def draw_good_Z_for_eta(
     score_quantile=0.999,
     min_eta_info=0.0,
     min_attention_x2_std=0.0,
+    min_attention_x2_std_adaptive_factor=None,
     max_attention_effective_neighbors=None,
     max_attention_effective_neighbor_fraction=None,
     attempt_start=0,
@@ -432,6 +459,7 @@ def draw_good_Z_for_eta(
             score_quantile=score_quantile,
             min_eta_info=min_eta_info,
             min_attention_x2_std=min_attention_x2_std,
+            min_attention_x2_std_adaptive_factor=min_attention_x2_std_adaptive_factor,
             max_attention_effective_neighbors=max_attention_effective_neighbors,
             max_attention_effective_neighbor_fraction=max_attention_effective_neighbor_fraction,
             attempt_start=attempt_start,

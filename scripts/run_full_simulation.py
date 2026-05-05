@@ -14,6 +14,7 @@ import argparse
 import gc
 import math
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -76,6 +77,7 @@ SIMULATION_Z_MIN_ETA_SIGNAL = 0.05
 SIMULATION_Z_SCORE_QUANTILE = 0.999
 SIMULATION_Z_MIN_ETA_INFO = 0.05
 SIMULATION_Z_MIN_ATTENTION_X2_STD = 0.02
+SIMULATION_Z_MIN_ATTENTION_X2_STD_ADAPTIVE_FACTOR = 1.1
 SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS = 1000.0
 SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBOR_FRACTION = 0.25
 SIMULATION_Z_APPROX_THRESHOLD = 5000
@@ -227,6 +229,7 @@ def make_simulation_setup_table(
     z_min_eta_signal: float,
     z_min_eta_info: float,
     z_min_attention_x2_std: float,
+    z_min_attention_x2_std_adaptive_factor: float,
     z_max_attention_effective_neighbors: float,
     z_max_attention_effective_neighbor_fraction: float,
     z_approx_threshold: int,
@@ -241,6 +244,7 @@ def make_simulation_setup_table(
         f"min_eta_signal={z_min_eta_signal}; "
         f"min_eta_info={z_min_eta_info}; "
         f"min_attention_x2_std={z_min_attention_x2_std}; "
+        f"min_attention_x2_std_adaptive_factor={z_min_attention_x2_std_adaptive_factor}; "
         f"max_effective_neighbors=max({z_max_attention_effective_neighbors},"
         f"{z_max_attention_effective_neighbor_fraction}*p); "
         f"approx_threshold={z_approx_threshold}; "
@@ -303,6 +307,10 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "Z_eta_info",
         "Z_attention_x2_std_mean",
         "Z_attention_x2_std_min",
+        "Z_attention_x2_std_requested_min",
+        "Z_attention_x2_std_effective_min",
+        "Z_attention_x2_std_adaptive_min",
+        "Z_attention_x2_std_adaptive_factor",
         "Z_attention_effective_neighbors_mean",
         "Z_attention_effective_neighbors_p95",
         "Z_attention_effective_neighbors_limit",
@@ -357,19 +365,40 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
 
 class FullSimulationActor:
     def run(self, *args, **kwargs):
+        ray_debug = bool(kwargs.pop("ray_debug", False))
+        rep = kwargs.get("rep", args[0] if len(args) > 0 else -1)
+        setting = kwargs.get("setting", "unknown")
+        T = kwargs.get("T", -1)
+        p = kwargs.get("p", -1)
+        q = kwargs.get("q", -1)
+        methods = kwargs.get("methods", ["unknown"])
+        started = time.time()
+        if ray_debug:
+            print(
+                f"[Ray replication start] rep={rep}, setting={setting}, "
+                f"T={T}, p={p}, q={q}, methods={methods}",
+                flush=True,
+            )
         try:
             if isinstance(kwargs.get("dgp_attention"), ray.ObjectRef):
                 kwargs["dgp_attention"] = ray.get(kwargs["dgp_attention"])
             out = full_single_replication(*args, **kwargs)
             gc.collect()
+            if ray_debug:
+                statuses = [row.get("status") for row in out]
+                print(
+                    f"[Ray replication done] rep={rep}, statuses={statuses}, "
+                    f"elapsed_sec={time.time() - started:.2f}",
+                    flush=True,
+                )
             return out
         except Exception as e:
-            rep = kwargs.get("rep", args[0] if len(args) > 0 else -1)
-            methods = kwargs.get("methods", ["unknown"])
-            setting = kwargs.get("setting", "unknown")
-            T = kwargs.get("T", -1)
-            p = kwargs.get("p", -1)
-            q = kwargs.get("q", -1)
+            if ray_debug:
+                print(
+                    f"[Ray replication error] rep={rep}, elapsed_sec={time.time() - started:.2f}, "
+                    f"error={repr(e)}",
+                    flush=True,
+                )
             dist = kwargs.get("dist", "unknown")
             seed = kwargs.get("seed", -1)
             rows = []
@@ -400,6 +429,7 @@ class FullSimulationActor:
 def draw_good_z_chunk_remote(
     *,
     key,
+    chunk_idx: int,
     p: int,
     q: int,
     params_true,
@@ -412,14 +442,24 @@ def draw_good_z_chunk_remote(
     score_quantile: float,
     min_eta_info: float,
     min_attention_x2_std: float,
+    min_attention_x2_std_adaptive_factor: Optional[float],
     max_attention_effective_neighbors: Optional[float],
     max_attention_effective_neighbor_fraction: Optional[float],
     approximate_threshold: Optional[int],
     approx_rows: int,
     approx_pairs: int,
+    ray_debug: bool = False,
 ):
     """Score a contiguous chunk of candidate Z designs."""
-    return draw_good_Z_for_eta(
+    started = time.time()
+    if ray_debug:
+        print(
+            f"[Ray Z chunk start] chunk={chunk_idx}, attempt_start={attempt_start}, "
+            f"tries={max_tries}, p={p}, q={q}, approx_rows={approx_rows}, "
+            f"approx_pairs={approx_pairs}",
+            flush=True,
+        )
+    Z, info = draw_good_Z_for_eta(
         key=key,
         p=p,
         q=q,
@@ -432,6 +472,7 @@ def draw_good_z_chunk_remote(
         score_quantile=score_quantile,
         min_eta_info=min_eta_info,
         min_attention_x2_std=min_attention_x2_std,
+        min_attention_x2_std_adaptive_factor=min_attention_x2_std_adaptive_factor,
         max_attention_effective_neighbors=max_attention_effective_neighbors,
         max_attention_effective_neighbor_fraction=max_attention_effective_neighbor_fraction,
         attempt_start=attempt_start,
@@ -441,6 +482,20 @@ def draw_good_z_chunk_remote(
         require_accepted=False,
         verbose=False,
     )
+    info = dict(info)
+    info["parallel_chunk"] = chunk_idx
+    info["parallel_attempt_start"] = attempt_start
+    info["parallel_chunk_tries"] = max_tries
+    if ray_debug:
+        print(
+            f"[Ray Z chunk done] chunk={chunk_idx}, accepted={bool(info.get('accepted', False))}, "
+            f"best_attempt={info.get('attempt')}, eta_info={info.get('eta_info', math.nan):.4f}, "
+            f"x2_std_mean={info.get('attention_x2_std_mean', math.nan):.4f}, "
+            f"eff_neighbors_mean={info.get('attention_effective_neighbors_mean', math.nan):.1f}, "
+            f"elapsed_sec={time.time() - started:.2f}",
+            flush=True,
+        )
+    return Z, info
 
 
 if ray is not None:
@@ -472,6 +527,7 @@ def _select_best_z_result(
             f"eta_signal={info.get('eta_signal', math.nan):.4f}, "
             f"eta_info={info.get('eta_info', math.nan):.4f}, "
             f"x2_std_mean={info.get('attention_x2_std_mean', math.nan):.4f}, "
+            f"x2_std_min_required={info.get('attention_x2_std_effective_min', math.nan):.4f}, "
             f"eff_neighbors_mean={info.get('attention_effective_neighbors_mean', math.nan):.1f}, "
             f"eff_neighbors_limit={info.get('attention_effective_neighbors_limit', math.nan):.1f}, "
             f"approximate={bool(info.get('approximate', False))}, "
@@ -511,6 +567,7 @@ def _print_selected_z_info(info: Dict[str, Any]) -> None:
         f"eta_signal={info.get('eta_signal', math.nan):.4f}, "
         f"eta_info={info.get('eta_info', math.nan):.4f}, "
         f"x2_std_mean={info.get('attention_x2_std_mean', math.nan):.4f}, "
+        f"x2_std_min_required={info.get('attention_x2_std_effective_min', math.nan):.4f}, "
         f"eff_neighbors_mean={info.get('attention_effective_neighbors_mean', math.nan):.1f}, "
         f"eff_neighbors_limit={info.get('attention_effective_neighbors_limit', math.nan):.1f}"
         f"{suffix}"
@@ -531,6 +588,7 @@ def draw_good_Z_for_eta_with_ray(
     score_quantile: float,
     min_eta_info: float,
     min_attention_x2_std: float,
+    min_attention_x2_std_adaptive_factor: Optional[float],
     max_attention_effective_neighbors: Optional[float],
     max_attention_effective_neighbor_fraction: Optional[float],
     approximate_threshold: Optional[int],
@@ -539,6 +597,7 @@ def draw_good_Z_for_eta_with_ray(
     require_accepted: bool,
     ray_num_cpus: int,
     max_cpus_per_task: int,
+    ray_debug: bool = False,
     verbose: bool = True,
 ) -> Tuple[jnp.ndarray, Dict[str, Any]]:
     """Parallel candidate-Z screening using the active global Ray cluster."""
@@ -557,6 +616,7 @@ def draw_good_Z_for_eta_with_ray(
             continue
         futures.append(draw_good_z_chunk_remote.options(num_cpus=max_cpus_per_task).remote(
             key=key,
+            chunk_idx=worker_idx,
             p=p,
             q=q,
             params_true=params_true,
@@ -569,14 +629,51 @@ def draw_good_Z_for_eta_with_ray(
             score_quantile=score_quantile,
             min_eta_info=min_eta_info,
             min_attention_x2_std=min_attention_x2_std,
+            min_attention_x2_std_adaptive_factor=min_attention_x2_std_adaptive_factor,
             max_attention_effective_neighbors=max_attention_effective_neighbors,
             max_attention_effective_neighbor_fraction=max_attention_effective_neighbor_fraction,
             approximate_threshold=approximate_threshold,
             approx_rows=approx_rows,
             approx_pairs=approx_pairs,
+            ray_debug=ray_debug,
         ))
 
-    results = ray.get(futures)
+    if ray_debug:
+        pending = list(futures)
+        results = []
+        accepted_count = 0
+        best_info = None
+        started = time.time()
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1, timeout=30.0)
+            if not ready:
+                _print_progress(
+                    f"Z Ray progress: chunks_done={len(results)}/{len(futures)}, "
+                    f"pending={len(pending)}, elapsed_sec={time.time() - started:.1f}"
+                )
+                continue
+            for ref in ready:
+                result = ray.get(ref)
+                results.append(result)
+                info = result[1]
+                if bool(info.get("accepted", False)):
+                    accepted_count += 1
+                if (
+                    best_info is None or
+                    float(info.get("selection_score", float("-inf"))) >
+                    float(best_info.get("selection_score", float("-inf")))
+                ):
+                    best_info = info
+                _print_progress(
+                    f"Z Ray progress: chunks_done={len(results)}/{len(futures)}, "
+                    f"accepted_chunks={accepted_count}, "
+                    f"best_eta_info={best_info.get('eta_info', math.nan):.4f}, "
+                    f"best_x2_std={best_info.get('attention_x2_std_mean', math.nan):.4f}, "
+                    f"best_eff_neighbors={best_info.get('attention_effective_neighbors_mean', math.nan):.1f}, "
+                    f"elapsed_sec={time.time() - started:.1f}"
+                )
+    else:
+        results = ray.get(futures)
     Z, info = _select_best_z_result(results, require_good_z=require_accepted)
     info["parallel"] = True
     info["parallel_workers"] = len(futures)
@@ -615,11 +712,13 @@ def run_full_simulation(
     z_min_eta_signal: float = SIMULATION_Z_MIN_ETA_SIGNAL,
     z_min_eta_info: float = SIMULATION_Z_MIN_ETA_INFO,
     z_min_attention_x2_std: float = SIMULATION_Z_MIN_ATTENTION_X2_STD,
+    z_min_attention_x2_std_adaptive_factor: float = SIMULATION_Z_MIN_ATTENTION_X2_STD_ADAPTIVE_FACTOR,
     z_max_attention_effective_neighbors: float = SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS,
     z_max_attention_effective_neighbor_fraction: float = SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBOR_FRACTION,
     z_approx_threshold: int = SIMULATION_Z_APPROX_THRESHOLD,
     z_approx_rows: int = SIMULATION_Z_APPROX_ROWS,
     z_approx_pairs: int = SIMULATION_Z_APPROX_PAIRS,
+    ray_debug: bool = False,
     high_max_p: Optional[int] = None,
     results_dir: Path = RESULTS_DIR,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -676,6 +775,7 @@ def run_full_simulation(
         z_min_eta_signal=z_min_eta_signal,
         z_min_eta_info=z_min_eta_info,
         z_min_attention_x2_std=z_min_attention_x2_std,
+        z_min_attention_x2_std_adaptive_factor=z_min_attention_x2_std_adaptive_factor,
         z_max_attention_effective_neighbors=z_max_attention_effective_neighbors,
         z_max_attention_effective_neighbor_fraction=z_max_attention_effective_neighbor_fraction,
         z_approx_threshold=z_approx_threshold,
@@ -732,6 +832,7 @@ def run_full_simulation(
                 print(f"seed         : {seed}")
                 print(f"grid_size    : {grid_size_use}")
                 print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
+                print(f"ray_debug    : {ray_debug}")
                 print(f"dgp_eta_a    : {float(params_true['eta_a']):.4f}")
                 print(f"stationary   : {not bool(stat_info['rescaled'])}")
                 print(f"stationary_lhs: {float(stat_info['lhs_after']):.4f}")
@@ -744,6 +845,7 @@ def run_full_simulation(
                         f"min_eta_signal={z_min_eta_signal}, "
                         f"min_eta_info={z_min_eta_info}, "
                         f"min_x2_std={z_min_attention_x2_std}, "
+                        f"x2_adaptive_factor={z_min_attention_x2_std_adaptive_factor}, "
                         f"max_eff_neighbors=max({z_max_attention_effective_neighbors},"
                         f"{z_max_attention_effective_neighbor_fraction}*p), "
                         f"approx_threshold={z_approx_threshold}, "
@@ -772,6 +874,7 @@ def run_full_simulation(
                             score_quantile=z_score_quantile,
                             min_eta_info=z_min_eta_info,
                             min_attention_x2_std=z_min_attention_x2_std,
+                            min_attention_x2_std_adaptive_factor=z_min_attention_x2_std_adaptive_factor,
                             max_attention_effective_neighbors=z_max_attention_effective_neighbors,
                             max_attention_effective_neighbor_fraction=z_max_attention_effective_neighbor_fraction,
                             approximate_threshold=z_approx_threshold,
@@ -780,6 +883,7 @@ def run_full_simulation(
                             require_accepted=require_good_z,
                             ray_num_cpus=ray_num_cpus,
                             max_cpus_per_task=max_cpus_per_task,
+                            ray_debug=ray_debug,
                             verbose=True,
                         )
                     else:
@@ -796,6 +900,7 @@ def run_full_simulation(
                             score_quantile=z_score_quantile,
                             min_eta_info=z_min_eta_info,
                             min_attention_x2_std=z_min_attention_x2_std,
+                            min_attention_x2_std_adaptive_factor=z_min_attention_x2_std_adaptive_factor,
                             max_attention_effective_neighbors=z_max_attention_effective_neighbors,
                             max_attention_effective_neighbor_fraction=z_max_attention_effective_neighbor_fraction,
                             approximate_threshold=z_approx_threshold,
@@ -860,6 +965,7 @@ def run_full_simulation(
                             batch_size=batch_size,
                             dense_threshold=dense_threshold,
                             dgp_attention=dgp_attention_arg,
+                            ray_debug=ray_debug,
                         )
                         for r in range(R)
                     ]
@@ -918,6 +1024,10 @@ def run_full_simulation(
                     row["Z_eta_info"] = Z_info.get("eta_info", math.nan)
                     row["Z_attention_x2_std_mean"] = Z_info.get("attention_x2_std_mean", math.nan)
                     row["Z_attention_x2_std_min"] = Z_info.get("attention_x2_std_min", math.nan)
+                    row["Z_attention_x2_std_requested_min"] = Z_info.get("attention_x2_std_requested_min", math.nan)
+                    row["Z_attention_x2_std_effective_min"] = Z_info.get("attention_x2_std_effective_min", math.nan)
+                    row["Z_attention_x2_std_adaptive_min"] = Z_info.get("attention_x2_std_adaptive_min", math.nan)
+                    row["Z_attention_x2_std_adaptive_factor"] = Z_info.get("attention_x2_std_adaptive_factor", math.nan)
                     row["Z_attention_effective_neighbors_mean"] = Z_info.get("attention_effective_neighbors_mean", math.nan)
                     row["Z_attention_effective_neighbors_p95"] = Z_info.get("attention_effective_neighbors_p95", math.nan)
                     row["Z_attention_effective_neighbors_limit"] = Z_info.get("attention_effective_neighbors_limit", math.nan)
@@ -1042,6 +1152,16 @@ def main():
     parser.add_argument("--z-min-eta-info", type=float, default=SIMULATION_Z_MIN_ETA_INFO)
     parser.add_argument("--z-min-attention-x2-std", type=float, default=SIMULATION_Z_MIN_ATTENTION_X2_STD)
     parser.add_argument(
+        "--z-min-attention-x2-std-adaptive-factor",
+        type=float,
+        default=SIMULATION_Z_MIN_ATTENTION_X2_STD_ADAPTIVE_FACTOR,
+        help=(
+            "Cap the effective x2 std threshold at this multiple of "
+            "sqrt(mean(Gamma0_diag_proxy) / effective_neighbor_limit). "
+            "Use 0 to disable the adaptive cap."
+        ),
+    )
+    parser.add_argument(
         "--z-max-attention-effective-neighbors",
         type=float,
         default=SIMULATION_Z_MAX_ATTENTION_EFFECTIVE_NEIGHBORS,
@@ -1069,6 +1189,11 @@ def main():
         type=int,
         default=SIMULATION_Z_APPROX_PAIRS,
         help="Number of sampled off-diagonal pairs for approximate high-p Z screening.",
+    )
+    parser.add_argument(
+        "--ray-debug",
+        action="store_true",
+        help="Print Ray Z-screening chunk progress and replication actor start/end messages.",
     )
     parser.add_argument(
         "--high-max-p",
@@ -1108,11 +1233,13 @@ def main():
         z_min_eta_signal=args.z_min_eta_signal,
         z_min_eta_info=args.z_min_eta_info,
         z_min_attention_x2_std=args.z_min_attention_x2_std,
+        z_min_attention_x2_std_adaptive_factor=args.z_min_attention_x2_std_adaptive_factor,
         z_max_attention_effective_neighbors=args.z_max_attention_effective_neighbors,
         z_max_attention_effective_neighbor_fraction=args.z_max_attention_effective_neighbor_fraction,
         z_approx_threshold=args.z_approx_threshold,
         z_approx_rows=args.z_approx_rows,
         z_approx_pairs=args.z_approx_pairs,
+        ray_debug=args.ray_debug,
         high_max_p=args.high_max_p,
         results_dir=Path(args.results_dir),
     )
