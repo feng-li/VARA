@@ -13,6 +13,8 @@ from vara.attention import (
     attention_rows,
     attention_weighted_lags,
     build_attention,
+    build_topk_attention_cache,
+    evaluate_topk_cache_quality,
 )
 
 
@@ -83,6 +85,124 @@ class AttentionTests(unittest.TestCase):
 
         np.testing.assert_allclose(np.asarray(mv), np.asarray(W @ v), rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(np.asarray(X2), np.asarray(Y_lag @ W.T), rtol=1e-6, atol=1e-6)
+
+    def test_topk_attention_cache_matches_uncached_positive_and_negative_eta(self):
+        v = jnp.arange(5.0)
+        Y_lag = jax.random.normal(jax.random.PRNGKey(987), (7, 5))
+        cache = build_topk_attention_cache(self.Z, top_k=2, batch_size=2)
+
+        for eta in (0.7, -0.7):
+            W_uncached = build_attention(self.Z, eta=eta, scale=1.0, attention_mode="topk", top_k=2)
+            W_cached = build_attention(
+                self.Z,
+                eta=eta,
+                scale=1.0,
+                attention_mode="topk",
+                top_k=2,
+                attention_cache=cache,
+            )
+            mv_cached = attention_matvec(
+                self.Z, eta, v, self.params_scale,
+                batch_size=2,
+                dense_threshold=1,
+                attention_mode="topk",
+                attention_top_k=2,
+                attention_cache=cache,
+            )
+            X2_cached = attention_weighted_lags(
+                Y_lag, self.Z, eta, self.params_scale,
+                batch_size=2,
+                dense_threshold=1,
+                attention_mode="topk",
+                attention_top_k=2,
+                attention_cache=cache,
+            )
+
+            np.testing.assert_allclose(np.asarray(W_cached), np.asarray(W_uncached), rtol=1e-6, atol=1e-6)
+            np.testing.assert_allclose(np.asarray(mv_cached), np.asarray(W_uncached @ v), rtol=1e-6, atol=1e-6)
+            np.testing.assert_allclose(np.asarray(X2_cached), np.asarray(Y_lag @ W_uncached.T), rtol=1e-6, atol=1e-6)
+
+    def test_cluster_topk_cache_matches_exact_when_all_clusters_are_probed(self):
+        exact = build_topk_attention_cache(self.Z, top_k=2, batch_size=2)
+        cluster = build_topk_attention_cache(
+            self.Z,
+            top_k=2,
+            batch_size=2,
+            cache_mode="cluster",
+            cluster_count=1,
+            cluster_probe=1,
+            cluster_candidate_size=self.Z.shape[0],
+        )
+
+        for eta in (0.7, -0.7):
+            W_exact = build_attention(
+                self.Z,
+                eta=eta,
+                scale=1.0,
+                attention_mode="topk",
+                top_k=2,
+                attention_cache=exact,
+            )
+            W_cluster = build_attention(
+                self.Z,
+                eta=eta,
+                scale=1.0,
+                attention_mode="topk",
+                top_k=2,
+                attention_cache=cluster,
+            )
+
+            np.testing.assert_allclose(np.asarray(W_cluster), np.asarray(W_exact), rtol=1e-6, atol=1e-6)
+
+    def test_cluster_topk_cache_records_metadata_and_is_row_stochastic(self):
+        cache = build_topk_attention_cache(
+            self.Z,
+            top_k=2,
+            batch_size=2,
+            cache_mode="cluster",
+            cluster_count=2,
+            cluster_probe=1,
+            cluster_candidate_size=3,
+        )
+        W = build_attention(
+            self.Z,
+            eta=0.7,
+            scale=1.0,
+            attention_mode="topk",
+            top_k=2,
+            attention_cache=cache,
+        )
+
+        self.assertEqual(cache.mode, "cluster")
+        self.assertEqual(cache.cluster_count, 2)
+        self.assertEqual(cache.cluster_probe, 1)
+        self.assertEqual(cache.cluster_candidate_size, 3)
+        np.testing.assert_allclose(np.asarray(W.sum(axis=1)), np.ones(5), rtol=1e-6)
+        self.assertTrue(bool(jnp.all(jnp.sum(W > 0, axis=1) <= 2)))
+
+    def test_topk_cache_quality_is_perfect_for_exact_equivalent_cache(self):
+        cache = build_topk_attention_cache(
+            self.Z,
+            top_k=2,
+            batch_size=2,
+            cache_mode="cluster",
+            cluster_count=1,
+            cluster_probe=1,
+            cluster_candidate_size=self.Z.shape[0],
+        )
+
+        quality = evaluate_topk_cache_quality(
+            self.Z,
+            cache,
+            sample_rows=5,
+            batch_size=2,
+        )
+
+        self.assertEqual(quality["sample_rows"], 5)
+        self.assertAlmostEqual(quality["recall_pos_mean"], 1.0, places=6)
+        self.assertAlmostEqual(quality["recall_neg_mean"], 1.0, places=6)
+        self.assertLess(quality["score_loss_pos_mean"], 1e-7)
+        self.assertLess(quality["score_loss_neg_mean"], 1e-7)
 
 
 if __name__ == "__main__":

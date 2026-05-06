@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 import pandas as pd
 
-from .attention import attention_matvec
+from .attention import TopKAttentionCache, attention_matvec
 from .cov import compute_sandwich_variance
 from .dgp import ensure_stationarity
 from .fit import estimate
@@ -153,6 +153,7 @@ def simulate_vara(
     precomputed_attention: Optional[jnp.ndarray] = None,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
+    attention_cache: Optional[TopKAttentionCache] = None,
 ) -> jnp.ndarray:
     """Simulate observations from the VARA DGP.
 
@@ -188,6 +189,7 @@ def simulate_vara(
                 dense_threshold=dense_threshold,
                 attention_mode=attention_mode,
                 attention_top_k=attention_top_k,
+                attention_cache=attention_cache,
             )
         else:
             Wy = W @ y_prev
@@ -234,6 +236,7 @@ def estimate_eta_concentrated(
     dense_threshold: int = 2500,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
+    attention_cache: Optional[TopKAttentionCache] = None,
 ):
     """Estimate ``eta_a`` by a grid search followed by local refinement.
 
@@ -252,6 +255,7 @@ def estimate_eta_concentrated(
             dense_threshold=dense_threshold,
             attention_mode=attention_mode,
             attention_top_k=attention_top_k,
+            attention_cache=attention_cache,
         ))
     vals = jnp.array(vals)
     best_idx = int(jnp.argmax(vals))
@@ -272,6 +276,7 @@ def estimate_eta_concentrated(
         dense_threshold=dense_threshold,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
     eta_hat, obj = golden_section_maximize(fn, local_lower, local_upper)
     info = {
@@ -295,6 +300,7 @@ def finite_diff_second_derivative_eta(
     dense_threshold: int = 2500,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
+    attention_cache: Optional[TopKAttentionCache] = None,
 ) -> jnp.ndarray:
     """Approximate the second derivative of the concentrated eta objective."""
     lower, upper = eta_bounds
@@ -308,6 +314,7 @@ def finite_diff_second_derivative_eta(
         dense_threshold=dense_threshold,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
     fm = concentrated_eta_loglik(
         eta_center - h, Y, Z, params_scale, ridge,
@@ -315,6 +322,7 @@ def finite_diff_second_derivative_eta(
         dense_threshold=dense_threshold,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
     fp = concentrated_eta_loglik(
         eta_center + h, Y, Z, params_scale, ridge,
@@ -322,6 +330,7 @@ def finite_diff_second_derivative_eta(
         dense_threshold=dense_threshold,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
     return (fp - 2.0 * f0 + fm) / (h ** 2)
 
@@ -339,6 +348,7 @@ def estimate_eta_curvature(
     dense_threshold: int = 2500,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
+    attention_cache: Optional[TopKAttentionCache] = None,
 ):
     """Estimate the normalized curvature used for eta standard errors.
 
@@ -348,7 +358,7 @@ def estimate_eta_curvature(
     T_eff = Y.shape[0] - 1
     l2 = finite_diff_second_derivative_eta(
         eta_center, Y, Z, params_scale, h, eta_bounds, ridge, batch_size,
-        dense_threshold, attention_mode, attention_top_k
+        dense_threshold, attention_mode, attention_top_k, attention_cache
     )
     return -l2 / (T_eff * p), l2
 
@@ -531,6 +541,7 @@ def run_two_stage_on_dataset(
     dense_threshold: int,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
+    attention_cache: Optional[TopKAttentionCache] = None,
 ) -> Tuple[Dict[str, Any], int]:
     """Run the two-stage estimator on one simulated dataset.
 
@@ -553,6 +564,7 @@ def run_two_stage_on_dataset(
         dense_threshold=dense_threshold,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
     eta_hat_f = float(eta_hat)
 
@@ -566,6 +578,7 @@ def run_two_stage_on_dataset(
         dense_threshold=dense_threshold,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
 
     sigma2_hat = fit["sigma2_hat"]
@@ -588,6 +601,7 @@ def run_two_stage_on_dataset(
             dense_threshold=dense_threshold,
             attention_mode=attention_mode,
             attention_top_k=attention_top_k,
+            attention_cache=attention_cache,
         )
         if jnp.isfinite(omega_hat) and float(omega_hat) > 0:
             se_eta = 1.0 / jnp.sqrt(T_eff * p * omega_hat)
@@ -634,6 +648,7 @@ def full_single_replication(
     dgp_attention: Optional[jnp.ndarray] = None,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
+    attention_cache: Optional[TopKAttentionCache] = None,
 ) -> List[Dict[str, Any]]:
     """Simulate one dataset and run all requested estimation methods.
 
@@ -658,6 +673,7 @@ def full_single_replication(
         precomputed_attention=dgp_attention,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
 
     rows = []
@@ -695,6 +711,7 @@ def full_single_replication(
                     dense_threshold=dense_threshold,
                     attention_mode=attention_mode,
                     attention_top_k=attention_top_k,
+                    attention_cache=attention_cache,
                 )
                 extra = estimates.pop("extra", {})
                 report_gamma_ecp = setting == "low"
@@ -815,6 +832,24 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
                 "Z_attention_max_weight_mean",
                 "Z_selection_score",
                 "DGP_attention_precomputed",
+                "TopK_attention_cached",
+                "attention_cache_mode",
+                "attention_cache_clusters",
+                "attention_cache_probes",
+                "attention_cache_candidate_size",
+                "TopK_cache_quality_rows",
+                "TopK_cache_recall_pos_mean",
+                "TopK_cache_recall_pos_min",
+                "TopK_cache_score_loss_pos_mean",
+                "TopK_cache_score_loss_pos_max",
+                "TopK_cache_score_loss_pos_abs_mean",
+                "TopK_cache_recall_neg_mean",
+                "TopK_cache_recall_neg_min",
+                "TopK_cache_score_loss_neg_mean",
+                "TopK_cache_score_loss_neg_max",
+                "TopK_cache_score_loss_neg_abs_mean",
+                "attention_mode",
+                "attention_top_k",
                 "stationarity_rescaled",
                 "stationary_lhs_before",
                 "stationary_lhs_after",

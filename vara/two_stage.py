@@ -6,7 +6,7 @@ from typing import Dict, Optional
 
 import jax.numpy as jnp
 
-from .attention import attention_weighted_lags
+from .attention import TopKAttentionCache, attention_weighted_lags
 
 
 def fit_all_components_two_stage(
@@ -19,6 +19,7 @@ def fit_all_components_two_stage(
     dense_threshold: int = 2500,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
+    attention_cache: Optional[TopKAttentionCache] = None,
 ) -> Dict[str, jnp.ndarray]:
     """Fit componentwise OLS regressions at a fixed eta value.
 
@@ -39,6 +40,7 @@ def fit_all_components_two_stage(
         dense_threshold=dense_threshold,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
 
     xx11 = jnp.sum(X1 * X1, axis=0)
@@ -91,6 +93,7 @@ def concentrated_eta_loglik(
     dense_threshold: int = 2500,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
+    attention_cache: Optional[TopKAttentionCache] = None,
 ) -> jnp.ndarray:
     """Evaluate the concentrated Gaussian log-likelihood for ``eta_a``.
 
@@ -106,6 +109,7 @@ def concentrated_eta_loglik(
         dense_threshold=dense_threshold,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache=attention_cache,
     )
     sigma2_hat = jnp.maximum(fit["sigma2_hat"], eps)
     return -0.5 * T_eff * jnp.sum(jnp.log(sigma2_hat))

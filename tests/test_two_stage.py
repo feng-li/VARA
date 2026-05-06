@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from vara.attention import build_attention
+from vara.attention import build_attention, build_topk_attention_cache
 from vara.two_stage import concentrated_eta_loglik, fit_all_components_two_stage
 
 
@@ -71,6 +71,48 @@ class TwoStageTests(unittest.TestCase):
         self.assertTrue(bool(jnp.isfinite(value)))
         self.assertTrue(bool(jnp.isfinite(fit["alpha_hat"]).all()))
         self.assertTrue(bool(jnp.isfinite(fit["beta_hat"]).all()))
+
+    def test_topk_two_stage_cache_matches_uncached(self):
+        p, q, T = 5, 4, 20
+        params_scale = {"eta_a": 1.0}
+        Z = jax.random.normal(jax.random.PRNGKey(5), (p, q))
+        Y = jax.random.normal(jax.random.PRNGKey(6), (T, p))
+        cache = build_topk_attention_cache(Z, top_k=2, batch_size=2)
+
+        fit_uncached = fit_all_components_two_stage(
+            Y, Z, -0.25, params_scale,
+            attention_mode="topk",
+            attention_top_k=2,
+            batch_size=2,
+            dense_threshold=1,
+        )
+        fit_cached = fit_all_components_two_stage(
+            Y, Z, -0.25, params_scale,
+            attention_mode="topk",
+            attention_top_k=2,
+            batch_size=2,
+            dense_threshold=1,
+            attention_cache=cache,
+        )
+        value_uncached = concentrated_eta_loglik(
+            -0.25, Y, Z, params_scale,
+            attention_mode="topk",
+            attention_top_k=2,
+            batch_size=2,
+            dense_threshold=1,
+        )
+        value_cached = concentrated_eta_loglik(
+            -0.25, Y, Z, params_scale,
+            attention_mode="topk",
+            attention_top_k=2,
+            batch_size=2,
+            dense_threshold=1,
+            attention_cache=cache,
+        )
+
+        self.assertTrue(bool(jnp.allclose(fit_cached["alpha_hat"], fit_uncached["alpha_hat"])))
+        self.assertTrue(bool(jnp.allclose(fit_cached["beta_hat"], fit_uncached["beta_hat"])))
+        self.assertTrue(bool(jnp.allclose(value_cached, value_uncached)))
 
 
 if __name__ == "__main__":

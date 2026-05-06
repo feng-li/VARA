@@ -23,9 +23,6 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("RAY_memory_usage_threshold", "0.9")
 
-import jax
-jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
 import pandas as pd
 try:
     from tqdm import trange
@@ -49,16 +46,35 @@ except Exception:
     except Exception:
         RESULTS_DIR = Path("results")
 
-from vara.attention import build_attention
-from vara.dgp import draw_Z, draw_good_Z_for_eta, ensure_stationarity
-from vara.simulation import (
-    PARAMS_SCALE,
-    full_single_replication,
-    make_paper_table,
-    p_for_setting,
-    pack_result_row,
-    summarize_setting,
-)
+def _ensure_runtime_imports() -> None:
+    """Import JAX-dependent modules after optional Ray initialization."""
+    if "jax" in globals():
+        return
+
+    import jax as _jax
+    _jax.config.update("jax_enable_x64", True)
+    import jax.numpy as _jnp
+
+    from vara import attention as _attention
+    from vara import dgp as _dgp
+    from vara import simulation as _simulation
+
+    globals().update({
+        "jax": _jax,
+        "jnp": _jnp,
+        "build_attention": _attention.build_attention,
+        "build_topk_attention_cache": _attention.build_topk_attention_cache,
+        "evaluate_topk_cache_quality": _attention.evaluate_topk_cache_quality,
+        "draw_Z": _dgp.draw_Z,
+        "draw_good_Z_for_eta": _dgp.draw_good_Z_for_eta,
+        "ensure_stationarity": _dgp.ensure_stationarity,
+        "PARAMS_SCALE": _simulation.PARAMS_SCALE,
+        "full_single_replication": _simulation.full_single_replication,
+        "make_paper_table": _simulation.make_paper_table,
+        "p_for_setting": _simulation.p_for_setting,
+        "pack_result_row": _simulation.pack_result_row,
+        "summarize_setting": _simulation.summarize_setting,
+    })
 
 
 SIMULATION_ETA_A = 1.0
@@ -85,6 +101,12 @@ SIMULATION_Z_APPROX_ROWS = 512
 SIMULATION_Z_APPROX_PAIRS = 200_000
 SIMULATION_ATTENTION_MODE = "dense"
 SIMULATION_ATTENTION_TOP_K = None
+SIMULATION_ATTENTION_CACHE_MODE = "exact"
+SIMULATION_ATTENTION_CACHE_CLUSTERS = 512
+SIMULATION_ATTENTION_CACHE_PROBES = 4
+SIMULATION_ATTENTION_CACHE_CANDIDATE_SIZE = None
+SIMULATION_ATTENTION_CACHE_CANDIDATE_MULTIPLIER = 5.0
+SIMULATION_ATTENTION_CACHE_DIAGNOSTIC_ROWS = 64
 
 
 def _parse_int_list(value: str) -> List[int]:
@@ -127,6 +149,7 @@ def _full_simulation_config_tag(
     high_max_p: Optional[int],
     run_tag: str,
 ) -> str:
+    _ensure_runtime_imports()
     p_values = []
     for setting in settings:
         for T in T_list:
@@ -190,6 +213,7 @@ def draw_simulation_dgp_params(
     eta_a: float = SIMULATION_ETA_A,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Draw the strengthened DGP used by the full simulation driver."""
+    _ensure_runtime_imports()
     k_gamma, k_beta, k_sig = jax.random.split(key, 3)
     params_true = {
         "eta_a": jnp.asarray(eta_a),
@@ -239,7 +263,14 @@ def make_simulation_setup_table(
     z_approx_pairs: int,
     attention_mode: str,
     attention_top_k: Optional[int],
+    attention_cache_mode: str,
+    attention_cache_clusters: int,
+    attention_cache_probes: int,
+    attention_cache_candidate_size: Optional[int],
+    attention_cache_candidate_multiplier: float,
+    attention_cache_diagnostic_rows: int,
 ) -> pd.DataFrame:
+    _ensure_runtime_imports()
     rows = []
     z_rule = (
         f"max_tries={z_max_tries}; "
@@ -280,6 +311,16 @@ def make_simulation_setup_table(
                     "Z_require_accepted": bool(require_good_z),
                     "attention_mode": attention_mode,
                     "attention_top_k": attention_top_k if attention_top_k is not None else "",
+                    "attention_cache_mode": attention_cache_mode,
+                    "attention_cache_clusters": attention_cache_clusters,
+                    "attention_cache_probes": attention_cache_probes,
+                    "attention_cache_candidate_size": (
+                        attention_cache_candidate_size
+                        if attention_cache_candidate_size is not None
+                        else ""
+                    ),
+                    "attention_cache_candidate_multiplier": attention_cache_candidate_multiplier,
+                    "attention_cache_diagnostic_rows": attention_cache_diagnostic_rows,
                     "DGP_attention_precomputed": bool(precompute_dgp_attention),
                 })
     return pd.DataFrame(rows)
@@ -323,6 +364,22 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "Z_attention_max_weight_mean",
         "Z_selection_score",
         "DGP_attention_precomputed",
+        "TopK_attention_cached",
+        "attention_cache_mode",
+        "attention_cache_clusters",
+        "attention_cache_probes",
+        "attention_cache_candidate_size",
+        "TopK_cache_quality_rows",
+        "TopK_cache_recall_pos_mean",
+        "TopK_cache_recall_pos_min",
+        "TopK_cache_score_loss_pos_mean",
+        "TopK_cache_score_loss_pos_max",
+        "TopK_cache_score_loss_pos_abs_mean",
+        "TopK_cache_recall_neg_mean",
+        "TopK_cache_recall_neg_min",
+        "TopK_cache_score_loss_neg_mean",
+        "TopK_cache_score_loss_neg_max",
+        "TopK_cache_score_loss_neg_abs_mean",
         "attention_mode",
         "attention_top_k",
         "stationarity_rescaled",
@@ -373,6 +430,7 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
 
 class FullSimulationActor:
     def run(self, *args, **kwargs):
+        _ensure_runtime_imports()
         ray_debug = bool(kwargs.pop("ray_debug", False))
         rep = kwargs.get("rep", args[0] if len(args) > 0 else -1)
         setting = kwargs.get("setting", "unknown")
@@ -390,6 +448,8 @@ class FullSimulationActor:
         try:
             if isinstance(kwargs.get("dgp_attention"), ray.ObjectRef):
                 kwargs["dgp_attention"] = ray.get(kwargs["dgp_attention"])
+            if isinstance(kwargs.get("attention_cache"), ray.ObjectRef):
+                kwargs["attention_cache"] = ray.get(kwargs["attention_cache"])
             out = full_single_replication(*args, **kwargs)
             gc.collect()
             if ray_debug:
@@ -461,6 +521,7 @@ def draw_good_z_chunk_remote(
     ray_debug: bool = False,
 ):
     """Score a contiguous chunk of candidate Z designs."""
+    _ensure_runtime_imports()
     started = time.time()
     if ray_debug:
         print(
@@ -736,6 +797,12 @@ def run_full_simulation(
     z_approx_pairs: int = SIMULATION_Z_APPROX_PAIRS,
     attention_mode: str = SIMULATION_ATTENTION_MODE,
     attention_top_k: Optional[int] = SIMULATION_ATTENTION_TOP_K,
+    attention_cache_mode: str = SIMULATION_ATTENTION_CACHE_MODE,
+    attention_cache_clusters: int = SIMULATION_ATTENTION_CACHE_CLUSTERS,
+    attention_cache_probes: int = SIMULATION_ATTENTION_CACHE_PROBES,
+    attention_cache_candidate_size: Optional[int] = SIMULATION_ATTENTION_CACHE_CANDIDATE_SIZE,
+    attention_cache_candidate_multiplier: float = SIMULATION_ATTENTION_CACHE_CANDIDATE_MULTIPLIER,
+    attention_cache_diagnostic_rows: int = SIMULATION_ATTENTION_CACHE_DIAGNOSTIC_ROWS,
     ray_debug: bool = False,
     high_max_p: Optional[int] = None,
     results_dir: Path = RESULTS_DIR,
@@ -752,9 +819,25 @@ def run_full_simulation(
         raise ValueError("attention_mode must be 'dense' or 'topk'.")
     if attention_mode == "topk" and attention_top_k is None:
         raise ValueError("--attention-top-k must be set when --attention-mode=topk.")
+    if attention_cache_mode not in {"exact", "cluster"}:
+        raise ValueError("attention_cache_mode must be 'exact' or 'cluster'.")
 
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
+
+    ray_started_here = False
+    if use_ray and not ray.is_initialized():
+        _print_progress(f"Starting Ray before JAX import: ray_num_cpus={ray_num_cpus}, max_cpus_per_task={max_cpus_per_task}")
+        ray.init(
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            num_cpus=ray_num_cpus,
+            _node_ip_address="127.0.0.1",
+        )
+        ray_started_here = True
+        _print_progress("Ray started")
+
+    _ensure_runtime_imports()
 
     key = jax.random.PRNGKey(seed)
     all_detail_rows: List[Dict[str, Any]] = []
@@ -805,19 +888,13 @@ def run_full_simulation(
         z_approx_pairs=z_approx_pairs,
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
+        attention_cache_mode=attention_cache_mode,
+        attention_cache_clusters=attention_cache_clusters,
+        attention_cache_probes=attention_cache_probes,
+        attention_cache_candidate_size=attention_cache_candidate_size,
+        attention_cache_candidate_multiplier=attention_cache_candidate_multiplier,
+        attention_cache_diagnostic_rows=attention_cache_diagnostic_rows,
     )
-
-    ray_started_here = False
-    if use_ray and not ray.is_initialized():
-        _print_progress(f"Starting Ray: ray_num_cpus={ray_num_cpus}, max_cpus_per_task={max_cpus_per_task}")
-        ray.init(
-            ignore_reinit_error=True,
-            include_dashboard=False,
-            num_cpus=ray_num_cpus,
-            _node_ip_address="127.0.0.1",
-        )
-        ray_started_here = True
-        _print_progress("Ray started")
 
     for setting in settings:
         if setting not in {"low", "high"}:
@@ -858,6 +935,16 @@ def run_full_simulation(
                 print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
                 print(f"ray_debug    : {ray_debug}")
                 print(f"attention    : {attention_mode}" + (f", top_k={attention_top_k}" if attention_mode == "topk" else ""))
+                if attention_mode == "topk":
+                    cache_detail = f"mode={attention_cache_mode}"
+                    if attention_cache_mode == "cluster":
+                        cache_detail += (
+                            f", clusters={attention_cache_clusters}, "
+                            f"probes={attention_cache_probes}, "
+                            f"candidate_size={attention_cache_candidate_size}, "
+                            f"candidate_multiplier={attention_cache_candidate_multiplier}"
+                        )
+                    print(f"attention cache: {cache_detail}")
                 print(f"dgp_eta_a    : {float(params_true['eta_a']):.4f}")
                 print(f"stationary   : {not bool(stat_info['rescaled'])}")
                 print(f"stationary_lhs: {float(stat_info['lhs_after']):.4f}")
@@ -945,8 +1032,48 @@ def run_full_simulation(
                 _print_progress(f"Z ready: accepted={bool(Z_info.get('accepted', False))}")
 
                 dgp_attention = None
+                attention_cache = None
+                attention_cache_quality: Dict[str, Any] = {}
                 if precompute_dgp_attention and attention_mode == "topk":
                     _print_progress("Skipping DGP attention precompute for top-k attention")
+                if attention_mode == "topk":
+                    _print_progress("Starting top-k attention cache build")
+                    attention_cache = build_topk_attention_cache(
+                        Z,
+                        int(attention_top_k),
+                        batch_size=batch_size,
+                        include_negative=True,
+                        cache_mode=attention_cache_mode,
+                        cluster_count=attention_cache_clusters,
+                        cluster_probe=attention_cache_probes,
+                        cluster_candidate_size=attention_cache_candidate_size,
+                        cluster_candidate_multiplier=attention_cache_candidate_multiplier,
+                    )
+                    attention_cache.indices_pos.block_until_ready()
+                    attention_cache.scores_pos.block_until_ready()
+                    if attention_cache.indices_neg is not None:
+                        attention_cache.indices_neg.block_until_ready()
+                    if attention_cache.scores_neg is not None:
+                        attention_cache.scores_neg.block_until_ready()
+                    _print_progress("Top-k attention cache ready")
+                    if attention_cache.mode == "cluster" and attention_cache_diagnostic_rows > 0:
+                        _print_progress(
+                            f"Starting top-k cache quality diagnostics: rows={attention_cache_diagnostic_rows}"
+                        )
+                        attention_cache_quality = evaluate_topk_cache_quality(
+                            Z,
+                            attention_cache,
+                            sample_rows=attention_cache_diagnostic_rows,
+                            batch_size=min(batch_size, max(1, attention_cache_diagnostic_rows)),
+                            include_negative=True,
+                        )
+                        _print_progress(
+                            "Top-k cache quality: "
+                            f"pos_recall={attention_cache_quality.get('recall_pos_mean', math.nan):.4f}, "
+                            f"pos_loss={attention_cache_quality.get('score_loss_pos_mean', math.nan):.4g}, "
+                            f"neg_recall={attention_cache_quality.get('recall_neg_mean', math.nan):.4f}, "
+                            f"neg_loss={attention_cache_quality.get('score_loss_neg_mean', math.nan):.4g}"
+                        )
                 elif precompute_dgp_attention:
                     _print_progress("Starting DGP attention precompute")
                     dgp_attention = build_attention(
@@ -974,6 +1101,7 @@ def run_full_simulation(
                         for _ in range(n_actors)
                     ]
                     dgp_attention_arg = ray.put(dgp_attention) if dgp_attention is not None else None
+                    attention_cache_arg = ray.put(attention_cache) if attention_cache is not None else None
                     _print_progress("Submitting replication tasks")
                     futures = [
                         actors[r % n_actors].run.remote(
@@ -1000,6 +1128,7 @@ def run_full_simulation(
                             dgp_attention=dgp_attention_arg,
                             attention_mode=attention_mode,
                             attention_top_k=attention_top_k,
+                            attention_cache=attention_cache_arg,
                             ray_debug=ray_debug,
                         )
                         for r in range(R)
@@ -1035,6 +1164,7 @@ def run_full_simulation(
                             dgp_attention=dgp_attention,
                             attention_mode=attention_mode,
                             attention_top_k=attention_top_k,
+                            attention_cache=attention_cache,
                         ))
 
                 elapsed_setting = (datetime.now() - setting_start).total_seconds()
@@ -1071,6 +1201,28 @@ def run_full_simulation(
                     row["Z_attention_max_weight_mean"] = Z_info.get("attention_max_weight_mean", math.nan)
                     row["Z_selection_score"] = Z_info.get("selection_score", math.nan)
                     row["DGP_attention_precomputed"] = dgp_attention is not None
+                    row["TopK_attention_cached"] = attention_cache is not None
+                    row["attention_cache_mode"] = attention_cache.mode if attention_cache is not None else ""
+                    row["attention_cache_clusters"] = (
+                        attention_cache.cluster_count if attention_cache is not None else math.nan
+                    )
+                    row["attention_cache_probes"] = (
+                        attention_cache.cluster_probe if attention_cache is not None else math.nan
+                    )
+                    row["attention_cache_candidate_size"] = (
+                        attention_cache.cluster_candidate_size if attention_cache is not None else math.nan
+                    )
+                    row["TopK_cache_quality_rows"] = attention_cache_quality.get("sample_rows", math.nan)
+                    row["TopK_cache_recall_pos_mean"] = attention_cache_quality.get("recall_pos_mean", math.nan)
+                    row["TopK_cache_recall_pos_min"] = attention_cache_quality.get("recall_pos_min", math.nan)
+                    row["TopK_cache_score_loss_pos_mean"] = attention_cache_quality.get("score_loss_pos_mean", math.nan)
+                    row["TopK_cache_score_loss_pos_max"] = attention_cache_quality.get("score_loss_pos_max", math.nan)
+                    row["TopK_cache_score_loss_pos_abs_mean"] = attention_cache_quality.get("score_loss_pos_abs_mean", math.nan)
+                    row["TopK_cache_recall_neg_mean"] = attention_cache_quality.get("recall_neg_mean", math.nan)
+                    row["TopK_cache_recall_neg_min"] = attention_cache_quality.get("recall_neg_min", math.nan)
+                    row["TopK_cache_score_loss_neg_mean"] = attention_cache_quality.get("score_loss_neg_mean", math.nan)
+                    row["TopK_cache_score_loss_neg_max"] = attention_cache_quality.get("score_loss_neg_max", math.nan)
+                    row["TopK_cache_score_loss_neg_abs_mean"] = attention_cache_quality.get("score_loss_neg_abs_mean", math.nan)
                     row["attention_mode"] = attention_mode
                     row["attention_top_k"] = attention_top_k if attention_top_k is not None else math.nan
                     row["stationarity_rescaled"] = bool(stat_info["rescaled"])
@@ -1177,6 +1329,42 @@ def main():
         type=int,
         default=SIMULATION_ATTENTION_TOP_K,
         help="Number of neighbors for --attention-mode topk.",
+    )
+    parser.add_argument(
+        "--attention-cache-mode",
+        choices=["exact", "cluster"],
+        default=SIMULATION_ATTENTION_CACHE_MODE,
+        help="Top-k cache builder. exact preserves current behavior; cluster uses approximate candidate clusters.",
+    )
+    parser.add_argument(
+        "--attention-cache-clusters",
+        type=int,
+        default=SIMULATION_ATTENTION_CACHE_CLUSTERS,
+        help="Number of deterministic anchor clusters for --attention-cache-mode cluster.",
+    )
+    parser.add_argument(
+        "--attention-cache-probes",
+        type=int,
+        default=SIMULATION_ATTENTION_CACHE_PROBES,
+        help="Number of nearest clusters searched per row for --attention-cache-mode cluster.",
+    )
+    parser.add_argument(
+        "--attention-cache-candidate-size",
+        type=int,
+        default=SIMULATION_ATTENTION_CACHE_CANDIDATE_SIZE,
+        help="Rows retained per cluster for --attention-cache-mode cluster. Default uses multiplier * top_k.",
+    )
+    parser.add_argument(
+        "--attention-cache-candidate-multiplier",
+        type=float,
+        default=SIMULATION_ATTENTION_CACHE_CANDIDATE_MULTIPLIER,
+        help="Default cluster candidate size as multiplier * top_k.",
+    )
+    parser.add_argument(
+        "--attention-cache-diagnostic-rows",
+        type=int,
+        default=SIMULATION_ATTENTION_CACHE_DIAGNOSTIC_ROWS,
+        help="Sampled rows used to compare cluster top-k cache against exact top-k. Use 0 to disable.",
     )
     parser.add_argument(
         "--screen-z",
@@ -1292,6 +1480,12 @@ def main():
         z_approx_pairs=args.z_approx_pairs,
         attention_mode=args.attention_mode,
         attention_top_k=args.attention_top_k,
+        attention_cache_mode=args.attention_cache_mode,
+        attention_cache_clusters=args.attention_cache_clusters,
+        attention_cache_probes=args.attention_cache_probes,
+        attention_cache_candidate_size=args.attention_cache_candidate_size,
+        attention_cache_candidate_multiplier=args.attention_cache_candidate_multiplier,
+        attention_cache_diagnostic_rows=args.attention_cache_diagnostic_rows,
         ray_debug=args.ray_debug,
         high_max_p=args.high_max_p,
         results_dir=Path(args.results_dir),
