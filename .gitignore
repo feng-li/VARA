@@ -2,7 +2,7 @@ __pycache__/
 .pytest_cache/
 .ropeproject/
 .codex/
-docs/**
+docs/
 outputs/
 results_coverage_@*.csv
 *.npz
