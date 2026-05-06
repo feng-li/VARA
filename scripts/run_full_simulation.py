@@ -375,11 +375,19 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "TopK_cache_score_loss_pos_mean",
         "TopK_cache_score_loss_pos_max",
         "TopK_cache_score_loss_pos_abs_mean",
+        "TopK_cache_selected_valid_count_pos_mean",
+        "TopK_cache_selected_valid_count_pos_min",
+        "TopK_cache_selected_duplicate_pair_count_pos_mean",
+        "TopK_cache_selected_duplicate_pair_count_pos_max",
         "TopK_cache_recall_neg_mean",
         "TopK_cache_recall_neg_min",
         "TopK_cache_score_loss_neg_mean",
         "TopK_cache_score_loss_neg_max",
         "TopK_cache_score_loss_neg_abs_mean",
+        "TopK_cache_selected_valid_count_neg_mean",
+        "TopK_cache_selected_valid_count_neg_min",
+        "TopK_cache_selected_duplicate_pair_count_neg_mean",
+        "TopK_cache_selected_duplicate_pair_count_neg_max",
         "attention_mode",
         "attention_top_k",
         "stationarity_rescaled",
@@ -1071,8 +1079,12 @@ def run_full_simulation(
                             "Top-k cache quality: "
                             f"pos_recall={attention_cache_quality.get('recall_pos_mean', math.nan):.4f}, "
                             f"pos_loss={attention_cache_quality.get('score_loss_pos_mean', math.nan):.4g}, "
+                            f"pos_valid_min={attention_cache_quality.get('selected_valid_count_pos_min', math.nan):.0f}, "
+                            f"pos_dup_max={attention_cache_quality.get('selected_duplicate_pair_count_pos_max', math.nan):.0f}, "
                             f"neg_recall={attention_cache_quality.get('recall_neg_mean', math.nan):.4f}, "
-                            f"neg_loss={attention_cache_quality.get('score_loss_neg_mean', math.nan):.4g}"
+                            f"neg_loss={attention_cache_quality.get('score_loss_neg_mean', math.nan):.4g}, "
+                            f"neg_valid_min={attention_cache_quality.get('selected_valid_count_neg_min', math.nan):.0f}, "
+                            f"neg_dup_max={attention_cache_quality.get('selected_duplicate_pair_count_neg_max', math.nan):.0f}"
                         )
                 elif precompute_dgp_attention:
                     _print_progress("Starting DGP attention precompute")
@@ -1218,11 +1230,19 @@ def run_full_simulation(
                     row["TopK_cache_score_loss_pos_mean"] = attention_cache_quality.get("score_loss_pos_mean", math.nan)
                     row["TopK_cache_score_loss_pos_max"] = attention_cache_quality.get("score_loss_pos_max", math.nan)
                     row["TopK_cache_score_loss_pos_abs_mean"] = attention_cache_quality.get("score_loss_pos_abs_mean", math.nan)
+                    row["TopK_cache_selected_valid_count_pos_mean"] = attention_cache_quality.get("selected_valid_count_pos_mean", math.nan)
+                    row["TopK_cache_selected_valid_count_pos_min"] = attention_cache_quality.get("selected_valid_count_pos_min", math.nan)
+                    row["TopK_cache_selected_duplicate_pair_count_pos_mean"] = attention_cache_quality.get("selected_duplicate_pair_count_pos_mean", math.nan)
+                    row["TopK_cache_selected_duplicate_pair_count_pos_max"] = attention_cache_quality.get("selected_duplicate_pair_count_pos_max", math.nan)
                     row["TopK_cache_recall_neg_mean"] = attention_cache_quality.get("recall_neg_mean", math.nan)
                     row["TopK_cache_recall_neg_min"] = attention_cache_quality.get("recall_neg_min", math.nan)
                     row["TopK_cache_score_loss_neg_mean"] = attention_cache_quality.get("score_loss_neg_mean", math.nan)
                     row["TopK_cache_score_loss_neg_max"] = attention_cache_quality.get("score_loss_neg_max", math.nan)
                     row["TopK_cache_score_loss_neg_abs_mean"] = attention_cache_quality.get("score_loss_neg_abs_mean", math.nan)
+                    row["TopK_cache_selected_valid_count_neg_mean"] = attention_cache_quality.get("selected_valid_count_neg_mean", math.nan)
+                    row["TopK_cache_selected_valid_count_neg_min"] = attention_cache_quality.get("selected_valid_count_neg_min", math.nan)
+                    row["TopK_cache_selected_duplicate_pair_count_neg_mean"] = attention_cache_quality.get("selected_duplicate_pair_count_neg_mean", math.nan)
+                    row["TopK_cache_selected_duplicate_pair_count_neg_max"] = attention_cache_quality.get("selected_duplicate_pair_count_neg_max", math.nan)
                     row["attention_mode"] = attention_mode
                     row["attention_top_k"] = attention_top_k if attention_top_k is not None else math.nan
                     row["stationarity_rescaled"] = bool(stat_info["rescaled"])

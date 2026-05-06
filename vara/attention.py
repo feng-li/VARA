@@ -129,15 +129,11 @@ def _build_cluster_member_table(
 ) -> jnp.ndarray:
     ids_np = np.asarray(cluster_ids)
     scores_np = np.asarray(cluster_scores)
-    p = ids_np.shape[0]
-    all_idx = np.arange(p, dtype=np.int32)
-    fallback = np.resize(all_idx, candidate_size)
-    table = np.empty((cluster_count, candidate_size), dtype=np.int32)
+    table = np.full((cluster_count, candidate_size), -1, dtype=np.int32)
 
     for c in range(cluster_count):
         members = np.flatnonzero(ids_np == c).astype(np.int32)
         if members.size == 0:
-            table[c] = fallback
             continue
         if members.size > candidate_size:
             member_scores = scores_np[members]
@@ -146,10 +142,7 @@ def _build_cluster_member_table(
             chosen = members[part]
         else:
             chosen = members
-        if chosen.size < candidate_size:
-            pad = all_idx[~np.isin(all_idx, chosen)]
-            chosen = np.concatenate([chosen, pad])
-        table[c] = np.resize(chosen, candidate_size)
+        table[c, : min(chosen.size, candidate_size)] = chosen[:candidate_size]
     return jnp.asarray(table)
 
 
@@ -171,16 +164,19 @@ def _cluster_candidate_topk(
     _, probe_idx = jax.lax.top_k(probe_scores, cluster_probe)
 
     candidate_idx = member_table[probe_idx].reshape((Zb.shape[0], -1))
-    candidate_Z = Z[candidate_idx]
+    valid_candidate = candidate_idx >= 0
+    safe_candidate_idx = jnp.where(valid_candidate, candidate_idx, 0)
+    candidate_Z = Z[safe_candidate_idx]
     raw_scores = jnp.sum(Zb[:, None, :] * candidate_Z, axis=2) / sqrt_q
+    invalid_or_self = (~valid_candidate) | (candidate_idx == row_ids[:, None])
 
     if positive:
-        masked_scores = jnp.where(candidate_idx == row_ids[:, None], -jnp.inf, raw_scores)
+        masked_scores = jnp.where(invalid_or_self, -jnp.inf, raw_scores)
         selected_scores, selected_pos = jax.lax.top_k(masked_scores, top_k)
         selected_idx = jnp.take_along_axis(candidate_idx, selected_pos, axis=1)
         return selected_idx, selected_scores
 
-    masked_scores = jnp.where(candidate_idx == row_ids[:, None], jnp.inf, raw_scores)
+    masked_scores = jnp.where(invalid_or_self, jnp.inf, raw_scores)
     selected_neg_scores, selected_pos = jax.lax.top_k(-masked_scores, top_k)
     selected_idx = jnp.take_along_axis(candidate_idx, selected_pos, axis=1)
     return selected_idx, -selected_neg_scores
@@ -360,7 +356,8 @@ def _topk_recall_and_score_loss(
     recall_rows = jnp.mean(found, axis=1)
 
     exact_sum = jnp.sum(exact_scores, axis=1)
-    cache_sum = jnp.sum(cache_scores, axis=1)
+    finite_cache_scores = jnp.where(jnp.isfinite(cache_scores), cache_scores, 0.0)
+    cache_sum = jnp.sum(finite_cache_scores, axis=1)
     if positive:
         loss_rows = jnp.maximum(exact_sum - cache_sum, 0.0)
     else:
@@ -373,6 +370,28 @@ def _topk_recall_and_score_loss(
         "score_loss_mean": float(jnp.mean(relative_loss_rows)),
         "score_loss_max": float(jnp.max(relative_loss_rows)),
         "score_loss_abs_mean": float(jnp.mean(loss_rows / max(k, 1))),
+    }
+
+
+def _topk_selected_stats(cache_idx: jnp.ndarray, cache_scores: jnp.ndarray) -> Dict[str, float]:
+    """Report invalid padding and duplicate selected neighbors."""
+    valid = (cache_idx >= 0) & jnp.isfinite(cache_scores)
+    valid_count = jnp.sum(valid, axis=1)
+    k = int(cache_idx.shape[1])
+    upper = jnp.triu(jnp.ones((k, k), dtype=bool), k=1)
+    duplicate_pairs = (
+        (cache_idx[:, :, None] == cache_idx[:, None, :])
+        & valid[:, :, None]
+        & valid[:, None, :]
+        & upper[None, :, :]
+    )
+    duplicate_count = jnp.sum(duplicate_pairs, axis=(1, 2))
+
+    return {
+        "selected_valid_count_mean": float(jnp.mean(valid_count)),
+        "selected_valid_count_min": float(jnp.min(valid_count)),
+        "selected_duplicate_pair_count_mean": float(jnp.mean(duplicate_count)),
+        "selected_duplicate_pair_count_max": float(jnp.max(duplicate_count)),
     }
 
 
@@ -411,6 +430,7 @@ def evaluate_topk_cache_quality(
         cache_pos_scores,
         positive=True,
     )
+    pos_selected = _topk_selected_stats(cache_pos_idx, cache_pos_scores)
 
     out = {
         "sample_rows": int(n_rows),
@@ -419,6 +439,10 @@ def evaluate_topk_cache_quality(
         "score_loss_pos_mean": pos["score_loss_mean"],
         "score_loss_pos_max": pos["score_loss_max"],
         "score_loss_pos_abs_mean": pos["score_loss_abs_mean"],
+        "selected_valid_count_pos_mean": pos_selected["selected_valid_count_mean"],
+        "selected_valid_count_pos_min": pos_selected["selected_valid_count_min"],
+        "selected_duplicate_pair_count_pos_mean": pos_selected["selected_duplicate_pair_count_mean"],
+        "selected_duplicate_pair_count_pos_max": pos_selected["selected_duplicate_pair_count_max"],
     }
 
     if include_negative and cache.indices_neg is not None and cache.scores_neg is not None:
@@ -438,12 +462,17 @@ def evaluate_topk_cache_quality(
             cache_neg_scores,
             positive=False,
         )
+        neg_selected = _topk_selected_stats(cache_neg_idx, cache_neg_scores)
         out.update({
             "recall_neg_mean": neg["recall_mean"],
             "recall_neg_min": neg["recall_min"],
             "score_loss_neg_mean": neg["score_loss_mean"],
             "score_loss_neg_max": neg["score_loss_max"],
             "score_loss_neg_abs_mean": neg["score_loss_abs_mean"],
+            "selected_valid_count_neg_mean": neg_selected["selected_valid_count_mean"],
+            "selected_valid_count_neg_min": neg_selected["selected_valid_count_min"],
+            "selected_duplicate_pair_count_neg_mean": neg_selected["selected_duplicate_pair_count_mean"],
+            "selected_duplicate_pair_count_neg_max": neg_selected["selected_duplicate_pair_count_max"],
         })
 
     return out
@@ -464,8 +493,22 @@ def topk_attention_cached_indices_weights(
     else:
         idx = cache.indices_pos[start:stop]
         raw_scores = cache.scores_pos[start:stop]
-    weights = jax.nn.softmax(factor * raw_scores, axis=1)
-    return idx, weights
+    valid = (idx >= 0) & jnp.isfinite(raw_scores)
+    weighted_scores = jnp.where(valid, factor * raw_scores, -jnp.inf)
+    has_valid = jnp.any(valid, axis=1, keepdims=True)
+    weighted_scores = jnp.where(has_valid, weighted_scores, 0.0)
+    weights = jax.nn.softmax(weighted_scores, axis=1)
+    weights = jnp.where(valid, weights, 0.0)
+    row_sums = jnp.sum(weights, axis=1, keepdims=True)
+    weights = weights / jnp.where(row_sums > 0.0, row_sums, 1.0)
+
+    safe_idx = jnp.where(valid, idx, 0)
+    fallback_idx = ((jnp.arange(start, stop) + 1) % int(cache.indices_pos.shape[0]))[:, None]
+    fallback_idx = jnp.broadcast_to(fallback_idx, safe_idx.shape)
+    fallback_weights = jnp.where(jnp.arange(safe_idx.shape[1])[None, :] == 0, 1.0, 0.0)
+    safe_idx = jnp.where(has_valid, safe_idx, fallback_idx)
+    weights = jnp.where(has_valid, weights, fallback_weights)
+    return safe_idx, weights
 
 
 def topk_attention_indices_weights(
@@ -523,7 +566,7 @@ def build_attention(
         )
         rows = jnp.arange(p)[:, None]
         W = jnp.zeros((p, p), dtype=Z.dtype)
-        return W.at[rows, idx].set(weights)
+        return W.at[rows, idx].add(weights)
 
     scores = (Z @ Z.T) / jnp.sqrt(q)
     scores = eta * scores
@@ -552,7 +595,7 @@ def attention_rows(
         )
         rows = jnp.arange(stop - start)[:, None]
         Wb = jnp.zeros((stop - start, p), dtype=Z.dtype)
-        return Wb.at[rows, idx].set(weights)
+        return Wb.at[rows, idx].add(weights)
 
     Zb = Z[start:stop]
     scores = (Zb @ Z.T) / jnp.sqrt(q)

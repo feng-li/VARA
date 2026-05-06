@@ -203,6 +203,33 @@ class AttentionTests(unittest.TestCase):
         self.assertAlmostEqual(quality["recall_neg_mean"], 1.0, places=6)
         self.assertLess(quality["score_loss_pos_mean"], 1e-7)
         self.assertLess(quality["score_loss_neg_mean"], 1e-7)
+        self.assertEqual(quality["selected_valid_count_pos_min"], 2)
+        self.assertEqual(quality["selected_valid_count_neg_min"], 2)
+        self.assertEqual(quality["selected_duplicate_pair_count_pos_max"], 0)
+        self.assertEqual(quality["selected_duplicate_pair_count_neg_max"], 0)
+
+    def test_cluster_topk_cache_does_not_select_duplicate_padding(self):
+        Z = jax.random.normal(jax.random.PRNGKey(321), (12, 4))
+        cache = build_topk_attention_cache(
+            Z,
+            top_k=3,
+            batch_size=4,
+            cache_mode="cluster",
+            cluster_count=8,
+            cluster_probe=8,
+            cluster_candidate_size=6,
+        )
+
+        for idx in (np.asarray(cache.indices_pos), np.asarray(cache.indices_neg)):
+            for row in idx:
+                valid = row[row >= 0]
+                self.assertEqual(len(valid), len(set(valid.tolist())))
+
+        quality = evaluate_topk_cache_quality(Z, cache, sample_rows=12, batch_size=4)
+        self.assertEqual(quality["selected_valid_count_pos_min"], 3)
+        self.assertEqual(quality["selected_valid_count_neg_min"], 3)
+        self.assertEqual(quality["selected_duplicate_pair_count_pos_max"], 0)
+        self.assertEqual(quality["selected_duplicate_pair_count_neg_max"], 0)
 
 
 if __name__ == "__main__":
