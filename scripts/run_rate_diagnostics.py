@@ -5,8 +5,10 @@ os.environ["RAY_memory_usage_threshold"] = "0.9"
 
 import gc
 import math
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -28,6 +30,12 @@ from vara.dgp import (
 from vara.simulation import (
     estimate_eta_concentrated,
     estimate_eta_curvature as estimate_omega_gamma,
+)
+from vara.run_config import (
+    load_config_json_defaults,
+    parse_int_list,
+    save_run_config,
+    select_config_values,
 )
 
 
@@ -259,6 +267,7 @@ def run_convergence_verification(
     curvature_step=0.02,
     ray_num_cpus=52,
     max_cpus_per_task=1,
+    results_dir=RESULTS_DIR,
 ):
     """
     Run Monte Carlo convergence diagnostics for one (T, p, q) setting.
@@ -495,7 +504,9 @@ def run_convergence_verification(
     )
 
     run_tag = datetime.now().strftime("%Y%m%d_%H.%M.%S")
-    out_path = RESULTS_DIR / (
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out_path = results_dir / (
         f"results_convergence_R={R}_p={p}_q={q}_T={T}_seed={seed}_{run_tag}.csv"
     )
     df.to_csv(out_path, index=False)
@@ -508,8 +519,37 @@ def run_convergence_verification(
 # 5. CLI
 # =====================================================================
 
+RATE_CONFIG_KEYS = (
+    "seed",
+    "R",
+    "T_list",
+    "p_list",
+    "p_rule",
+    "q",
+    "dist",
+    "eta_bounds",
+    "grid_size",
+    "curvature_step",
+    "ray_num_cpus",
+    "max_cpus_per_task",
+    "results_dir",
+)
+
+
 def _parse_int_list(value):
-    return [int(x.strip()) for x in value.split(",") if x.strip()]
+    return parse_int_list(value)
+
+
+def _load_config_json_defaults(path):
+    defaults = load_config_json_defaults(
+        path,
+        [key for key in RATE_CONFIG_KEYS if key != "eta_bounds"],
+    )
+    raw = load_config_json_defaults(path, ("eta_bounds",))
+    if "eta_bounds" in raw:
+        defaults["eta_lower"] = raw["eta_bounds"][0]
+        defaults["eta_upper"] = raw["eta_bounds"][1]
+    return defaults
 
 
 def _format_config_values(values):
@@ -684,6 +724,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run convergence diagnostics.")
     parser.add_argument(
+        "--config-json",
+        type=str,
+        default=None,
+        help="Optional saved run-config JSON. Explicit CLI arguments override JSON defaults.",
+    )
+    parser.add_argument(
         "--ray-num-cpus",
         type=int,
         default=52,
@@ -696,9 +742,21 @@ if __name__ == "__main__":
     parser.add_argument("--p-rule", type=str, default="sqrt", choices=["sqrt", "logT"])
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument("--dist", type=str, default="normal", choices=["normal", "laplace", "t5"])
+    parser.add_argument("--eta-lower", type=float, default=-2.0)
+    parser.add_argument("--eta-upper", type=float, default=2.0)
     parser.add_argument("--grid-size", type=int, default=81)
     parser.add_argument("--curvature-step", type=float, default=0.02)
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default=str(RESULTS_DIR),
+        help="Directory for CSV and config outputs.",
+    )
+
+    config_args, _ = parser.parse_known_args()
+    if config_args.config_json:
+        parser.set_defaults(**_load_config_json_defaults(config_args.config_json))
     args = parser.parse_args()
 
     T_values = _parse_int_list(args.T_list)
@@ -709,6 +767,10 @@ if __name__ == "__main__":
     else:
         p_values = [_p_from_rule(T, args.p_rule) for T in T_values]
 
+    eta_bounds = (args.eta_lower, args.eta_upper)
+    results_dir = Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     all_dfs = []
     for offset, (T, p) in enumerate(zip(T_values, p_values)):
         df, _, _ = run_convergence_verification(
@@ -718,10 +780,12 @@ if __name__ == "__main__":
             p=p,
             q=args.q,
             dist=args.dist,
+            eta_bounds=eta_bounds,
             grid_size=args.grid_size,
             curvature_step=args.curvature_step,
             ray_num_cpus=args.ray_num_cpus,
             max_cpus_per_task=args.max_cpus_per_task,
+            results_dir=results_dir,
         )
         all_dfs.append(df)
 
@@ -738,14 +802,44 @@ if __name__ == "__main__":
         f"seed={args.seed}_"
         f"{run_tag}"
     )
-    combined_path = RESULTS_DIR / f"results_convergence_combined_{config_tag}.csv"
-    summary_path = RESULTS_DIR / f"summary_convergence_grid_{config_tag}.csv"
-    trend_path = RESULTS_DIR / f"summary_convergence_trend_{config_tag}.csv"
+    combined_path = results_dir / f"results_convergence_combined_{config_tag}.csv"
+    summary_path = results_dir / f"summary_convergence_grid_{config_tag}.csv"
+    trend_path = results_dir / f"summary_convergence_trend_{config_tag}.csv"
+    config_path = results_dir / f"config_convergence_grid_{config_tag}.json"
+
+    run_config = select_config_values(
+        {
+            "seed": args.seed,
+            "R": args.R,
+            "T_list": T_values,
+            "p_list": p_values,
+            "p_rule": args.p_rule,
+            "q": args.q,
+            "dist": args.dist,
+            "eta_bounds": eta_bounds,
+            "grid_size": args.grid_size,
+            "curvature_step": args.curvature_step,
+            "ray_num_cpus": args.ray_num_cpus,
+            "max_cpus_per_task": args.max_cpus_per_task,
+            "results_dir": results_dir,
+        },
+        RATE_CONFIG_KEYS,
+    )
+    run_config.update({
+        "command": " ".join(sys.argv),
+        "config_tag": config_tag,
+        "run_tag": run_tag,
+        "combined_path": str(combined_path),
+        "summary_path": str(summary_path),
+        "trend_path": str(trend_path),
+    })
 
     combined.to_csv(combined_path, index=False)
     summary.to_csv(summary_path, index=False)
     trend.to_csv(trend_path, index=False)
+    save_run_config(config_path, run_config)
 
+    print(f"Saved run config to: {config_path}")
     print(f"Saved combined results to: {combined_path}")
     print(f"Saved grid summary to: {summary_path}")
     print(f"Saved trend summary to: {trend_path}")

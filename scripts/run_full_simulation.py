@@ -44,6 +44,15 @@ except Exception:
     except Exception:
         RESULTS_DIR = Path("results")
 
+from vara.run_config import (
+    json_config_value,
+    parse_int_list,
+    parse_str_list,
+    save_run_config,
+    select_config_values,
+)
+
+
 def _ensure_runtime_imports() -> None:
     """Import JAX-dependent modules after optional Ray initialization."""
     if "jax" in globals():
@@ -156,31 +165,19 @@ RUN_CONFIG_KEYS = (
 
 
 def _parse_int_list(value: Any) -> List[int]:
-    if isinstance(value, (list, tuple)):
-        return [int(x) for x in value]
-    return [int(x.strip()) for x in value.split(",") if x.strip()]
+    return parse_int_list(value)
 
 
 def _parse_str_list(value: Any) -> List[str]:
-    if isinstance(value, (list, tuple)):
-        return [str(x).strip() for x in value if str(x).strip()]
-    return [x.strip() for x in value.split(",") if x.strip()]
+    return parse_str_list(value)
 
 
 def _json_config_value(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, tuple):
-        return list(value)
-    return value
+    return json_config_value(value)
 
 
 def _select_run_config_values(values: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        key: _json_config_value(values[key])
-        for key in RUN_CONFIG_KEYS
-        if key in values
-    }
+    return select_config_values(values, RUN_CONFIG_KEYS)
 
 
 def _load_config_json_defaults(path: str) -> Dict[str, Any]:
@@ -1023,7 +1020,7 @@ def run_full_simulation(
         "paper_path": str(paper_path),
         "reporting_paths": {name: str(path) for name, path in reporting_paths.items()},
     })
-    config_path.write_text(json.dumps(run_config, indent=2, sort_keys=True), encoding="utf-8")
+    save_run_config(config_path, run_config)
     _print_progress(f"Saved run config to: {config_path}")
 
     for setting in settings:

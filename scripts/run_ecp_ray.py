@@ -4,6 +4,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["RAY_memory_usage_threshold"] = "0.9"
 
 import gc
+import sys
 import time
 import ray
 import jax
@@ -13,6 +14,7 @@ from tqdm import trange
 import pandas as pd
 from datetime import datetime
 import itertools
+from pathlib import Path
 
 try:
     from ._bootstrap import RESULTS_DIR
@@ -31,6 +33,14 @@ from vara.simulation import (
     kappa4_for_dist,
     make_block_order,
     reparam_theta_from_params,
+)
+from vara.run_config import (
+    load_config_json_defaults,
+    parse_float_list,
+    parse_int_list,
+    parse_str_list,
+    save_run_config,
+    select_config_values,
 )
 
 
@@ -538,16 +548,35 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
 # === Main ======================================================
 # ===============================================================
 
+ECP_CONFIG_KEYS = (
+    "seed",
+    "ray_num_cpus",
+    "max_cpus_per_task",
+    "R_list",
+    "p_list",
+    "q_list",
+    "T_list",
+    "alpha_list",
+    "dist_list",
+    "algorithm",
+    "results_dir",
+)
+
+
 def _parse_int_list(value):
-    return [int(x.strip()) for x in value.split(",") if x.strip()]
+    return parse_int_list(value)
 
 
 def _parse_float_list(value):
-    return [float(x.strip()) for x in value.split(",") if x.strip()]
+    return parse_float_list(value)
 
 
 def _parse_str_list(value):
-    return [x.strip() for x in value.split(",") if x.strip()]
+    return parse_str_list(value)
+
+
+def _load_config_json_defaults(path):
+    return load_config_json_defaults(path, ECP_CONFIG_KEYS)
 
 
 def _format_config_values(values):
@@ -567,11 +596,24 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run empirical coverage simulations.")
     parser.add_argument(
+        "--config-json",
+        type=str,
+        default=None,
+        help="Optional saved run-config JSON. Explicit CLI arguments override JSON defaults.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Global random seed. If omitted, a seed is drawn randomly as before.",
+    )
+    parser.add_argument(
         "--ray-num-cpus",
         type=int,
         default=52,
         help="Total Ray CPU budget. Use 1 for sequential execution.",
     )
+    parser.add_argument("--max-cpus-per-task", type=int, default=1)
     parser.add_argument(
         "--R-list",
         dest="R_list",
@@ -610,11 +652,27 @@ if __name__ == "__main__":
         default="normal",
         help="Comma-separated innovation distributions to run, e.g. --dist-list normal,laplace,t5.",
     )
+    parser.add_argument(
+        "--algorithm",
+        type=str,
+        default="lbfgs",
+        help="Estimator algorithm passed to estimate().",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default=str(RESULTS_DIR),
+        help="Directory for CSV and config outputs.",
+    )
+
+    config_args, _ = parser.parse_known_args()
+    if config_args.config_json:
+        parser.set_defaults(**_load_config_json_defaults(config_args.config_json))
     args = parser.parse_args()
 
     jnp.set_printoptions(threshold=10_000, linewidth=200, suppress=True, precision=6)
 
-    seed = random.randint(0, 10000)
+    seed = args.seed if args.seed is not None else random.randint(0, 10000)
     # seed = 5682, 1873
     print(f"=== Using a global seed: {seed}")
     key = jax.random.PRNGKey(seed)
@@ -629,9 +687,9 @@ if __name__ == "__main__":
     if invalid_dist:
         raise ValueError(f"Unsupported dist values: {invalid_dist}. Use normal,t5,laplace.")
 
-    algorithm = "lbfgs"   # "auto_gradhess", "analytical_gradhess"
-    # algorithm = "auto_gradhess"
-    # algorithm = "block_newton"
+    algorithm = args.algorithm
+    results_dir = Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     params_dgp = dict(
         eta_a=0.5,
@@ -651,7 +709,34 @@ if __name__ == "__main__":
         f"seed={seed}_"
         f"{run_tag}"
     )
-    out_path = RESULTS_DIR / f"results_coverage_{config_tag}.csv"
+    out_path = results_dir / f"results_coverage_{config_tag}.csv"
+    config_path = results_dir / f"config_coverage_{config_tag}.json"
+    run_config = select_config_values(
+        {
+            "seed": seed,
+            "ray_num_cpus": args.ray_num_cpus,
+            "max_cpus_per_task": args.max_cpus_per_task,
+            "R_list": R_list,
+            "p_list": p_list,
+            "q_list": q_list,
+            "T_list": T_list,
+            "alpha_list": alpha_list,
+            "dist_list": dist_list,
+            "algorithm": algorithm,
+            "results_dir": results_dir,
+        },
+        ECP_CONFIG_KEYS,
+    )
+    run_config.update({
+        "command": " ".join(sys.argv),
+        "config_tag": config_tag,
+        "run_tag": run_tag,
+        "out_path": str(out_path),
+        "params_dgp": params_dgp,
+        "params_scale": params_scale,
+    })
+    save_run_config(config_path, run_config)
+    print(f"Saved run config to: {config_path}")
 
     header_written = False
 
@@ -686,7 +771,7 @@ if __name__ == "__main__":
             alpha=alpha,
             algorithm=algorithm,
             ray_num_cpus=args.ray_num_cpus,
-            max_cpus_per_task=1,
+            max_cpus_per_task=args.max_cpus_per_task,
             kappa4=kappa4_for_dist(dist),
         )
 

@@ -5,8 +5,10 @@ os.environ["RAY_memory_usage_threshold"] = "0.9"
 
 import gc
 import math
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +34,12 @@ from vara.simulation import (
     flatten_simulation_params,
     make_block_order,
     reparam_theta_from_params,
+)
+from vara.run_config import (
+    load_config_json_defaults,
+    parse_int_list,
+    save_run_config,
+    select_config_values,
 )
 from vara.two_stage import (
     concentrated_eta_loglik as _concentrated_eta_loglik,
@@ -470,6 +478,54 @@ class Theorem2ReplicationActor:
             return failed_replication_rows(params_true, k_list, pilot_mode)
 
 
+PILOT_CONFIG_KEYS = (
+    "seed",
+    "R",
+    "T",
+    "p",
+    "q",
+    "k_list",
+    "pilot_mode",
+    "dist",
+    "kappa4",
+    "eta_bounds",
+    "qmle_algorithm",
+    "ray_num_cpus",
+    "max_cpus_per_task",
+    "results_dir",
+)
+
+
+def _parse_int_list(value):
+    return parse_int_list(value)
+
+
+def _load_config_json_defaults(path):
+    defaults = load_config_json_defaults(
+        path,
+        [key for key in PILOT_CONFIG_KEYS if key != "eta_bounds"],
+    )
+    raw = load_config_json_defaults(path, ("eta_bounds",))
+    if "eta_bounds" in raw:
+        defaults["eta_lower"] = raw["eta_bounds"][0]
+        defaults["eta_upper"] = raw["eta_bounds"][1]
+    return defaults
+
+
+def _run_kwargs_from_args(args):
+    kwargs = {
+        key: getattr(args, key)
+        for key in PILOT_CONFIG_KEYS
+        if key not in {"k_list", "eta_bounds", "results_dir"}
+    }
+    kwargs.update({
+        "k_list": tuple(_parse_int_list(args.k_list)),
+        "eta_bounds": (args.eta_lower, args.eta_upper),
+        "results_dir": Path(args.results_dir),
+    })
+    return kwargs
+
+
 # =====================================================================
 # 6. Monte Carlo driver
 # =====================================================================
@@ -484,9 +540,11 @@ def run_pilot_consistency_verification(
     pilot_mode="oracle",
     dist="normal",
     kappa4=3.0,
+    eta_bounds=(-2.0, 2.0),
     qmle_algorithm="lbfgs",
     ray_num_cpus=52,
     max_cpus_per_task=1,
+    results_dir=RESULTS_DIR,
 ):
     """
     Run a Monte Carlo verification of Theorem 2.
@@ -551,6 +609,7 @@ def run_pilot_consistency_verification(
     print(f"pilot_mode = {pilot_mode}")
     print(f"dist       = {dist}")
     print(f"kappa4     = {kappa4}")
+    print(f"eta_bounds = {eta_bounds}")
     print(f"ray cpus   = {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
     print(f"stationary = {not bool(stat_info['rescaled'])}")
     print(f"Z_info     = {Z_info}")
@@ -601,6 +660,7 @@ def run_pilot_consistency_verification(
                     dist=dist,
                     pilot_mode=pilot_mode,
                     kappa4=kappa4,
+                    eta_bounds=eta_bounds,
                     qmle_algorithm=qmle_algorithm,
                 )
 
@@ -667,6 +727,7 @@ def run_pilot_consistency_verification(
                 dist=dist,
                 pilot_mode=pilot_mode,
                 kappa4=kappa4,
+                eta_bounds=eta_bounds,
                 qmle_algorithm=qmle_algorithm,
             )
             for r in trange(R, desc="Theorem 2 replications", ncols=100)
@@ -736,11 +797,26 @@ def run_pilot_consistency_verification(
     )
 
     run_tag = datetime.now().strftime("%Y%m%d_%H.%M.%S")
-    out_path = RESULTS_DIR / (
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    config_tag = (
+        f"{pilot_mode}_R={R}_p={p}_q={q}_T={T}_seed={seed}_{run_tag}"
+    )
+    out_path = results_dir / (
         f"results_theorem2_{pilot_mode}_"
         f"R={R}_p={p}_q={q}_T={T}_seed={seed}_{run_tag}.csv"
     )
+    config_path = results_dir / f"config_theorem2_{config_tag}.json"
+    run_config = select_config_values(locals(), PILOT_CONFIG_KEYS)
+    run_config.update({
+        "command": " ".join(sys.argv),
+        "config_tag": config_tag,
+        "run_tag": run_tag,
+        "out_path": str(out_path),
+    })
+    save_run_config(config_path, run_config)
     df.to_csv(out_path, index=False)
+    print(f"\nSaved run config to: {config_path}")
     print(f"\nSaved detailed results to: {out_path}")
 
     return df, consistency, z_summary
@@ -751,32 +827,50 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run pilot consistency verification.")
     parser.add_argument(
+        "--config-json",
+        type=str,
+        default=None,
+        help="Optional saved run-config JSON. Explicit CLI arguments override JSON defaults.",
+    )
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--R", type=int, default=500)
+    parser.add_argument("--T", type=int, default=1000)
+    parser.add_argument("--p", type=int, default=10)
+    parser.add_argument("--q", type=int, default=50)
+    parser.add_argument(
+        "--k-list",
+        type=str,
+        default="0,1,2",
+        help="Comma-separated component indices, e.g. --k-list 0,1,2.",
+    )
+    parser.add_argument(
+        "--pilot-mode",
+        type=str,
+        default="oracle",
+        choices=["oracle", "concentrated", "qmle"],
+    )
+    parser.add_argument("--dist", type=str, default="normal", choices=["normal", "laplace", "t5"])
+    parser.add_argument("--kappa4", type=float, default=3.0)
+    parser.add_argument("--eta-lower", type=float, default=-2.0)
+    parser.add_argument("--eta-upper", type=float, default=2.0)
+    parser.add_argument("--qmle-algorithm", type=str, default="lbfgs")
+    parser.add_argument(
         "--ray-num-cpus",
         type=int,
         default=52,
         help="Total Ray CPU budget. Use 1 for sequential execution.",
     )
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
-    args = parser.parse_args()
-
-    # First run oracle mode.
-    # This checks the core statement of Theorem 2 with gamma known.
-    run_pilot_consistency_verification(
-        seed=2026,
-        R=500,
-        T=1000,
-        p=10,
-        q=50,
-        k_list=(0, 1, 2),
-        pilot_mode="oracle",
-        dist="normal",
-        kappa4=3.0,
-        ray_num_cpus=args.ray_num_cpus,
-        max_cpus_per_task=args.max_cpus_per_task,
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default=str(RESULTS_DIR),
+        help="Directory for CSV and config outputs.",
     )
 
-    # Then try:
-    # run_theorem2_verification(pilot_mode="concentrated", ...)
-    #
-    # Finally, if desired:
-    # run_theorem2_verification(pilot_mode="qmle", qmle_algorithm="lbfgs", ...)
+    config_args, _ = parser.parse_known_args()
+    if config_args.config_json:
+        parser.set_defaults(**_load_config_json_defaults(config_args.config_json))
+    args = parser.parse_args()
+
+    run_pilot_consistency_verification(**_run_kwargs_from_args(args))
