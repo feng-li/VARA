@@ -1,4 +1,6 @@
 import os
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +13,9 @@ import pandas as pd
 
 from scripts.run_full_simulation import (
     _full_simulation_output_paths,
+    _load_config_json_defaults,
+    _parse_int_list,
+    _parse_str_list,
     _simulation_reporting_output_paths,
     draw_simulation_dgp_params,
     make_simulation_reporting_tables,
@@ -35,8 +40,38 @@ class ScriptHelperTests(unittest.TestCase):
             summary.name,
             "summary_full_simulation_R=500_p=2_q=3_T=8_seed=2026_20260430_12.34.56.csv",
         )
-        self.assertTrue(detail.name.startswith("results_full_simulation_detail_R=500_p=2_q=3_T=8_seed=2026_"))
+        self.assertTrue(detail.name.startswith("results_full_simulation_R=500_p=2_q=3_T=8_seed=2026_"))
+        self.assertTrue(detail.name.endswith("_details.csv"))
         self.assertTrue(paper.name.startswith("paper_table_full_simulation_R=500_p=2_q=3_T=8_seed=2026_"))
+
+    def test_saved_config_json_can_supply_argparse_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config_full_simulation_test.json"
+            path.write_text(
+                json.dumps({
+                    "R": 12,
+                    "T_list": [100, 200],
+                    "settings": ["low"],
+                    "dist_list": ["normal", "laplace"],
+                    "eta_bounds": [-1.5, 1.5],
+                    "ray_num_cpus": 4,
+                    "results_dir": "outputs/from_config",
+                    "summary_path": "ignored.csv",
+                }),
+                encoding="utf-8",
+            )
+
+            defaults = _load_config_json_defaults(str(path))
+
+        self.assertEqual(defaults["R"], 12)
+        self.assertEqual(_parse_int_list(defaults["T_list"]), [100, 200])
+        self.assertEqual(_parse_str_list(defaults["settings"]), ["low"])
+        self.assertEqual(_parse_str_list(defaults["dist_list"]), ["normal", "laplace"])
+        self.assertEqual(defaults["eta_lower"], -1.5)
+        self.assertEqual(defaults["eta_upper"], 1.5)
+        self.assertEqual(defaults["ray_num_cpus"], 4)
+        self.assertEqual(defaults["results_dir"], "outputs/from_config")
+        self.assertNotIn("summary_path", defaults)
 
     def test_simulation_reporting_output_paths_use_expected_prefixes(self):
         paths = _simulation_reporting_output_paths(Path("data"), "R=1_p=2_q=3_T=8_seed=2026_tag")

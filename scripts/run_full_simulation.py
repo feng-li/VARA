@@ -106,13 +106,112 @@ SIMULATION_ATTENTION_CACHE_CANDIDATE_SIZE = None
 SIMULATION_ATTENTION_CACHE_CANDIDATE_MULTIPLIER = 5.0
 SIMULATION_ATTENTION_CACHE_DIAGNOSTIC_ROWS = 64
 
+RUN_CONFIG_KEYS = (
+    "seed",
+    "R",
+    "T_list",
+    "settings",
+    "dist_list",
+    "q",
+    "alpha",
+    "ray_num_cpus",
+    "max_cpus_per_task",
+    "qmle_algorithm",
+    "qmle_perturb_scale",
+    "eta_bounds",
+    "grid_size",
+    "high_grid_size",
+    "curvature_step",
+    "ridge",
+    "batch_size",
+    "dense_threshold",
+    "screen_z",
+    "precompute_dgp_attention",
+    "require_good_z",
+    "dgp_eta_a",
+    "z_max_tries",
+    "z_score_quantile",
+    "z_max_abs_score",
+    "z_min_eta_signal",
+    "z_min_eta_info",
+    "z_min_attention_x2_std",
+    "z_min_attention_x2_std_adaptive_factor",
+    "z_max_attention_effective_neighbors",
+    "z_max_attention_effective_neighbor_fraction",
+    "z_approx_threshold",
+    "z_approx_rows",
+    "z_approx_pairs",
+    "attention_mode",
+    "attention_top_k",
+    "attention_cache_mode",
+    "attention_cache_clusters",
+    "attention_cache_probes",
+    "attention_cache_candidate_size",
+    "attention_cache_candidate_multiplier",
+    "attention_cache_diagnostic_rows",
+    "ray_debug",
+    "high_max_p",
+    "results_dir",
+)
 
-def _parse_int_list(value: str) -> List[int]:
+
+def _parse_int_list(value: Any) -> List[int]:
+    if isinstance(value, (list, tuple)):
+        return [int(x) for x in value]
     return [int(x.strip()) for x in value.split(",") if x.strip()]
 
 
-def _parse_str_list(value: str) -> List[str]:
+def _parse_str_list(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(x).strip() for x in value if str(x).strip()]
     return [x.strip() for x in value.split(",") if x.strip()]
+
+
+def _json_config_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return value
+
+
+def _select_run_config_values(values: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: _json_config_value(values[key])
+        for key in RUN_CONFIG_KEYS
+        if key in values
+    }
+
+
+def _load_config_json_defaults(path: str) -> Dict[str, Any]:
+    """Load argparse defaults from a saved full-simulation config JSON."""
+    config = json.loads(Path(path).read_text(encoding="utf-8"))
+    defaults = {
+        key: config[key]
+        for key in RUN_CONFIG_KEYS
+        if key in config and key != "eta_bounds"
+    }
+    if "eta_bounds" in config:
+        eta_bounds = config["eta_bounds"]
+        defaults["eta_lower"] = eta_bounds[0]
+        defaults["eta_upper"] = eta_bounds[1]
+    return defaults
+
+
+def _run_kwargs_from_args(args: argparse.Namespace) -> Dict[str, Any]:
+    kwargs = {
+        key: getattr(args, key)
+        for key in RUN_CONFIG_KEYS
+        if key not in {"T_list", "settings", "dist_list", "eta_bounds", "results_dir"}
+    }
+    kwargs.update({
+        "T_list": _parse_int_list(args.T_list),
+        "settings": _parse_str_list(args.settings),
+        "dist_list": _parse_str_list(args.dist_list),
+        "eta_bounds": (args.eta_lower, args.eta_upper),
+        "results_dir": Path(args.results_dir),
+    })
+    return kwargs
 
 
 def _unique_in_order(values: Sequence[Any]) -> List[Any]:
@@ -187,7 +286,7 @@ def _full_simulation_output_paths(
         run_tag=run_tag,
     )
     return (
-        results_dir / f"results_full_simulation_detail_{config_tag}.csv",
+        results_dir / f"results_full_simulation_{config_tag}_details.csv",
         results_dir / f"summary_full_simulation_{config_tag}.csv",
         results_dir / f"paper_table_full_simulation_{config_tag}.csv",
     )
@@ -914,60 +1013,16 @@ def run_full_simulation(
         attention_cache_candidate_multiplier=attention_cache_candidate_multiplier,
         attention_cache_diagnostic_rows=attention_cache_diagnostic_rows,
     )
-    run_config = {
+    run_config = _select_run_config_values(locals())
+    run_config.update({
         "command": " ".join(sys.argv),
         "config_tag": config_tag,
         "run_tag": run_tag,
-        "seed": seed,
-        "R": R,
-        "T_list": list(T_list),
-        "settings": list(settings),
-        "dist_list": list(dist_list),
-        "q": q,
-        "alpha": alpha,
-        "ray_num_cpus": ray_num_cpus,
-        "max_cpus_per_task": max_cpus_per_task,
-        "qmle_algorithm": qmle_algorithm,
-        "qmle_perturb_scale": qmle_perturb_scale,
-        "eta_bounds": list(eta_bounds),
-        "grid_size": grid_size,
-        "high_grid_size": high_grid_size,
-        "curvature_step": curvature_step,
-        "ridge": ridge,
-        "batch_size": batch_size,
-        "dense_threshold": dense_threshold,
-        "screen_z": screen_z,
-        "precompute_dgp_attention": precompute_dgp_attention,
-        "require_good_z": require_good_z,
-        "dgp_eta_a": dgp_eta_a,
-        "z_max_tries": z_max_tries,
-        "z_score_quantile": z_score_quantile,
-        "z_max_abs_score": z_max_abs_score,
-        "z_min_eta_signal": z_min_eta_signal,
-        "z_min_eta_info": z_min_eta_info,
-        "z_min_attention_x2_std": z_min_attention_x2_std,
-        "z_min_attention_x2_std_adaptive_factor": z_min_attention_x2_std_adaptive_factor,
-        "z_max_attention_effective_neighbors": z_max_attention_effective_neighbors,
-        "z_max_attention_effective_neighbor_fraction": z_max_attention_effective_neighbor_fraction,
-        "z_approx_threshold": z_approx_threshold,
-        "z_approx_rows": z_approx_rows,
-        "z_approx_pairs": z_approx_pairs,
-        "attention_mode": attention_mode,
-        "attention_top_k": attention_top_k,
-        "attention_cache_mode": attention_cache_mode,
-        "attention_cache_clusters": attention_cache_clusters,
-        "attention_cache_probes": attention_cache_probes,
-        "attention_cache_candidate_size": attention_cache_candidate_size,
-        "attention_cache_candidate_multiplier": attention_cache_candidate_multiplier,
-        "attention_cache_diagnostic_rows": attention_cache_diagnostic_rows,
-        "ray_debug": ray_debug,
-        "high_max_p": high_max_p,
-        "results_dir": str(results_dir),
         "detail_path": str(detail_path),
         "summary_path": str(summary_path),
         "paper_path": str(paper_path),
         "reporting_paths": {name: str(path) for name, path in reporting_paths.items()},
-    }
+    })
     config_path.write_text(json.dumps(run_config, indent=2, sort_keys=True), encoding="utf-8")
     _print_progress(f"Saved run config to: {config_path}")
 
@@ -1426,6 +1481,12 @@ def run_full_simulation(
 def main():
     parser = argparse.ArgumentParser(description="Run full VARA paper simulations.")
     parser.add_argument(
+        "--config-json",
+        type=str,
+        default=None,
+        help="Load defaults from a saved config_full_simulation_*.json. CLI flags override JSON values.",
+    )
+    parser.add_argument(
         "--ray-num-cpus",
         type=int,
         default=52,
@@ -1579,55 +1640,12 @@ def main():
         help="Optional safety cap; skip high-dimensional settings with p above this value.",
     )
     parser.add_argument("--results-dir", type=str, default=str(RESULTS_DIR))
+    config_args, _ = parser.parse_known_args()
+    if config_args.config_json:
+        parser.set_defaults(**_load_config_json_defaults(config_args.config_json))
     args = parser.parse_args()
 
-    run_full_simulation(
-        seed=args.seed,
-        R=args.R,
-        T_list=_parse_int_list(args.T_list),
-        settings=_parse_str_list(args.settings),
-        dist_list=_parse_str_list(args.dist_list),
-        q=args.q,
-        alpha=args.alpha,
-        ray_num_cpus=args.ray_num_cpus,
-        max_cpus_per_task=args.max_cpus_per_task,
-        qmle_algorithm=args.qmle_algorithm,
-        qmle_perturb_scale=args.qmle_perturb_scale,
-        eta_bounds=(args.eta_lower, args.eta_upper),
-        grid_size=args.grid_size,
-        high_grid_size=args.high_grid_size,
-        curvature_step=args.curvature_step,
-        ridge=args.ridge,
-        batch_size=args.batch_size,
-        dense_threshold=args.dense_threshold,
-        screen_z=args.screen_z,
-        precompute_dgp_attention=args.precompute_dgp_attention,
-        require_good_z=args.require_good_z,
-        dgp_eta_a=args.dgp_eta_a,
-        z_max_tries=args.z_max_tries,
-        z_score_quantile=args.z_score_quantile,
-        z_max_abs_score=args.z_max_abs_score,
-        z_min_eta_signal=args.z_min_eta_signal,
-        z_min_eta_info=args.z_min_eta_info,
-        z_min_attention_x2_std=args.z_min_attention_x2_std,
-        z_min_attention_x2_std_adaptive_factor=args.z_min_attention_x2_std_adaptive_factor,
-        z_max_attention_effective_neighbors=args.z_max_attention_effective_neighbors,
-        z_max_attention_effective_neighbor_fraction=args.z_max_attention_effective_neighbor_fraction,
-        z_approx_threshold=args.z_approx_threshold,
-        z_approx_rows=args.z_approx_rows,
-        z_approx_pairs=args.z_approx_pairs,
-        attention_mode=args.attention_mode,
-        attention_top_k=args.attention_top_k,
-        attention_cache_mode=args.attention_cache_mode,
-        attention_cache_clusters=args.attention_cache_clusters,
-        attention_cache_probes=args.attention_cache_probes,
-        attention_cache_candidate_size=args.attention_cache_candidate_size,
-        attention_cache_candidate_multiplier=args.attention_cache_candidate_multiplier,
-        attention_cache_diagnostic_rows=args.attention_cache_diagnostic_rows,
-        ray_debug=args.ray_debug,
-        high_max_p=args.high_max_p,
-        results_dir=Path(args.results_dir),
-    )
+    run_full_simulation(**_run_kwargs_from_args(args))
 
 
 if __name__ == "__main__":
