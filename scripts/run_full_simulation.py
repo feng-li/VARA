@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import math
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -205,6 +207,10 @@ def _simulation_reporting_output_paths(results_dir: Path, config_tag: str) -> Di
         "eta_diagnostics": results_dir / f"table_simulation_eta_diagnostics_{config_tag}.csv",
         "publication_wide": results_dir / f"table_simulation_publication_wide_{config_tag}.csv",
     }
+
+
+def _full_simulation_config_path(results_dir: Path, config_tag: str) -> Path:
+    return results_dir / f"config_full_simulation_{config_tag}.json"
 
 
 def draw_simulation_dgp_params(
@@ -844,6 +850,14 @@ def run_full_simulation(
         )
         ray_started_here = True
         _print_progress("Ray started")
+    if use_ray:
+        available = ray.available_resources()
+        available_cpus = float(available.get("CPU", 0.0))
+        if available_cpus < float(max_cpus_per_task):
+            raise RuntimeError(
+                f"Ray has no available CPUs after initialization: {available}. "
+                "Stop stale Ray workers with `ray stop --force` or reduce other Ray jobs."
+            )
 
     _ensure_runtime_imports()
 
@@ -871,6 +885,7 @@ def run_full_simulation(
         run_tag=run_tag,
     )
     reporting_paths = _simulation_reporting_output_paths(results_dir, config_tag)
+    config_path = _full_simulation_config_path(results_dir, config_tag)
     setup_table = make_simulation_setup_table(
         R=R,
         T_list=T_list,
@@ -903,6 +918,62 @@ def run_full_simulation(
         attention_cache_candidate_multiplier=attention_cache_candidate_multiplier,
         attention_cache_diagnostic_rows=attention_cache_diagnostic_rows,
     )
+    run_config = {
+        "command": " ".join(sys.argv),
+        "config_tag": config_tag,
+        "run_tag": run_tag,
+        "seed": seed,
+        "R": R,
+        "T_list": list(T_list),
+        "settings": list(settings),
+        "dist_list": list(dist_list),
+        "q": q,
+        "alpha": alpha,
+        "ray_num_cpus": ray_num_cpus,
+        "max_cpus_per_task": max_cpus_per_task,
+        "qmle_algorithm": qmle_algorithm,
+        "qmle_perturb_scale": qmle_perturb_scale,
+        "eta_bounds": list(eta_bounds),
+        "grid_size": grid_size,
+        "high_grid_size": high_grid_size,
+        "curvature_step": curvature_step,
+        "ridge": ridge,
+        "batch_size": batch_size,
+        "dense_threshold": dense_threshold,
+        "screen_z": screen_z,
+        "precompute_dgp_attention": precompute_dgp_attention,
+        "require_good_z": require_good_z,
+        "dgp_eta_a": dgp_eta_a,
+        "z_max_tries": z_max_tries,
+        "z_score_quantile": z_score_quantile,
+        "z_max_abs_score": z_max_abs_score,
+        "z_min_eta_signal": z_min_eta_signal,
+        "z_min_eta_info": z_min_eta_info,
+        "z_min_attention_x2_std": z_min_attention_x2_std,
+        "z_min_attention_x2_std_adaptive_factor": z_min_attention_x2_std_adaptive_factor,
+        "z_max_attention_effective_neighbors": z_max_attention_effective_neighbors,
+        "z_max_attention_effective_neighbor_fraction": z_max_attention_effective_neighbor_fraction,
+        "z_approx_threshold": z_approx_threshold,
+        "z_approx_rows": z_approx_rows,
+        "z_approx_pairs": z_approx_pairs,
+        "attention_mode": attention_mode,
+        "attention_top_k": attention_top_k,
+        "attention_cache_mode": attention_cache_mode,
+        "attention_cache_clusters": attention_cache_clusters,
+        "attention_cache_probes": attention_cache_probes,
+        "attention_cache_candidate_size": attention_cache_candidate_size,
+        "attention_cache_candidate_multiplier": attention_cache_candidate_multiplier,
+        "attention_cache_diagnostic_rows": attention_cache_diagnostic_rows,
+        "ray_debug": ray_debug,
+        "high_max_p": high_max_p,
+        "results_dir": str(results_dir),
+        "detail_path": str(detail_path),
+        "summary_path": str(summary_path),
+        "paper_path": str(paper_path),
+        "reporting_paths": {name: str(path) for name, path in reporting_paths.items()},
+    }
+    config_path.write_text(json.dumps(run_config, indent=2, sort_keys=True), encoding="utf-8")
+    _print_progress(f"Saved run config to: {config_path}")
 
     for setting in settings:
         if setting not in {"low", "high"}:
@@ -1108,46 +1179,98 @@ def run_full_simulation(
                     _print_progress(f"Starting Ray replications: R={R}")
                     n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
                     _print_progress(f"Creating {n_actors} replication actors")
-                    actors = [
-                        FullSimulationActor.options(num_cpus=max_cpus_per_task).remote()
-                        for _ in range(n_actors)
-                    ]
-                    dgp_attention_arg = ray.put(dgp_attention) if dgp_attention is not None else None
-                    attention_cache_arg = ray.put(attention_cache) if attention_cache is not None else None
-                    _print_progress("Submitting replication tasks")
-                    futures = [
-                        actors[r % n_actors].run.remote(
-                            rep=r,
-                            key=rep_keys[r],
-                            params_true=params_true,
-                            Z=Z,
-                            setting=setting,
-                            T=T,
-                            p=p,
-                            q=q,
-                            dist=dist,
-                            seed=seed,
-                            methods=methods,
-                            alpha=alpha,
-                            qmle_algorithm=qmle_algorithm,
-                            qmle_perturb_scale=qmle_perturb_scale,
-                            eta_bounds=eta_bounds,
-                            grid_size=grid_size_use,
-                            curvature_step=curvature_step,
-                            ridge=ridge,
-                            batch_size=batch_size,
-                            dense_threshold=dense_threshold,
-                            dgp_attention=dgp_attention_arg,
-                            attention_mode=attention_mode,
-                            attention_top_k=attention_top_k,
-                            attention_cache=attention_cache_arg,
-                            ray_debug=ray_debug,
+                    actors = []
+                    progress = None
+                    try:
+                        actors = [
+                            FullSimulationActor.options(num_cpus=max_cpus_per_task).remote()
+                            for _ in range(n_actors)
+                        ]
+                        dgp_attention_arg = ray.put(dgp_attention) if dgp_attention is not None else None
+                        attention_cache_arg = ray.put(attention_cache) if attention_cache is not None else None
+
+                        def submit_replication(rep: int):
+                            return actors[rep % n_actors].run.remote(
+                                rep=rep,
+                                key=rep_keys[rep],
+                                params_true=params_true,
+                                Z=Z,
+                                setting=setting,
+                                T=T,
+                                p=p,
+                                q=q,
+                                dist=dist,
+                                seed=seed,
+                                methods=methods,
+                                alpha=alpha,
+                                qmle_algorithm=qmle_algorithm,
+                                qmle_perturb_scale=qmle_perturb_scale,
+                                eta_bounds=eta_bounds,
+                                grid_size=grid_size_use,
+                                curvature_step=curvature_step,
+                                ridge=ridge,
+                                batch_size=batch_size,
+                                dense_threshold=dense_threshold,
+                                dgp_attention=dgp_attention_arg,
+                                attention_mode=attention_mode,
+                                attention_top_k=attention_top_k,
+                                attention_cache=attention_cache_arg,
+                                ray_debug=ray_debug,
+                            )
+
+                        max_pending = min(R, max(1, 2 * n_actors))
+                        _print_progress(
+                            f"Submitting replication tasks: max_pending={max_pending}, n_actors={n_actors}"
                         )
-                        for r in range(R)
-                    ]
-                    setting_rows: List[Dict[str, Any]] = []
-                    for r in trange(R, desc=f"{setting}/{dist}/T={T}", ncols=100):
-                        setting_rows.extend(ray.get(futures[r]))
+                        setting_rows = []
+                        pending = []
+                        submitted = 0
+                        completed = 0
+                        submit_times = {}
+                        progress = trange(R, desc=f"{setting}/{dist}/T={T}", ncols=100)
+                        progress_update = getattr(progress, "update", None)
+
+                        while submitted < R and len(pending) < max_pending:
+                            ref = submit_replication(submitted)
+                            pending.append(ref)
+                            submit_times[ref] = time.time()
+                            submitted += 1
+
+                        while pending:
+                            ready, pending = ray.wait(pending, num_returns=1, timeout=60.0)
+                            if not ready:
+                                now = time.time()
+                                slowest_wait = now - min(submit_times.values()) if submit_times else 0.0
+                                elapsed = (datetime.now() - setting_start).total_seconds()
+                                _print_progress(
+                                    "Ray replication wait: "
+                                    f"done={completed}/{R}, submitted={submitted}/{R}, "
+                                    f"pending={len(pending)}, elapsed_sec={elapsed:.1f}, "
+                                    f"slowest_pending_sec={slowest_wait:.1f}, "
+                                    f"available={ray.available_resources()}"
+                                )
+                                continue
+
+                            for ref in ready:
+                                setting_rows.extend(ray.get(ref))
+                                submit_times.pop(ref, None)
+                                completed += 1
+                                if progress_update is not None:
+                                    progress_update(1)
+
+                                while submitted < R and len(pending) < max_pending:
+                                    next_ref = submit_replication(submitted)
+                                    pending.append(next_ref)
+                                    submit_times[next_ref] = time.time()
+                                    submitted += 1
+                    finally:
+                        if progress is not None and hasattr(progress, "close"):
+                            progress.close()
+                        for actor in actors:
+                            try:
+                                ray.kill(actor, no_restart=True)
+                            except Exception:
+                                pass
                 else:
                     _print_progress(f"Starting sequential replications: R={R}")
                     setting_rows = []
@@ -1298,6 +1421,7 @@ def run_full_simulation(
     print(f"Detailed results : {detail_path}")
     print(f"Summary results  : {summary_path}")
     print(f"Paper table      : {paper_path}")
+    print(f"Run config       : {config_path}")
     print("Simulation reporting tables:")
     for name, path in reporting_paths.items():
         print(f"  {name:<16s}: {path}")

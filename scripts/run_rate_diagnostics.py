@@ -5,6 +5,7 @@ os.environ["RAY_memory_usage_threshold"] = "0.9"
 
 import gc
 import math
+import time
 from datetime import datetime
 
 import jax
@@ -334,32 +335,88 @@ def run_convergence_verification(
             num_cpus=ray_num_cpus,
             _node_ip_address="127.0.0.1",
         )
+        available = ray.available_resources()
+        if float(available.get("CPU", 0.0)) < float(max_cpus_per_task):
+            raise RuntimeError(
+                f"Ray has no available CPUs after initialization: {available}. "
+                "Stop stale Ray workers with `ray stop --force` or reduce other Ray jobs."
+            )
         n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
         print(f"Running with Ray using {n_actors} actors")
-        actors = [
-            ConvergenceReplicationActor.options(num_cpus=max_cpus_per_task).remote()
-            for _ in range(n_actors)
-        ]
-        futures = [
-            actors[r % n_actors].run.remote(
-                rep_keys[r],
-                params_true,
-                Z,
-                T,
-                p,
-                q,
-                params_scale,
-                dist,
-                eta_bounds,
-                grid_size,
-                curvature_step,
-            )
-            for r in range(R)
-        ]
+        actors = []
+        progress = None
         rows = []
-        for r in trange(R, desc="Convergence replications", ncols=100):
-            rows.append(ray.get(futures[r]))
-        ray.shutdown()
+        try:
+            actors = [
+                ConvergenceReplicationActor.options(num_cpus=max_cpus_per_task).remote()
+                for _ in range(n_actors)
+            ]
+
+            def submit_replication(rep):
+                return actors[rep % n_actors].run.remote(
+                    rep_keys[rep],
+                    params_true,
+                    Z,
+                    T,
+                    p,
+                    q,
+                    params_scale,
+                    dist,
+                    eta_bounds,
+                    grid_size,
+                    curvature_step,
+                )
+
+            max_pending = min(R, max(1, 2 * n_actors))
+            print(f"Submitting Ray tasks with max_pending={max_pending}")
+            pending = []
+            submitted = 0
+            completed = 0
+            submit_times = {}
+            progress = trange(R, desc="Convergence replications", ncols=100)
+            progress_update = getattr(progress, "update", None)
+
+            while submitted < R and len(pending) < max_pending:
+                ref = submit_replication(submitted)
+                pending.append(ref)
+                submit_times[ref] = time.time()
+                submitted += 1
+
+            start_time = time.time()
+            while pending:
+                ready, pending = ray.wait(pending, num_returns=1, timeout=60.0)
+                if not ready:
+                    slowest_wait = time.time() - min(submit_times.values()) if submit_times else 0.0
+                    print(
+                        "Ray replication wait: "
+                        f"done={completed}/{R}, submitted={submitted}/{R}, "
+                        f"pending={len(pending)}, elapsed_sec={time.time() - start_time:.1f}, "
+                        f"slowest_pending_sec={slowest_wait:.1f}, "
+                        f"available={ray.available_resources()}",
+                        flush=True,
+                    )
+                    continue
+
+                for ref in ready:
+                    rows.append(ray.get(ref))
+                    submit_times.pop(ref, None)
+                    completed += 1
+                    if progress_update is not None:
+                        progress_update(1)
+                    while submitted < R and len(pending) < max_pending:
+                        next_ref = submit_replication(submitted)
+                        pending.append(next_ref)
+                        submit_times[next_ref] = time.time()
+                        submitted += 1
+        finally:
+            if progress is not None and hasattr(progress, "close"):
+                progress.close()
+            for actor in actors:
+                try:
+                    ray.kill(actor, no_restart=True)
+                except Exception:
+                    pass
+            ray.shutdown()
     else:
         print("Running sequentially")
         rows = []
