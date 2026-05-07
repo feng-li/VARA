@@ -701,7 +701,7 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
 
     Returns: (Y, Z, W_a)
     """
-    mem_start = mem_gb()
+    # mem_start = mem_gb()
 
     keys = jax.random.split(key, 7)
     # --------------------------------------------------
@@ -752,8 +752,8 @@ def simulate_VAR_attention(key, params, T=200, p=10, q=10, dist="normal",
 
     params = dict(eta_a=eta_a, gamma_a=gamma_a, beta=beta, sigma2=sigma2)
 
-    mem_used = mem_gb() - mem_start
-    print(f"DGP RAM used: {mem_used:.3f} GB")
+    # mem_used = mem_gb() - mem_start
+    # print(f"DGP RAM used: {mem_used:.3f} GB")
 
     if save is not False:
         if save is True:
