@@ -26,11 +26,7 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("RAY_memory_usage_threshold", "0.9")
 
 import pandas as pd
-try:
-    from tqdm import trange
-except ImportError:
-    def trange(*args, **kwargs):
-        return range(*args)
+from tqdm import trange
 
 try:
     import ray
@@ -1228,7 +1224,6 @@ def run_full_simulation(
                         completed = 0
                         submit_times = {}
                         progress = trange(R, desc=f"{setting}/{dist}/T={T}", ncols=100)
-                        progress_update = getattr(progress, "update", None)
 
                         while submitted < R and len(pending) < max_pending:
                             ref = submit_replication(submitted)
@@ -1255,8 +1250,7 @@ def run_full_simulation(
                                 setting_rows.extend(ray.get(ref))
                                 submit_times.pop(ref, None)
                                 completed += 1
-                                if progress_update is not None:
-                                    progress_update(1)
+                                progress.update(1)
 
                                 while submitted < R and len(pending) < max_pending:
                                     next_ref = submit_replication(submitted)
@@ -1264,7 +1258,7 @@ def run_full_simulation(
                                     submit_times[next_ref] = time.time()
                                     submitted += 1
                     finally:
-                        if progress is not None and hasattr(progress, "close"):
+                        if progress is not None:
                             progress.close()
                         for actor in actors:
                             try:

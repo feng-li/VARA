@@ -381,7 +381,6 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
             completed = 0
             submit_times = {}
             progress = trange(R, desc="Monte Carlo replications", ncols=100)
-            progress_update = getattr(progress, "update", None)
 
             while submitted < R and len(pending) < max_pending:
                 ref = submit_replication(submitted)
@@ -408,15 +407,14 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
                     results.append(ray.get(ref))
                     submit_times.pop(ref, None)
                     completed += 1
-                    if progress_update is not None:
-                        progress_update(1)
+                    progress.update(1)
                     while submitted < R and len(pending) < max_pending:
                         next_ref = submit_replication(submitted)
                         pending.append(next_ref)
                         submit_times[next_ref] = time.time()
                         submitted += 1
         finally:
-            if progress is not None and hasattr(progress, "close"):
+            if progress is not None:
                 progress.close()
             for actor in actors:
                 try:
