@@ -16,6 +16,7 @@ def estimate(
     algorithm,
     update_idx=slice(None),
     block_order=None,
+    kappa4=3.0,
 ):
     """
     Perform estimation under the current 4-block old model:
@@ -51,6 +52,8 @@ def estimate(
                 "beta": list(range(1+p, 1+2*p)),
                 "sigma2": list(range(1+2*p, 1+3*p)),
             }
+    kappa4 : float
+        Fourth moment of standardized innovations used for sandwich variance.
 
     Returns
     -------
@@ -154,6 +157,7 @@ def estimate(
         Z=Z,
         theta_hat=theta_hat,
         params_scale=params_scale,
+        kappa4=kappa4,
     )
 
     return var_theta, convergence

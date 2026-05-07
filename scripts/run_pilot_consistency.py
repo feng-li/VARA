@@ -32,6 +32,7 @@ from vara.fit import estimate
 from vara.simulation import (
     estimate_eta_concentrated as _estimate_eta_concentrated,
     flatten_simulation_params,
+    kappa4_for_dist,
     make_block_order,
     reparam_theta_from_params,
 )
@@ -228,6 +229,7 @@ def estimate_eta_qmle_pilot(
     params_scale,
     algorithm="lbfgs",
     perturb_scale=0.05,
+    kappa4=3.0,
 ):
     """
     Use the full QMLE estimator as a pilot eta_a estimator.
@@ -251,6 +253,7 @@ def estimate_eta_qmle_pilot(
         algorithm=algorithm,
         update_idx=slice(None),
         block_order=block_order,
+        kappa4=kappa4,
     )
 
     theta_hat = jnp.asarray(result["theta"])
@@ -277,7 +280,7 @@ def theorem2_single_replication(
     params_scale,
     dist="normal",
     pilot_mode="oracle",
-    kappa4=3.0,
+    kappa4=None,
     eta_bounds=(-2.0, 2.0),
     qmle_algorithm="lbfgs",
 ):
@@ -292,6 +295,8 @@ def theorem2_single_replication(
     )
     params_true["beta"] = beta
     params_true["gamma_a"] = gamma_a
+    if kappa4 is None:
+        kappa4 = kappa4_for_dist(dist)
 
     sim_key, pilot_key = jax.random.split(key)
 
@@ -330,6 +335,7 @@ def theorem2_single_replication(
             params_true=params_true,
             params_scale=params_scale,
             algorithm=qmle_algorithm,
+            kappa4=kappa4,
         )
         pilot_info["mode"] = "qmle"
 
@@ -523,6 +529,8 @@ def _run_kwargs_from_args(args):
         "eta_bounds": (args.eta_lower, args.eta_upper),
         "results_dir": Path(args.results_dir),
     })
+    if kwargs["kappa4"] is None:
+        kwargs["kappa4"] = kappa4_for_dist(kwargs["dist"])
     return kwargs
 
 
@@ -539,7 +547,7 @@ def run_pilot_consistency_verification(
     k_list=(0, 1, 2),
     pilot_mode="oracle",
     dist="normal",
-    kappa4=3.0,
+    kappa4=None,
     eta_bounds=(-2.0, 2.0),
     qmle_algorithm="lbfgs",
     ray_num_cpus=52,
@@ -559,6 +567,8 @@ def run_pilot_consistency_verification(
     use_ray = ray_num_cpus > 1
     if use_ray and max_cpus_per_task > ray_num_cpus:
         raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
+    if kappa4 is None:
+        kappa4 = kappa4_for_dist(dist)
 
     key = jax.random.PRNGKey(seed)
     keys = jax.random.split(key, 10)
@@ -850,7 +860,12 @@ if __name__ == "__main__":
         choices=["oracle", "concentrated", "qmle"],
     )
     parser.add_argument("--dist", type=str, default="normal", choices=["normal", "laplace", "t5"])
-    parser.add_argument("--kappa4", type=float, default=3.0)
+    parser.add_argument(
+        "--kappa4",
+        type=float,
+        default=None,
+        help="Fourth standardized innovation moment. Defaults to the value implied by --dist.",
+    )
     parser.add_argument("--eta-lower", type=float, default=-2.0)
     parser.add_argument("--eta-upper", type=float, default=2.0)
     parser.add_argument("--qmle-algorithm", type=str, default="lbfgs")

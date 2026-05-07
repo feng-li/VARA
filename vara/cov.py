@@ -265,7 +265,7 @@ def assemble_H(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4=3.0, full=True)
     V = assemble_V(Wa, Wa_dot, gamma_a, G, Gamma0, sigma2, T, kappa4, full)
     sigma_inv4 = 1.0 / (sigma2 ** 2)
 
-    Delta_sigma_sigma = (kappa4 - 3) / 4.0 * sigma_inv4  # vector p
+    Delta_sigma_sigma = T * (kappa4 - 3) / 4.0 * sigma_inv4  # vector p
 
     H = V.copy()
     if full:

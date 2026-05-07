@@ -495,6 +495,7 @@ def run_qmle_on_dataset(
         algorithm=algorithm,
         update_idx=slice(None),
         block_order=block_order,
+        kappa4=kappa4,
     )
 
     theta_hat = jnp.asarray(result["theta"])

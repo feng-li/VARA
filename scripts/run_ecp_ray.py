@@ -60,7 +60,7 @@ def _param_slices_from_block_order(block_order):
 
 def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alpha=0.05,
                        algorithm="analytical_gradhess", update_idx=slice(None),
-                       max_tries=10, kappa4=3.0):
+                       max_tries=10, kappa4=None):
     """
     One Monte Carlo replication under the current 4-block old model:
         theta = (eta_a, gamma_a, beta, sigma2)
@@ -74,6 +74,8 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
     z_stats : (4,) float
         standardized stats for eta_a, gamma_a[1], beta[1], sigma2[1]
     """
+    if kappa4 is None:
+        kappa4 = kappa4_for_dist(dist)
     # ---- True theta ----
     block_order = make_block_order(p)
     param_slices = _param_slices_from_block_order(block_order)
@@ -135,7 +137,8 @@ def single_replication(subkey, params_true, Z, T, p, q, params_scale, dist, alph
             params_scale=params_scale,
             algorithm=algorithm,
             update_idx=update_idx_array,
-            block_order=block_order
+            block_order=block_order,
+            kappa4=kappa4,
         )
 
         theta_hat = jnp.asarray(result["theta"])
@@ -273,7 +276,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
                             dist="normal", alpha=0.05,
                             algorithm="analytical_gradhess",
                             ray_num_cpus=52, max_cpus_per_task=1,
-                            kappa4=3.0):
+                            kappa4=None):
     """
     Monte Carlo simulation to estimate:
         - empirical coverage
@@ -287,6 +290,8 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     use_ray = ray_num_cpus > 1
     if use_ray and max_cpus_per_task > ray_num_cpus:
         raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
+    if kappa4 is None:
+        kappa4 = kappa4_for_dist(dist)
 
     print("\n" + "=" * 70 + "\nEmpirical Simulation Setup\n" + "=" * 70)
     print(f"Algorithm      : {algorithm}")
