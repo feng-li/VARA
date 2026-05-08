@@ -9,6 +9,7 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pandas as pd
 
 from scripts.run_full_simulation import (
@@ -21,9 +22,30 @@ from scripts.run_full_simulation import (
     make_simulation_reporting_tables,
     make_simulation_setup_table,
 )
+from scripts.run_tourism_forecast_smoke import _fit_y_transform, _inverse_y_transform
 
 
 class ScriptHelperTests(unittest.TestCase):
+    def test_tourism_seasonal_diff_inverse_reconstructs_from_lagged_logs(self):
+        train = pd.DataFrame({
+            "a": range(1, 16),
+            "b": range(11, 26),
+        }).to_numpy(dtype=float)
+        _, transform = _fit_y_transform(train, "log1p-seasonal-diff", seasonal_lag=12)
+
+        target_diff = np.zeros((2, 2))
+        model_scale = (target_diff - transform["mean"]) / transform["scale"]
+        forecast = _inverse_y_transform(model_scale, transform)
+
+        expected = train[-12:-10]
+        pd.testing.assert_frame_equal(
+            pd.DataFrame(forecast),
+            pd.DataFrame(expected),
+            check_dtype=False,
+            atol=1e-10,
+            rtol=1e-10,
+        )
+
     def test_full_simulation_output_paths_include_major_config(self):
         detail, summary, paper = _full_simulation_output_paths(
             Path("data"),
