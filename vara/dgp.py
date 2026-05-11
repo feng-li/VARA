@@ -127,11 +127,26 @@ def build_param_name_map(block_order):
     return name_map
 
 
-def draw_Z(key, p, q):
+def draw_Z(key, p, q, n_clusters=None, cluster_noise_var=0.1):
     """
-    Draw Z according to the paper design:
-        Z_k ~ N(0, Sigma_z),  Sigma_z[j1,j2] = 0.5^{|j1-j2|}
+    Draw feature vectors Z.
+
+    If ``n_clusters`` is provided, draw the clustered paper-simulation design:
+    cluster centers are N(0, I_q), labels are sampled uniformly, local noise has
+    covariance ``cluster_noise_var * I_q``, and rows are normalized to unit norm.
+
+    Otherwise draw the legacy correlated Gaussian design:
+        Z_k ~ N(0, Sigma_z),  Sigma_z[j1,j2] = 0.5^{|j1-j2|}.
     """
+    if n_clusters is not None:
+        n_clusters = int(max(1, min(n_clusters, p)))
+        k_mu, k_label, k_noise = jax.random.split(key, 3)
+        centers = jax.random.normal(k_mu, (n_clusters, q))
+        labels = jax.random.randint(k_label, (p,), minval=0, maxval=n_clusters)
+        noise = jax.random.normal(k_noise, (p, q)) * jnp.sqrt(float(cluster_noise_var))
+        Z_raw = centers[labels] + noise
+        return Z_raw / jnp.maximum(jnp.linalg.norm(Z_raw, axis=1, keepdims=True), 1e-12)
+
     idx = jnp.arange(q)
     Sigma_z = 0.5 ** jnp.abs(idx[:, None] - idx[None, :])
     Z = multivariate_normal(key, jnp.zeros(q), Sigma_z, (p,))
@@ -327,6 +342,7 @@ def draw_good_Z_for_eta_approx(
     approx_pairs=200_000,
     attention_mode="dense",
     attention_top_k=None,
+    n_clusters=None,
     require_accepted=False,
     verbose=True,
 ):
@@ -364,7 +380,7 @@ def draw_good_Z_for_eta_approx(
     for local_attempt in range(max_tries):
         attempt = int(attempt_start) + local_attempt
         subkey = jax.random.fold_in(key, attempt)
-        Z = draw_Z(subkey, p, q)
+        Z = draw_Z(subkey, p, q, n_clusters=n_clusters)
         info = _score_Z_for_eta_approx(
             Z,
             attempt=attempt,
@@ -447,6 +463,7 @@ def draw_good_Z_for_eta(
     approx_pairs=200_000,
     attention_mode="dense",
     attention_top_k=None,
+    n_clusters=None,
     require_accepted=False,
     verbose=True,
 ):
@@ -507,6 +524,7 @@ def draw_good_Z_for_eta(
             approx_pairs=approx_pairs,
             attention_mode=attention_mode,
             attention_top_k=attention_top_k,
+            n_clusters=n_clusters,
             require_accepted=require_accepted,
             verbose=verbose,
         )
@@ -555,7 +573,7 @@ def draw_good_Z_for_eta(
     for local_attempt in range(max_tries):
         attempt = int(attempt_start) + local_attempt
         subkey = jax.random.fold_in(key, attempt)
-        Z = draw_Z(subkey, p, q)
+        Z = draw_Z(subkey, p, q, n_clusters=n_clusters)
 
         S = (Z @ Z.T) / jnp.sqrt(q)
         off_mask = ~jnp.eye(p, dtype=bool)

@@ -36,17 +36,33 @@ from .two_stage import concentrated_eta_loglik, fit_all_components_two_stage
 
 PARAMS_SCALE = {"eta_a": 1.0}
 Z_CRIT_975 = 1.959963984540054
+LOW_P_BY_T = {100: 5, 200: 10, 500: 20}
+HIGH_P_BY_T = {100: 100, 200: 300, 500: 1000}
+LOW_FEATURE_CLUSTERS_BY_T = {100: 2, 200: 2, 500: 2}
+HIGH_FEATURE_CLUSTERS_BY_T = {100: 5, 200: 10, 500: 15}
 
 
 def p_for_setting(T: int, setting: str) -> int:
     """Return the response dimension used by a paper simulation setting.
 
-    ``low`` uses ``floor(sqrt(T))``. ``high`` uses ``floor(T ** 1.5)``.
+    The paper design uses fixed grids for ``T in {100, 200, 500}``.
+    Other ``T`` values fall back to the older growth rules for diagnostics.
     """
+    T = int(T)
     if setting == "low":
-        return int(math.floor(math.sqrt(T)))
+        return LOW_P_BY_T.get(T, int(math.floor(math.sqrt(T))))
     if setting == "high":
-        return int(math.floor(T ** 1.5))
+        return HIGH_P_BY_T.get(T, int(math.floor(T ** 1.5)))
+    raise ValueError("setting must be 'low' or 'high'")
+
+
+def feature_clusters_for_setting(T: int, setting: str) -> int:
+    """Return the clustered-feature count used by a paper simulation setting."""
+    T = int(T)
+    if setting == "low":
+        return LOW_FEATURE_CLUSTERS_BY_T.get(T, 2)
+    if setting == "high":
+        return HIGH_FEATURE_CLUSTERS_BY_T.get(T, 15)
     raise ValueError("setting must be 'low' or 'high'")
 
 
@@ -804,6 +820,8 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
                 rec["eta_boundary_rate"] = math.nan
 
             optional_first_cols = [
+                "G",
+                "Z_design",
                 "Z_screened",
                 "Z_parallel",
                 "Z_parallel_workers",

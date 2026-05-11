@@ -75,6 +75,7 @@ def _ensure_runtime_imports() -> None:
         "draw_Z": _dgp.draw_Z,
         "draw_good_Z_for_eta": _dgp.draw_good_Z_for_eta,
         "ensure_stationarity": _dgp.ensure_stationarity,
+        "feature_clusters_for_setting": _simulation.feature_clusters_for_setting,
         "PARAMS_SCALE": _simulation.PARAMS_SCALE,
         "full_single_replication": _simulation.full_single_replication,
         "make_paper_table": _simulation.make_paper_table,
@@ -84,9 +85,9 @@ def _ensure_runtime_imports() -> None:
     })
 
 
-SIMULATION_ETA_A = 1.0
-SIMULATION_GAMMA_A_MIN = 0.15
-SIMULATION_GAMMA_A_MAX = 0.30
+SIMULATION_ETA_A = 2.0
+SIMULATION_GAMMA_A_MIN = 0.35
+SIMULATION_GAMMA_A_MAX = 0.45
 SIMULATION_BETA_MIN = -0.20
 SIMULATION_BETA_MAX = 0.20
 SIMULATION_SIGMA2_MIN = 0.50
@@ -385,10 +386,11 @@ def make_simulation_setup_table(
         f"approx_pairs={z_approx_pairs}"
     )
     for setting in settings:
-        p_rule = "floor(sqrt(T))" if setting == "low" else "floor(T^1.5)"
+        p_rule = "paper grid: 5,10,20" if setting == "low" else "paper grid: 100,300,1000"
         for dist in dist_list:
             for T in T_list:
                 p = p_for_setting(T, setting)
+                feature_clusters = feature_clusters_for_setting(T, setting)
                 if setting == "high" and high_max_p is not None and p > high_max_p:
                     continue
                 rows.append({
@@ -398,12 +400,14 @@ def make_simulation_setup_table(
                     "T": int(T),
                     "p": int(p),
                     "q": int(q),
+                    "G": int(feature_clusters),
                     "R": int(R),
                     "gamma": dgp_eta_a,
                     "alpha_range": f"U({SIMULATION_BETA_MIN:.2f},{SIMULATION_BETA_MAX:.2f})",
                     "beta_range": f"U({SIMULATION_GAMMA_A_MIN:.2f},{SIMULATION_GAMMA_A_MAX:.2f})",
                     "sigma2_range": f"U({SIMULATION_SIGMA2_MIN:.2f},{SIMULATION_SIGMA2_MAX:.2f})",
                     "stationarity_margin": SIMULATION_STATIONARITY_MARGIN,
+                    "Z_design": "clustered",
                     "Z_screening": bool(screen_z),
                     "Z_screening_rule": z_rule if screen_z else "none",
                     "Z_require_accepted": bool(require_good_z),
@@ -431,6 +435,8 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
     ecp_cols = ["ECP_gamma", "ECP_alpha", "ECP_beta", "ECP_sigma2"]
     high_ecp_cols = ["ECP_alpha", "ECP_beta", "ECP_sigma2"]
     diag_cols = [
+        "G",
+        "Z_design",
         "valid_rate",
         "eta_boundary_rate",
         "Z_screened",
@@ -606,6 +612,7 @@ def draw_good_z_chunk_remote(
     chunk_idx: int,
     p: int,
     q: int,
+    n_clusters: int,
     params_true,
     params_scale,
     attempt_start: int,
@@ -640,6 +647,7 @@ def draw_good_z_chunk_remote(
         key=key,
         p=p,
         q=q,
+        n_clusters=n_clusters,
         params_true=params_true,
         params_scale=params_scale,
         max_tries=max_tries,
@@ -758,6 +766,7 @@ def draw_good_Z_for_eta_with_ray(
     key,
     p: int,
     q: int,
+    n_clusters: int,
     params_true,
     params_scale,
     max_tries: int,
@@ -800,6 +809,7 @@ def draw_good_Z_for_eta_with_ray(
             chunk_idx=worker_idx,
             p=p,
             q=q,
+            n_clusters=n_clusters,
             params_true=params_true,
             params_scale=params_scale,
             attempt_start=attempt_start,
@@ -885,7 +895,7 @@ def run_full_simulation(
     ridge: float = 1e-10,
     batch_size: int = 512,
     dense_threshold: int = 2500,
-    screen_z: bool = True,
+    screen_z: bool = False,
     precompute_dgp_attention: bool = False,
     require_good_z: bool = False,
     dgp_eta_a: float = SIMULATION_ETA_A,
@@ -1030,12 +1040,13 @@ def run_full_simulation(
         for dist in dist_list:
             for T in T_list:
                 p = p_for_setting(T, setting)
+                feature_clusters = feature_clusters_for_setting(T, setting)
                 if setting == "high" and high_max_p is not None and p > high_max_p:
                     print(f"[skip] high-dimensional setting T={T} gives p={p} > high_max_p={high_max_p}")
                     continue
 
                 methods = ["two_stage"] if setting == "high" else ["qmle", "two_stage"]
-                p_rule = "floor(T^1.5)" if setting == "high" else "floor(sqrt(T))"
+                p_rule = "paper grid: 100,300,1000" if setting == "high" else "paper grid: 5,10,20"
                 grid_size_use = int(
                     high_grid_size
                     if (setting == "high" and high_grid_size is not None)
@@ -1055,6 +1066,7 @@ def run_full_simulation(
                 print(f"dist         : {dist}")
                 print(f"T, p, q      : {T}, {p}, {q}")
                 print(f"p_rule       : {p_rule}")
+                print(f"feature_G    : {feature_clusters}")
                 print(f"R            : {R}")
                 print(f"methods      : {methods}")
                 print(f"seed         : {seed}")
@@ -1104,6 +1116,7 @@ def run_full_simulation(
                             key=k_Z,
                             p=p,
                             q=q,
+                            n_clusters=feature_clusters,
                             params_true=params_true,
                             params_scale=PARAMS_SCALE,
                             max_tries=z_max_tries,
@@ -1132,6 +1145,7 @@ def run_full_simulation(
                             key=k_Z,
                             p=p,
                             q=q,
+                            n_clusters=feature_clusters,
                             params_true=params_true,
                             params_scale=PARAMS_SCALE,
                             max_tries=z_max_tries,
@@ -1154,7 +1168,7 @@ def run_full_simulation(
                         )
                 else:
                     _print_progress("Drawing unscreened Z")
-                    Z = draw_Z(k_Z, p, q)
+                    Z = draw_Z(k_Z, p, q, n_clusters=feature_clusters)
                     Z_info = {"screened": False}
                 _print_progress(f"Z ready: accepted={bool(Z_info.get('accepted', False))}")
 
@@ -1353,6 +1367,8 @@ def run_full_simulation(
                 _print_progress("Annotating replication rows")
                 for row in setting_rows:
                     row["setting_elapsed_sec"] = elapsed_setting
+                    row["G"] = int(feature_clusters)
+                    row["Z_design"] = "clustered"
                     row["Z_screened"] = bool(screen_z)
                     row["Z_parallel"] = bool(Z_info.get("parallel", False))
                     row["Z_parallel_workers"] = Z_info.get("parallel_workers", math.nan)
@@ -1565,8 +1581,8 @@ def main():
     parser.add_argument(
         "--screen-z",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Screen Z for eta identification. Use --no-screen-z to draw an unscreened design.",
+        default=False,
+        help="Screen Z for eta identification. Default is the manuscript clustered-Z draw without screening.",
     )
     parser.add_argument(
         "--precompute-dgp-attention",

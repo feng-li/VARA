@@ -29,9 +29,11 @@ from vara.cov import (
     make_A,
 )
 from vara.simulation import (
+    feature_clusters_for_setting,
     flatten_simulation_params,
     kappa4_for_dist,
     make_block_order,
+    p_for_setting,
     reparam_theta_from_params,
 )
 from vara.run_config import (
@@ -53,6 +55,16 @@ def _param_slices_from_block_order(block_order):
         slices[name] = slice(start, stop)
         start = stop
     return slices
+
+
+def _feature_clusters_for_design(T: int, p: int, feature_clusters=None) -> int:
+    if feature_clusters is not None:
+        return int(feature_clusters)
+    if p == p_for_setting(T, "high"):
+        return feature_clusters_for_setting(T, "high")
+    if p == p_for_setting(T, "low"):
+        return feature_clusters_for_setting(T, "low")
+    return 2 if p <= 20 else 15
 
 # ===============================================================
 # === Single replication ========================================
@@ -276,7 +288,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
                             dist="normal", alpha=0.05,
                             algorithm="analytical_gradhess",
                             ray_num_cpus=52, max_cpus_per_task=1,
-                            kappa4=None):
+                            kappa4=None, feature_clusters=None):
     """
     Monte Carlo simulation to estimate:
         - empirical coverage
@@ -299,6 +311,8 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
     print(f"Sample size  T : {T}")
     print(f"Response dim p : {p}")
     print(f"Feature dim  q : {q}")
+    feature_clusters = _feature_clusters_for_design(T, p, feature_clusters)
+    print(f"Feature clusters G: {feature_clusters}")
     print(f"Replications R : {R}")
     print(f"Ray num CPUs   : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
     print(f"Random key     : {key}")
@@ -338,6 +352,7 @@ def empirical_coverage_rate(key, R, T, p, q, params_dgp, params_scale,
         key=pkeys[0],
         p=p,
         q=q,
+        n_clusters=feature_clusters,
         params_true=params_true,
         params_scale=params_scale,
         max_tries=200,
@@ -563,6 +578,7 @@ ECP_CONFIG_KEYS = (
     "T_list",
     "alpha_list",
     "dist_list",
+    "feature_clusters",
     "algorithm",
     "results_dir",
 )
@@ -658,6 +674,12 @@ if __name__ == "__main__":
         help="Comma-separated innovation distributions to run, e.g. --dist-list normal,laplace,t5.",
     )
     parser.add_argument(
+        "--feature-clusters",
+        type=int,
+        default=None,
+        help="Cluster count G for clustered Z. Default infers the manuscript design from T and p.",
+    )
+    parser.add_argument(
         "--algorithm",
         type=str,
         default="lbfgs",
@@ -697,8 +719,8 @@ if __name__ == "__main__":
     results_dir.mkdir(parents=True, exist_ok=True)
 
     params_dgp = dict(
-        eta_a=0.5,
-        gamma_a=dict(minval=0.15, maxval=0.3),
+        eta_a=2.0,
+        gamma_a=dict(minval=0.35, maxval=0.45),
         beta=dict(minval=-0.2, maxval=0.2),
         sigma2=dict(minval=0.5, maxval=1.0),
     )
@@ -727,6 +749,7 @@ if __name__ == "__main__":
             "T_list": T_list,
             "alpha_list": alpha_list,
             "dist_list": dist_list,
+            "feature_clusters": args.feature_clusters,
             "algorithm": algorithm,
             "results_dir": results_dir,
         },
@@ -778,6 +801,7 @@ if __name__ == "__main__":
             ray_num_cpus=args.ray_num_cpus,
             max_cpus_per_task=args.max_cpus_per_task,
             kappa4=kappa4_for_dist(dist),
+            feature_clusters=args.feature_clusters,
         )
 
         finish_time = datetime.now()

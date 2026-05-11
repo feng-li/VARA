@@ -31,9 +31,11 @@ from vara.attention import build_attention
 from vara.fit import estimate
 from vara.simulation import (
     estimate_eta_concentrated as _estimate_eta_concentrated,
+    feature_clusters_for_setting,
     flatten_simulation_params,
     kappa4_for_dist,
     make_block_order,
+    p_for_setting,
     reparam_theta_from_params,
 )
 from vara.run_config import (
@@ -46,6 +48,16 @@ from vara.two_stage import (
     concentrated_eta_loglik as _concentrated_eta_loglik,
     fit_all_components_two_stage,
 )
+
+
+def _feature_clusters_for_design(T: int, p: int, feature_clusters=None) -> int:
+    if feature_clusters is not None:
+        return int(feature_clusters)
+    if p == p_for_setting(T, "high"):
+        return feature_clusters_for_setting(T, "high")
+    if p == p_for_setting(T, "low"):
+        return feature_clusters_for_setting(T, "low")
+    return 2 if p <= 20 else 15
 
 
 # =====================================================================
@@ -494,6 +506,7 @@ PILOT_CONFIG_KEYS = (
     "pilot_mode",
     "dist",
     "kappa4",
+    "feature_clusters",
     "eta_bounds",
     "qmle_algorithm",
     "ray_num_cpus",
@@ -548,6 +561,7 @@ def run_pilot_consistency_verification(
     pilot_mode="oracle",
     dist="normal",
     kappa4=None,
+    feature_clusters=None,
     eta_bounds=(-2.0, 2.0),
     qmle_algorithm="lbfgs",
     ray_num_cpus=52,
@@ -574,12 +588,13 @@ def run_pilot_consistency_verification(
     keys = jax.random.split(key, 10)
 
     params_scale = {"eta_a": 1.0}
+    feature_clusters = _feature_clusters_for_design(T, p, feature_clusters)
 
     # DGP chosen to keep eta_a identifiable.
     params_true = {
-        "eta_a": 0.5,
+        "eta_a": 2.0,
         "gamma_a": jax.random.uniform(
-            keys[1], (p,), minval=0.15, maxval=0.30
+            keys[1], (p,), minval=0.35, maxval=0.45
         ),
         "beta": jax.random.uniform(
             keys[2], (p,), minval=-0.20, maxval=0.20
@@ -599,6 +614,7 @@ def run_pilot_consistency_verification(
         key=keys[0],
         p=p,
         q=q,
+        n_clusters=feature_clusters,
         params_true=params_true,
         params_scale=params_scale,
         max_tries=200,
@@ -615,6 +631,7 @@ def run_pilot_consistency_verification(
     print(f"R          = {R}")
     print(f"T          = {T}")
     print(f"p, q       = {p}, {q}")
+    print(f"G          = {feature_clusters}")
     print(f"k_list     = {list(k_list)}")
     print(f"pilot_mode = {pilot_mode}")
     print(f"dist       = {dist}")
@@ -865,6 +882,12 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Fourth standardized innovation moment. Defaults to the value implied by --dist.",
+    )
+    parser.add_argument(
+        "--feature-clusters",
+        type=int,
+        default=None,
+        help="Cluster count G for clustered Z. Default infers the manuscript design from T and p.",
     )
     parser.add_argument("--eta-lower", type=float, default=-2.0)
     parser.add_argument("--eta-upper", type=float, default=2.0)

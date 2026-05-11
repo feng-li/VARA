@@ -189,12 +189,12 @@ def _table_environment(label: str, caption: str, body: str) -> str:
 def render_design_table(setup: pd.DataFrame) -> str:
     if setup.empty:
         rows = [
-            r"Low-dimensional & 100, 200, 500 & $[\sqrt T]$ & 50 & Normal, Laplace & QMLE, two-stage & Dense \\",
-            r"High-dimensional & 100, 200, 500 & $[T^{1.5}]$ & 50 & Normal, Laplace & Two-stage & Dense \\",
-            r"Extra-high-dimensional & TBD & TBD & 50 & Normal & Two-stage & Sparse top-$K$ \\",
+            r"Low-dimensional & 100, 200, 500 & 5, 10, 20 & 50 & 2 & Normal, Laplace & QMLE, two-stage & Dense \\",
+            r"High-dimensional & 100, 200, 500 & 100, 300, 1000 & 50 & 5, 10, 15 & Normal, Laplace & Two-stage & Dense \\",
+            r"Extra-high-dimensional & TBD & TBD & 50 & TBD & Normal & Two-stage & Sparse top-$K$ \\",
         ]
     else:
-        group_cols = ["setting", "p_rule", "q", "attention_mode", "attention_top_k"]
+        group_cols = ["setting", "q", "attention_mode", "attention_top_k"]
         existing_group_cols = [c for c in group_cols if c in setup.columns]
         rows = []
         grouped = setup.groupby(existing_group_cols, dropna=False, sort=False) if existing_group_cols else [((), setup)]
@@ -202,16 +202,18 @@ def render_design_table(setup: pd.DataFrame) -> str:
             first = group.iloc[0]
             setting = _setting_label(first.get("setting", ""), first.get("attention_mode", ""))
             t_values = ", ".join(_format_int(v) for v in sorted(group["T"].dropna().unique())) if "T" in group else "--"
-            p_rule = _p_rule_label(first.get("p_rule", ""))
+            p_values = ", ".join(_format_int(v) for v in sorted(group["p"].dropna().unique())) if "p" in group else _p_rule_label(first.get("p_rule", ""))
             q_values = ", ".join(_format_int(v) for v in sorted(group["q"].dropna().unique())) if "q" in group else "--"
+            g_values = ", ".join(_format_int(v) for v in sorted(group["G"].dropna().unique())) if "G" in group else "--"
             innovations = ", ".join(_dist_label(v) for v in sorted(group["dist"].dropna().unique())) if "dist" in group else "--"
             estimator = "QMLE, two-stage" if str(first.get("setting", "")).lower() == "low" else "Two-stage"
             rows.append(
                 " & ".join([
                     setting,
                     t_values,
-                    p_rule,
+                    p_values,
                     q_values,
+                    g_values,
                     innovations,
                     estimator,
                     _attention_label(first),
@@ -227,11 +229,12 @@ def render_design_table(setup: pd.DataFrame) -> str:
         ">{\\centering\\arraybackslash}p{0.12\\textwidth}\n"
         ">{\\centering\\arraybackslash}p{0.12\\textwidth}\n"
         ">{\\centering\\arraybackslash}p{0.05\\textwidth}\n"
-        ">{\\RaggedRight\\arraybackslash}p{0.15\\textwidth}\n"
-        ">{\\RaggedRight\\arraybackslash}p{0.15\\textwidth}\n"
-        ">{\\RaggedRight\\arraybackslash}p{0.13\\textwidth}@{}}\n"
+        ">{\\centering\\arraybackslash}p{0.05\\textwidth}\n"
+        ">{\\RaggedRight\\arraybackslash}p{0.13\\textwidth}\n"
+        ">{\\RaggedRight\\arraybackslash}p{0.14\\textwidth}\n"
+        ">{\\RaggedRight\\arraybackslash}p{0.12\\textwidth}@{}}\n"
         "\\toprule\n"
-        "Setting & $T$ & $p$ & $q$ & Innovations & Estimator & Attention design \\\\\n"
+        "Setting & $T$ & $p$ & $q$ & $G$ & Innovations & Estimator & Attention design \\\\\n"
         "\\midrule\n"
         + "\n".join(rows)
         + "\n\\bottomrule\n"
@@ -251,7 +254,7 @@ def _metric_rows(
     include_method: bool,
 ) -> List[str]:
     if df.empty:
-        width = 3 + len(metric_cols) if include_method else 2 + len(metric_cols)
+        width = 5 + len(metric_cols) if include_method else 4 + len(metric_cols)
         return [" & ".join(["--"] * width) + r" \\"]
 
     rows = []
@@ -262,6 +265,8 @@ def _metric_rows(
         if include_method:
             cells.append(_method_label(row.get("method", "")))
         cells.append(_format_int(row.get("T", "")))
+        cells.append(_format_int(row.get("p", "")))
+        cells.append(_format_int(row.get("q", "")))
         cells.extend(_format_number(row.get(col, math.nan)) for col in metric_cols)
         rows.append(" & ".join(cells) + r" \\")
     return rows
@@ -277,11 +282,11 @@ def render_metric_table(
     include_method: bool,
 ) -> str:
     column_spec = "ll" if include_method else "l"
-    column_spec += "c" * (1 + len(metric_cols))
+    column_spec += "c" * (3 + len(metric_cols))
     header_cells = ["Innovation"]
     if include_method:
         header_cells.append("Method")
-    header_cells.extend(["$T$", *headers])
+    header_cells.extend(["$T$", "$p$", "$q$", *headers])
     body = (
         f"\\begin{{tabular}}{{{column_spec}}}\n"
         "\\toprule\n"

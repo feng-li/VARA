@@ -30,6 +30,8 @@ from vara.dgp import (
 from vara.simulation import (
     estimate_eta_concentrated,
     estimate_eta_curvature as estimate_omega_gamma,
+    feature_clusters_for_setting,
+    p_for_setting,
 )
 from vara.run_config import (
     load_config_json_defaults,
@@ -37,6 +39,16 @@ from vara.run_config import (
     save_run_config,
     select_config_values,
 )
+
+
+def _feature_clusters_for_design(T: int, p: int, feature_clusters=None) -> int:
+    if feature_clusters is not None:
+        return int(feature_clusters)
+    if p == p_for_setting(T, "high"):
+        return feature_clusters_for_setting(T, "high")
+    if p == p_for_setting(T, "low"):
+        return feature_clusters_for_setting(T, "low")
+    return 2 if p <= 20 else 15
 
 
 # =====================================================================
@@ -262,6 +274,7 @@ def run_convergence_verification(
     p=10,
     q=50,
     dist="normal",
+    feature_clusters=None,
     eta_bounds=(-2.0, 2.0),
     grid_size=81,
     curvature_step=0.02,
@@ -289,11 +302,12 @@ def run_convergence_verification(
     rep_keys = jax.random.split(keys[4], R)
 
     params_scale = {"eta_a": 1.0}
+    feature_clusters = _feature_clusters_for_design(T, p, feature_clusters)
 
     params_true = {
-        "eta_a": 0.5,
+        "eta_a": 2.0,
         # Keep the attention-loading coefficients away from zero to identify eta_a.
-        "gamma_a": jax.random.uniform(keys[1], (p,), minval=0.15, maxval=0.30),
+        "gamma_a": jax.random.uniform(keys[1], (p,), minval=0.35, maxval=0.45),
         "beta": jax.random.uniform(keys[2], (p,), minval=-0.20, maxval=0.20),
         "sigma2": jax.random.uniform(keys[3], (p,), minval=0.50, maxval=1.00),
     }
@@ -307,6 +321,7 @@ def run_convergence_verification(
         key=keys[0],
         p=p,
         q=q,
+        n_clusters=feature_clusters,
         params_true=params_true,
         params_scale=params_scale,
         max_tries=200,
@@ -326,6 +341,7 @@ def run_convergence_verification(
     print(f"R          = {R}")
     print(f"T_eff      = {T_eff}")
     print(f"p, q       = {p}, {q}")
+    print(f"G          = {feature_clusters}")
     print(f"dist       = {dist}")
     print(f"eta_true   = {params_true['eta_a']}")
     print(f"eta_bounds = {eta_bounds}")
@@ -527,6 +543,7 @@ RATE_CONFIG_KEYS = (
     "p_rule",
     "q",
     "dist",
+    "feature_clusters",
     "eta_bounds",
     "grid_size",
     "curvature_step",
@@ -564,7 +581,11 @@ def _p_from_rule(T, rule):
         return int(math.floor(math.sqrt(T)))
     if rule == "logT":
         return max(2, int(math.floor(math.log(T))))
-    raise ValueError("Unsupported p_rule. Use 'sqrt', 'logT', or pass --p-list.")
+    if rule == "paper-low":
+        return p_for_setting(T, "low")
+    if rule == "paper-high":
+        return p_for_setting(T, "high")
+    raise ValueError("Unsupported p_rule. Use 'sqrt', 'logT', 'paper-low', 'paper-high', or pass --p-list.")
 
 
 def summarize_convergence_grid(df):
@@ -739,9 +760,15 @@ if __name__ == "__main__":
     parser.add_argument("--R", type=int, default=500)
     parser.add_argument("--T-list", type=str, default="500,1000,2000,4000")
     parser.add_argument("--p-list", type=str, default="")
-    parser.add_argument("--p-rule", type=str, default="sqrt", choices=["sqrt", "logT"])
+    parser.add_argument("--p-rule", type=str, default="sqrt", choices=["sqrt", "logT", "paper-low", "paper-high"])
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument("--dist", type=str, default="normal", choices=["normal", "laplace", "t5"])
+    parser.add_argument(
+        "--feature-clusters",
+        type=int,
+        default=None,
+        help="Cluster count G for clustered Z. Default infers the manuscript design from T and p.",
+    )
     parser.add_argument("--eta-lower", type=float, default=-2.0)
     parser.add_argument("--eta-upper", type=float, default=2.0)
     parser.add_argument("--grid-size", type=int, default=81)
@@ -780,6 +807,7 @@ if __name__ == "__main__":
             p=p,
             q=args.q,
             dist=args.dist,
+            feature_clusters=args.feature_clusters,
             eta_bounds=eta_bounds,
             grid_size=args.grid_size,
             curvature_step=args.curvature_step,
@@ -816,6 +844,7 @@ if __name__ == "__main__":
             "p_rule": args.p_rule,
             "q": args.q,
             "dist": args.dist,
+            "feature_clusters": args.feature_clusters,
             "eta_bounds": eta_bounds,
             "grid_size": args.grid_size,
             "curvature_step": args.curvature_step,
