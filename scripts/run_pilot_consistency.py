@@ -861,8 +861,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--R", type=int, default=500)
-    parser.add_argument("--T", type=int, default=1000)
-    parser.add_argument("--p", type=int, default=10)
+    parser.add_argument("--T", type=int, default=100)
+    parser.add_argument("--p", type=int, default=5)
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument(
         "--k-list",

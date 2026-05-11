@@ -625,8 +625,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
-        help="Global random seed. If omitted, a seed is drawn randomly as before.",
+        default=2026,
+        help="Global random seed.",
     )
     parser.add_argument(
         "--ray-num-cpus",
@@ -639,39 +639,39 @@ if __name__ == "__main__":
         "--R-list",
         dest="R_list",
         type=str,
-        default="100",
-        help="Comma-separated replication counts to run, e.g. --R-list 100,200.",
+        default="500",
+        help="Comma-separated replication counts to run, e.g. --R-list 500.",
     )
     parser.add_argument(
         "--p-list",
         type=str,
-        default="10,20",
-        help="Comma-separated response dimensions to run, e.g. --p-list 10,20.",
+        default="100,300,1000",
+        help="Comma-separated response dimensions to run, e.g. --p-list 100,300,1000.",
     )
     parser.add_argument(
         "--q-list",
         type=str,
-        default="50,70",
-        help="Comma-separated feature dimensions to run, e.g. --q-list 50,70.",
+        default="50",
+        help="Comma-separated feature dimensions to run, e.g. --q-list 50.",
     )
     parser.add_argument(
         "--T-list",
         dest="T_list",
         type=str,
-        default="500,1000",
-        help="Comma-separated sample sizes to run, e.g. --T-list 500,1000.",
+        default="100,200,500",
+        help="Comma-separated sample sizes to run, e.g. --T-list 100,200,500.",
     )
     parser.add_argument(
         "--alpha-list",
         type=str,
-        default="0.05,0.1",
-        help="Comma-separated significance levels to run, e.g. --alpha-list 0.05,0.1.",
+        default="0.05",
+        help="Comma-separated significance levels to run, e.g. --alpha-list 0.05.",
     )
     parser.add_argument(
         "--dist-list",
         type=str,
-        default="normal",
-        help="Comma-separated innovation distributions to run, e.g. --dist-list normal,laplace,t5.",
+        default="normal,laplace",
+        help="Comma-separated innovation distributions to run, e.g. --dist-list normal,laplace.",
     )
     parser.add_argument(
         "--feature-clusters",

@@ -758,9 +758,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--R", type=int, default=500)
-    parser.add_argument("--T-list", type=str, default="500,1000,2000,4000")
+    parser.add_argument("--T-list", type=str, default="100,200,500")
     parser.add_argument("--p-list", type=str, default="")
-    parser.add_argument("--p-rule", type=str, default="sqrt", choices=["sqrt", "logT", "paper-low", "paper-high"])
+    parser.add_argument("--p-rule", type=str, default="paper-high", choices=["sqrt", "logT", "paper-low", "paper-high"])
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument("--dist", type=str, default="normal", choices=["normal", "laplace", "t5"])
     parser.add_argument(
