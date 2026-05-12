@@ -17,6 +17,7 @@ def estimate(
     update_idx=slice(None),
     block_order=None,
     kappa4=3.0,
+    eta_bounds=None,
 ):
     """
     Perform estimation under the current 4-block old model:
@@ -122,6 +123,7 @@ def estimate(
             params_scale=params_scale,
             algorithm="lbfgs",
             update_idx=update_idx,
+            eta_bounds=eta_bounds,
         )
 
 

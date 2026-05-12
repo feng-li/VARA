@@ -12,7 +12,8 @@ def mle_optimize(
     params_scale,
     algorithm,
     update_idx=slice(None),
-    eta_max=2.0,   # new
+    eta_max=2.0,
+    eta_bounds=None,
 ):
     """
     MLE estimator using Optax LBFGS (line-search version).
@@ -28,6 +29,10 @@ def mle_optimize(
 
     theta_full_init = theta_init
     theta = theta_full_init[update_idx]
+    if eta_bounds is None:
+        eta_lower, eta_upper = -float(eta_max), float(eta_max)
+    else:
+        eta_lower, eta_upper = map(float, eta_bounds)
 
     def objective(theta_short):
         theta_full = theta_full_init.at[update_idx].set(theta_short)
@@ -58,7 +63,7 @@ def mle_optimize(
         # ---- project eta_a to a compact parameter space ----
         if eta_short_pos is not None:
             theta = theta.at[eta_short_pos].set(
-                jnp.clip(theta[eta_short_pos], -eta_max, eta_max)
+                jnp.clip(theta[eta_short_pos], eta_lower, eta_upper)
             )
 
         grad_norm = optax.tree.norm(grad)

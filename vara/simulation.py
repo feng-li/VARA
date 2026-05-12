@@ -487,6 +487,7 @@ def run_qmle_on_dataset(
     kappa4: float,
     algorithm: str,
     perturb_scale: float,
+    eta_bounds: Tuple[float, float] = (-2.0, 2.0),
 ) -> Tuple[Dict[str, Any], int]:
     """Run full QMLE for one simulated dataset.
 
@@ -512,6 +513,7 @@ def run_qmle_on_dataset(
         update_idx=slice(None),
         block_order=block_order,
         kappa4=kappa4,
+        eta_bounds=eta_bounds,
     )
 
     theta_hat = jnp.asarray(result["theta"])
@@ -708,6 +710,7 @@ def full_single_replication(
                     kappa4=kappa4,
                     algorithm=qmle_algorithm,
                     perturb_scale=qmle_perturb_scale,
+                    eta_bounds=eta_bounds,
                 )
                 extra = {}
                 report_gamma_ecp = True
