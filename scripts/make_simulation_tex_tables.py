@@ -97,6 +97,21 @@ def _format_int(value: object) -> str:
         return _latex_escape(value)
 
 
+def _metric_table_g(row: pd.Series) -> object:
+    if "G" in row and not _is_missing(row.get("G")):
+        return row.get("G")
+    setting = str(row.get("setting", "")).lower()
+    try:
+        T = int(float(row.get("T")))
+    except (TypeError, ValueError):
+        return ""
+    if setting == "low":
+        return 2
+    if setting == "high":
+        return {100: 5, 200: 10, 500: 15}.get(T, "")
+    return ""
+
+
 def _dist_label(value: object) -> str:
     labels = {
         "normal": "Normal",
@@ -254,7 +269,7 @@ def _metric_rows(
     include_method: bool,
 ) -> List[str]:
     if df.empty:
-        width = 5 + len(metric_cols) if include_method else 4 + len(metric_cols)
+        width = 6 + len(metric_cols) if include_method else 5 + len(metric_cols)
         return [" & ".join(["--"] * width) + r" \\"]
 
     rows = []
@@ -267,6 +282,7 @@ def _metric_rows(
         cells.append(_format_int(row.get("T", "")))
         cells.append(_format_int(row.get("p", "")))
         cells.append(_format_int(row.get("q", "")))
+        cells.append(_format_int(_metric_table_g(row)))
         cells.extend(_format_number(row.get(col, math.nan)) for col in metric_cols)
         rows.append(" & ".join(cells) + r" \\")
     return rows
@@ -282,11 +298,11 @@ def render_metric_table(
     include_method: bool,
 ) -> str:
     column_spec = "ll" if include_method else "l"
-    column_spec += "c" * (3 + len(metric_cols))
+    column_spec += "c" * (4 + len(metric_cols))
     header_cells = ["Innovation"]
     if include_method:
         header_cells.append("Method")
-    header_cells.extend(["$T$", "$p$", "$q$", *headers])
+    header_cells.extend(["$T$", "$p$", "$q$", "$G$", *headers])
     body = (
         f"\\begin{{tabular}}{{{column_spec}}}\n"
         "\\toprule\n"

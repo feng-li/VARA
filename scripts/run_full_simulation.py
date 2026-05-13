@@ -430,7 +430,7 @@ def make_simulation_setup_table(
 
 def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """Build publication-oriented simulation reporting tables."""
-    id_cols = ["setting", "dist", "T", "p", "q", "method"]
+    id_cols = ["setting", "dist", "T", "p", "q", "G", "method"]
     rmse_cols = ["RMSE_gamma", "RMSE_alpha", "RMSE_beta", "RMSE_sigma2"]
     ecp_cols = ["ECP_gamma", "ECP_alpha", "ECP_beta", "ECP_sigma2"]
     high_ecp_cols = ["ECP_alpha", "ECP_beta", "ECP_sigma2"]
