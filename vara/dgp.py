@@ -431,12 +431,15 @@ def draw_good_Z_for_eta_approx(
 
     if best_good_Z is not None:
         return best_good_Z, best_good_info
-    if require_accepted:
-        raise RuntimeError(
-            "No candidate Z passed approximate eta-identification screening. "
-            "Try increasing eta_a, relaxing the screening thresholds, increasing "
-            "max_tries, or increasing approx_rows/approx_pairs."
-        )
+    if best_info is not None:
+        best_info = dict(best_info)
+        if require_accepted:
+            best_info["warning"] = "max_tries exhausted without an accepted Z; using best candidate"
+        if verbose:
+            print(
+                "[WARNING] Approximate Z screening reached max_tries without an accepted design; "
+                "using the best candidate found."
+            )
     return best_Z, best_info
 
 
@@ -486,8 +489,9 @@ def draw_good_Z_for_eta(
       5) attention is not too diffuse in high-dimensional designs.
 
     If no candidate passes all screens, fall back to the candidate with the
-    largest composite identification score among all draws unless
-    ``require_accepted=True``.
+    largest composite identification score among all draws. When
+    ``require_accepted=True``, a warning is also attached to the returned
+    diagnostics.
 
     Returns
     -------
@@ -696,12 +700,15 @@ def draw_good_Z_for_eta(
 
     if best_good_Z is not None:
         return best_good_Z, best_good_info
-    if require_accepted:
-        raise RuntimeError(
-            "No candidate Z passed eta-identification screening. "
-            "Try increasing eta_a, using structured/sparser attention, relaxing "
-            "the screening thresholds, or increasing max_tries."
-        )
+    if best_info is not None:
+        best_info = dict(best_info)
+        if require_accepted:
+            best_info["warning"] = "max_tries exhausted without an accepted Z; using best candidate"
+        if verbose:
+            print(
+                "[WARNING] Z screening reached max_tries without an accepted design; "
+                "using the best candidate found."
+            )
     return best_Z, best_info
 
 

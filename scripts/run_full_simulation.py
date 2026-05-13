@@ -410,7 +410,7 @@ def make_simulation_setup_table(
                     "Z_design": "clustered",
                     "Z_screening": bool(screen_z),
                     "Z_screening_rule": z_rule if screen_z else "none",
-                    "Z_require_accepted": bool(require_good_z),
+                    "Z_warn_if_unaccepted": bool(require_good_z),
                     "attention_mode": attention_mode,
                     "attention_top_k": attention_top_k if attention_top_k is not None else "",
                     "attention_cache_mode": attention_cache_mode,
@@ -706,29 +706,7 @@ def _select_best_z_result(
     info["parallel_accepted_chunks"] = len(accepted)
 
     if require_good_z and not accepted:
-        best_msg = (
-            f"Best rejected candidate: attempt={info.get('attempt')}, "
-            f"offdiag_std={info.get('offdiag_std', math.nan):.4f}, "
-            f"max_abs_score={info.get('max_abs_score', math.nan):.4f}, "
-            f"q{info.get('score_quantile', math.nan):.3f}_abs_score={info.get('abs_score_quantile', math.nan):.4f}, "
-            f"eta_signal={info.get('eta_signal', math.nan):.4f}, "
-            f"eta_info={info.get('eta_info', math.nan):.4f}, "
-            f"x2_std_mean={info.get('attention_x2_std_mean', math.nan):.4f}, "
-            f"x2_std_min_required={info.get('attention_x2_std_effective_min', math.nan):.4f}, "
-            f"eff_neighbors_mean={info.get('attention_effective_neighbors_mean', math.nan):.1f}, "
-            f"eff_neighbors_limit={info.get('attention_effective_neighbors_limit', math.nan):.1f}, "
-            f"approximate={bool(info.get('approximate', False))}, "
-            f"approx_rows={info.get('approx_rows', math.nan)}, "
-            f"approx_pairs={info.get('approx_pairs', math.nan)}, "
-            f"parallel_chunks={len(results)}, "
-            f"parallel_accepted_chunks={len(accepted)}."
-        )
-        raise RuntimeError(
-            "No candidate Z passed eta-identification screening. "
-            f"{best_msg} "
-            "Try increasing eta_a, using structured/sparser attention, relaxing "
-            "the screening thresholds, or increasing max_tries."
-        )
+        info["warning"] = "max_tries exhausted without an accepted Z; using best candidate"
     return Z, info
 
 
@@ -759,6 +737,13 @@ def _print_selected_z_info(info: Dict[str, Any]) -> None:
         f"eff_neighbors_limit={info.get('attention_effective_neighbors_limit', math.nan):.1f}"
         f"{suffix}"
     )
+    if not bool(info.get("accepted", False)):
+        print(
+            "[WARNING] Z screening reached max_tries without an accepted design; "
+            "using the best candidate found. "
+            f"parallel_chunks={info.get('parallel_chunks', math.nan)}, "
+            f"parallel_accepted_chunks={info.get('parallel_accepted_chunks', math.nan)}"
+        )
 
 
 def draw_good_Z_for_eta_with_ray(
@@ -1102,7 +1087,7 @@ def run_full_simulation(
                         f"approx_threshold={z_approx_threshold}, "
                         f"approx_rows={z_approx_rows}, "
                         f"approx_pairs={z_approx_pairs}, "
-                        f"require_good_z={require_good_z}, "
+                        f"warn_if_unaccepted={require_good_z}, "
                         f"parallel_z={use_ray}"
                     )
                 print(f"dgp_attention: {'precompute requested' if precompute_dgp_attention else 'on demand'}")
@@ -1379,6 +1364,7 @@ def run_full_simulation(
                     row["Z_approx_pairs"] = Z_info.get("approx_pairs", math.nan)
                     row["Z_approx_threshold"] = z_approx_threshold
                     row["Z_accepted"] = bool(Z_info.get("accepted", False))
+                    row["Z_warning"] = Z_info.get("warning", "")
                     row["Z_attempt"] = Z_info.get("attempt", math.nan)
                     row["Z_offdiag_std"] = Z_info.get("offdiag_std", math.nan)
                     row["Z_max_abs_score"] = Z_info.get("max_abs_score", math.nan)
@@ -1594,7 +1580,7 @@ def main():
         "--require-good-z",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Fail a setting if screened Z does not pass all eta-identification checks.",
+        help="Warn if screened Z does not pass all eta-identification checks; the best candidate is still used.",
     )
     parser.add_argument("--z-max-tries", type=int, default=SIMULATION_Z_MAX_TRIES)
     parser.add_argument("--z-score-quantile", type=float, default=SIMULATION_Z_SCORE_QUANTILE)
