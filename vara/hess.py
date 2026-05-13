@@ -55,8 +55,7 @@ def Sigma_inv_from_tilde(theta, p):
 
 def compute_Wa_Wb_dots(Z, eta, scale):
     """Return (W, Ẇ, Ẅ) for the softmax attention as in Appendix B.2."""
-    p, q = Z.shape
-    S_mat = (Z @ Z.T) / jnp.sqrt(q)
+    S_mat = Z @ Z.T
     # attention weights
     W = build_attention(Z, eta, scale)
 

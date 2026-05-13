@@ -47,18 +47,17 @@ def _build_exact_topk_attention_cache(
     include_negative: bool = True,
 ) -> TopKAttentionCache:
     """Precompute exact top-k raw score candidates in row batches."""
-    p, q = Z.shape
+    p = Z.shape[0]
     k = _top_k_size(p, top_k)
     pos_idx_chunks = []
     pos_score_chunks = []
     neg_idx_chunks = []
     neg_score_chunks = []
-    sqrt_q = jnp.sqrt(q)
 
     for start in range(0, p, batch_size):
         stop = min(p, start + batch_size)
         Zb = Z[start:stop]
-        raw_scores = (Zb @ Z.T) / sqrt_q
+        raw_scores = Zb @ Z.T
 
         row_ids = jnp.arange(start, stop)
         col_ids = jnp.arange(p)
@@ -109,13 +108,12 @@ def _assign_to_anchors(
     anchors: jnp.ndarray,
     batch_size: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    p, q = Z.shape
-    sqrt_q = jnp.sqrt(q)
+    p = Z.shape[0]
     cluster_chunks = []
     score_chunks = []
     for start in range(0, p, batch_size):
         stop = min(p, start + batch_size)
-        scores = (Z[start:stop] @ anchors.T) / sqrt_q
+        scores = Z[start:stop] @ anchors.T
         cluster_chunks.append(jnp.argmax(scores, axis=1).astype(jnp.int32))
         score_chunks.append(jnp.max(scores, axis=1))
     return jnp.concatenate(cluster_chunks), jnp.concatenate(score_chunks)
@@ -157,9 +155,7 @@ def _cluster_candidate_topk(
     *,
     positive: bool,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    _, q = Z.shape
-    sqrt_q = jnp.sqrt(q)
-    anchor_scores = (Zb @ anchors.T) / sqrt_q
+    anchor_scores = Zb @ anchors.T
     probe_scores = anchor_scores if positive else -anchor_scores
     _, probe_idx = jax.lax.top_k(probe_scores, cluster_probe)
 
@@ -167,7 +163,7 @@ def _cluster_candidate_topk(
     valid_candidate = candidate_idx >= 0
     safe_candidate_idx = jnp.where(valid_candidate, candidate_idx, 0)
     candidate_Z = Z[safe_candidate_idx]
-    raw_scores = jnp.sum(Zb[:, None, :] * candidate_Z, axis=2) / sqrt_q
+    raw_scores = jnp.sum(Zb[:, None, :] * candidate_Z, axis=2)
     invalid_or_self = (~valid_candidate) | (candidate_idx == row_ids[:, None])
 
     if positive:
@@ -318,16 +314,15 @@ def _exact_topk_for_rows(
     positive: bool,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Compute exact top-k raw scores for selected rows."""
-    p, q = Z.shape
+    p = Z.shape[0]
     k = _top_k_size(p, top_k)
-    sqrt_q = jnp.sqrt(q)
     idx_chunks = []
     score_chunks = []
 
     for start in range(0, int(row_idx.shape[0]), batch_size):
         stop = min(int(row_idx.shape[0]), start + batch_size)
         rows = row_idx[start:stop]
-        raw_scores = (Z[rows] @ Z.T) / sqrt_q
+        raw_scores = Z[rows] @ Z.T
         diag_mask = rows[:, None] == jnp.arange(p)[None, :]
         if positive:
             masked_scores = jnp.where(diag_mask, -jnp.inf, raw_scores)
@@ -528,9 +523,8 @@ def topk_attention_indices_weights(
             raise ValueError("attention_cache top_k does not match attention_top_k.")
         return topk_attention_cached_indices_weights(attention_cache, eta, scale, start, stop)
 
-    _, q = Z.shape
     Zb = Z[start:stop]
-    scores = (Zb @ Z.T) / jnp.sqrt(q)
+    scores = Zb @ Z.T
     scores = eta * scores * scale
 
     row_ids = jnp.arange(start, stop)
@@ -554,11 +548,11 @@ def build_attention(
     """Construct the row-stochastic attention matrix from feature vectors.
 
     ``Z`` has shape ``(p, q)``. Off-diagonal scores are proportional to
-    ``eta * scale * Z_i' Z_j / sqrt(q)``; diagonal entries are masked before
+    ``eta * scale * Z_i' Z_j``; diagonal entries are masked before
     applying a row-wise softmax.
     """
     attention_mode = _check_attention_mode(attention_mode)
-    p, q = Z.shape
+    p = Z.shape[0]
     if attention_mode == "topk":
         idx, weights = topk_attention_indices_weights(
             Z, eta, scale, 0, p, _top_k_size(p, top_k),
@@ -568,7 +562,7 @@ def build_attention(
         W = jnp.zeros((p, p), dtype=Z.dtype)
         return W.at[rows, idx].add(weights)
 
-    scores = (Z @ Z.T) / jnp.sqrt(q)
+    scores = Z @ Z.T
     scores = eta * scores
     mask = jnp.eye(p) * -1e6
     scores = scores * scale + mask
@@ -587,7 +581,7 @@ def attention_rows(
 ) -> jnp.ndarray:
     """Return attention rows ``W[start:stop, :]`` without forming all of ``W``."""
     attention_mode = _check_attention_mode(attention_mode)
-    p, q = Z.shape
+    p = Z.shape[0]
     if attention_mode == "topk":
         idx, weights = topk_attention_indices_weights(
             Z, eta, scale, start, stop, _top_k_size(p, top_k),
@@ -598,7 +592,7 @@ def attention_rows(
         return Wb.at[rows, idx].add(weights)
 
     Zb = Z[start:stop]
-    scores = (Zb @ Z.T) / jnp.sqrt(q)
+    scores = Zb @ Z.T
     scores = eta * scores * scale
 
     row_ids = jnp.arange(start, stop)

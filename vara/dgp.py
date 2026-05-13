@@ -186,7 +186,7 @@ def _score_Z_for_eta_approx(
     attention_mode="dense",
     attention_top_k=None,
 ):
-    p, q = Z.shape
+    p = Z.shape[0]
     eta_a = params_true["eta_a"]
     gamma_a_raw = params_true["gamma_a"]
     beta_raw = params_true.get("beta", jnp.zeros_like(gamma_a_raw))
@@ -194,10 +194,9 @@ def _score_Z_for_eta_approx(
     beta, gamma_a, _ = ensure_stationarity(beta_raw, gamma_a_raw, margin=0.98)
 
     scale = params_scale["eta_a"]
-    sqrt_q = jnp.sqrt(q)
     m = row_idx.shape[0]
 
-    off = jnp.sum(Z[pair_i] * Z[pair_j], axis=1) / sqrt_q
+    off = jnp.sum(Z[pair_i] * Z[pair_j], axis=1)
     abs_off = jnp.abs(off)
     off_std = jnp.std(off)
     max_score = jnp.max(abs_off)
@@ -205,7 +204,7 @@ def _score_Z_for_eta_approx(
 
     if attention_mode == "topk":
         Z_rows = Z[row_idx]
-        raw_scores = (Z_rows @ Z.T) / sqrt_q
+        raw_scores = Z_rows @ Z.T
         diag_mask = row_idx[:, None] == jnp.arange(p)[None, :]
         all_scores = jnp.where(diag_mask, -1e6, eta_a * scale * raw_scores)
         k = int(min(max(1, attention_top_k), max(p - 1, 1)))
@@ -217,7 +216,7 @@ def _score_Z_for_eta_approx(
         eta_deriv = gamma_a[row_idx, None] * Wdot
     else:
         Z_rows = Z[row_idx]
-        scores = (Z_rows @ Z.T) / sqrt_q
+        scores = Z_rows @ Z.T
         diag_mask = row_idx[:, None] == jnp.arange(p)[None, :]
         scores = jnp.where(diag_mask, -1e6, scores)
         Wa = jax.nn.softmax(eta_a * scale * scores, axis=1)
@@ -575,7 +574,7 @@ def draw_good_Z_for_eta(
         subkey = jax.random.fold_in(key, attempt)
         Z = draw_Z(subkey, p, q, n_clusters=n_clusters)
 
-        S = (Z @ Z.T) / jnp.sqrt(q)
+        S = Z @ Z.T
         off_mask = ~jnp.eye(p, dtype=bool)
         off = S[off_mask]
 

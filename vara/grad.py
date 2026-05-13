@@ -88,7 +88,7 @@ def loglik_grad_analytical(theta, Y, Z, params_scale=dict(eta_a=1), update_idx=s
     grad = jnp.zeros(1 + 3*p)
 
     # Common similarity matrix
-    S_mat = (Z @ Z.T) / jnp.sqrt(Z.shape[1])
+    S_mat = Z @ Z.T
 
     # === ∂ℓ/∂η_a ===
     # row_means_a = jnp.sum(W_a * S_mat * params_scale['eta_a'], axis=1, keepdims=True)
