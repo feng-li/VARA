@@ -17,6 +17,7 @@ import pandas as pd
 from vara.forecast import VARAForecaster
 
 BASE_SUFFIX = "All"
+DETAILED_CODE_DEPTH = 3
 
 
 def _standardize_features(Z: np.ndarray) -> np.ndarray:
@@ -88,17 +89,28 @@ def _inverse_y_transform(Y: np.ndarray, transform: dict) -> np.ndarray:
     return out
 
 
-def _base_series_columns(wide: pd.DataFrame) -> list[str]:
+def _series_code(series_id: str, suffix: str = BASE_SUFFIX) -> str:
+    return series_id[: -len(suffix)] if suffix and series_id.endswith(suffix) else series_id
+
+
+def _series_depth(series_id: str, suffix: str = BASE_SUFFIX) -> int:
+    code = _series_code(series_id, suffix)
+    return 0 if code == "Total" else len(code)
+
+
+def _base_series_columns(wide: pd.DataFrame, series_depth: int | None = DETAILED_CODE_DEPTH) -> list[str]:
     cols = [c for c in wide.columns if c != "date" and c.endswith(BASE_SUFFIX)]
+    if series_depth is not None:
+        cols = [c for c in cols if _series_depth(c) == series_depth]
     if not cols:
-        raise ValueError(f"No base tourism series ending with {BASE_SUFFIX!r} found.")
+        raise ValueError(f"No tourism series ending with {BASE_SUFFIX!r} found for series_depth={series_depth}.")
     return cols
 
 
 def _tourism_series_features(series_ids: list[str]) -> np.ndarray:
     rows = []
     for series_id in series_ids:
-        code = series_id[: -len(BASE_SUFFIX)]
+        code = _series_code(series_id)
         is_total = code == "Total"
         rows.append(
             {
@@ -125,11 +137,12 @@ def run_tourism_forecast_smoke(
     y_transform: str,
     seasonal_lag: int,
     ridge: float,
+    series_depth: int | None = DETAILED_CODE_DEPTH,
 ) -> dict:
     wide = pd.read_csv(data_dir / "tourism.csv")
 
-    all_series = _base_series_columns(wide)
-    series_ids = all_series[: min(max_series, len(all_series))]
+    all_series = _base_series_columns(wide, series_depth=series_depth)
+    series_ids = all_series[: min(max_series, len(all_series))] if max_series > 0 else all_series
     if len(series_ids) < 2:
         raise ValueError("Need at least two tourism series for VARA forecasting.")
     if horizon < 1 or horizon >= len(wide):
@@ -177,6 +190,8 @@ def run_tourism_forecast_smoke(
 
     metrics = {
         "source": str(data_dir / "tourism.csv"),
+        "series_suffix": BASE_SUFFIX,
+        "series_depth": -1 if series_depth is None else int(series_depth),
         "n_series": len(series_ids),
         "n_train": int(train.shape[0]),
         "n_train_model": int(Y_train.shape[0]),
@@ -204,7 +219,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run a small VARA forecast smoke test on tourism data.")
     parser.add_argument("--data-dir", type=Path, default=Path("data/tourism"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/tourism_forecast_smoke"))
-    parser.add_argument("--max-series", type=int, default=111)
+    parser.add_argument("--max-series", type=int, default=0, help="0 means use all selected series.")
+    parser.add_argument(
+        "--series-depth",
+        type=int,
+        default=DETAILED_CODE_DEPTH,
+        help="Hierarchy code depth to forecast; use -1 for all All-suffix series.",
+    )
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--grid-size", type=int, default=7)
     parser.add_argument("--ridge", type=float, default=1e-2)
@@ -226,6 +247,7 @@ def main() -> None:
         y_transform=args.y_transform,
         seasonal_lag=args.seasonal_lag,
         ridge=args.ridge,
+        series_depth=None if args.series_depth < 0 else args.series_depth,
     )
     print("Tourism VARA forecast smoke metrics:")
     for key, value in metrics.items():

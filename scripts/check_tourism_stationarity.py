@@ -22,18 +22,31 @@ from vara.stationarity import (
     vara_stability_from_params,
 )
 
+DETAILED_CODE_DEPTH = 3
 
-def _base_series_columns(df: pd.DataFrame, suffix: str) -> list[str]:
+
+def _series_code(series_id: str, suffix: str) -> str:
+    return series_id[: -len(suffix)] if suffix and series_id.endswith(suffix) else series_id
+
+
+def _series_depth(series_id: str, suffix: str) -> int:
+    code = _series_code(series_id, suffix)
+    return 0 if code == "Total" else len(code)
+
+
+def _base_series_columns(df: pd.DataFrame, suffix: str, series_depth: int | None) -> list[str]:
     cols = [c for c in df.columns if c != "date" and c.endswith(suffix)]
+    if series_depth is not None:
+        cols = [c for c in cols if _series_depth(c, suffix) == series_depth]
     if not cols:
-        raise ValueError(f"No series ending with {suffix!r} found.")
+        raise ValueError(f"No series ending with {suffix!r} found for series_depth={series_depth}.")
     return cols
 
 
 def _tourism_series_features(series_ids: list[str], suffix: str) -> np.ndarray:
     rows = []
     for series_id in series_ids:
-        code = series_id[: -len(suffix)] if suffix else series_id
+        code = _series_code(series_id, suffix)
         is_total = code == "Total"
         rows.append({
             "series_id": series_id,
@@ -90,6 +103,7 @@ def check_tourism_stationarity(
     data_path: Path,
     output_dir: Path,
     series_suffix: str,
+    series_depth: int | None,
     max_series: int,
     holdout: int,
     transform: str,
@@ -103,7 +117,7 @@ def check_tourism_stationarity(
     eta_upper: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = pd.read_csv(data_path)
-    series_ids = _base_series_columns(df, series_suffix)
+    series_ids = _base_series_columns(df, series_suffix, series_depth)
     if max_series > 0:
         series_ids = series_ids[:max_series]
     if holdout < 0 or holdout >= len(df):
@@ -123,6 +137,7 @@ def check_tourism_stationarity(
     summary = {
         "source": str(data_path),
         "series_suffix": series_suffix,
+        "series_depth": -1 if series_depth is None else int(series_depth),
         "n_series": len(series_ids),
         "n_train_raw": int(Y_raw.shape[0]),
         "n_train_transformed": int(Y.shape[0]),
@@ -159,6 +174,12 @@ def main() -> None:
     parser.add_argument("--data-path", type=Path, default=Path("data/tourism/tourism.csv"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/tourism_stationarity"))
     parser.add_argument("--series-suffix", type=str, default="All")
+    parser.add_argument(
+        "--series-depth",
+        type=int,
+        default=DETAILED_CODE_DEPTH,
+        help="Hierarchy code depth to check; use -1 for all matching suffix series.",
+    )
     parser.add_argument("--max-series", type=int, default=0, help="0 means use all matching series.")
     parser.add_argument("--holdout", type=int, default=12)
     parser.add_argument(
@@ -181,6 +202,7 @@ def main() -> None:
         data_path=args.data_path,
         output_dir=args.output_dir,
         series_suffix=args.series_suffix,
+        series_depth=None if args.series_depth < 0 else args.series_depth,
         max_series=args.max_series,
         holdout=args.holdout,
         transform=args.transform,
