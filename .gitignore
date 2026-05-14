@@ -4,6 +4,7 @@ __pycache__/
 .codex/
 docs/
 outputs/
+data/
 results_coverage_@*.csv
 *.npz
 *.pdf

@@ -50,12 +50,19 @@ def _series_depth(series_id: str, suffix: str = BASE_SUFFIX) -> int:
     return 0 if code == "Total" else len(code)
 
 
-def _base_series_columns(wide: pd.DataFrame, series_depth: int | None = DETAILED_CODE_DEPTH) -> list[str]:
-    cols = [c for c in wide.columns if c != "date" and c.endswith(BASE_SUFFIX)]
-    if series_depth is not None:
-        cols = [c for c in cols if _series_depth(c) == series_depth]
+def _base_series_columns(
+    wide: pd.DataFrame,
+    series_depth: int | None = DETAILED_CODE_DEPTH,
+    series_suffix: str | None = BASE_SUFFIX,
+) -> list[str]:
+    cols = [c for c in wide.columns if c != "date"]
+    if series_suffix:
+        cols = [c for c in cols if c.endswith(series_suffix)]
+    if series_depth is not None and series_suffix:
+        cols = [c for c in cols if _series_depth(c, series_suffix) == series_depth]
     if not cols:
-        raise ValueError(f"No tourism series ending with {BASE_SUFFIX!r} found for series_depth={series_depth}.")
+        suffix_msg = f" ending with {series_suffix!r}" if series_suffix else ""
+        raise ValueError(f"No series columns{suffix_msg} found for series_depth={series_depth}.")
     return cols
 
 
@@ -528,12 +535,14 @@ def run_tourism_benchmark(
     *,
     data_dir: Path,
     output_dir: Path,
+    data_path: Path | None = None,
     models: str | list[str] = DEFAULT_MODELS,
     forecast_mode: str = "rolling-origin",
     horizon: int = 12,
     season_length: int = 12,
     freq: str = "MS",
     series_depth: int | None = DETAILED_CODE_DEPTH,
+    series_suffix: str | None = BASE_SUFFIX,
     max_series: int = 0,
     clip_nonnegative: bool = False,
     ray_num_cpus: int = 1,
@@ -552,14 +561,17 @@ def run_tourism_benchmark(
     if use_ray and max_cpus_per_task > ray_num_cpus:
         raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
 
-    wide = pd.read_csv(data_dir / "tourism.csv")
+    input_path = data_path if data_path is not None else data_dir / "tourism.csv"
+    series_suffix = None if series_suffix == "" else series_suffix
+
+    wide = pd.read_csv(input_path)
     wide["date"] = pd.to_datetime(wide["date"])
-    all_series = _base_series_columns(wide, series_depth=series_depth)
+    all_series = _base_series_columns(wide, series_depth=series_depth, series_suffix=series_suffix)
     series_cols = all_series[: min(max_series, len(all_series))] if max_series > 0 else all_series
     if horizon < 1 or horizon >= len(wide):
-        raise ValueError("horizon must be positive and smaller than the number of months.")
+        raise ValueError("horizon must be positive and smaller than the number of observations.")
     if len(series_cols) < 1:
-        raise ValueError("No tourism series selected.")
+        raise ValueError("No series selected.")
 
     model_names = _parse_model_names(models)
     ray_started_here = False
@@ -633,7 +645,7 @@ def run_tourism_benchmark(
             forecast_mode=forecast_mode,
             horizon=horizon,
             summary_context={
-                "data": str(data_dir / "tourism.csv"),
+                "data": str(input_path),
                 "series_depth": -1 if series_depth is None else int(series_depth),
                 "season_length": int(season_length),
                 "train_start": str(train_wide["date"].iloc[0].date()),
@@ -658,6 +670,7 @@ def run_tourism_benchmark(
         summary.to_csv(output_dir / "metrics_summary.csv", index=False)
         _save_config(output_dir, {
             "data_dir": str(data_dir),
+            "data_path": None if data_path is None else str(data_path),
             "output_dir": str(output_dir),
             "models": model_names,
             "forecast_mode": forecast_mode,
@@ -665,6 +678,7 @@ def run_tourism_benchmark(
             "season_length": int(season_length),
             "freq": freq,
             "series_depth": -1 if series_depth is None else int(series_depth),
+            "series_suffix": series_suffix,
             "max_series": int(max_series),
             "clip_nonnegative": bool(clip_nonnegative),
             "ray_num_cpus": int(ray_num_cpus),
@@ -684,8 +698,8 @@ def _load_config_defaults(path: Path | None) -> dict[str, Any]:
         return {}
     with path.open("r", encoding="utf-8") as fh:
         config = json.load(fh)
-    for key in ("data_dir", "output_dir"):
-        if key in config:
+    for key in ("data_dir", "data_path", "output_dir"):
+        if key in config and config[key] is not None:
             config[key] = Path(config[key])
     if "models" in config and isinstance(config["models"], list):
         config["models"] = ",".join(config["models"])
@@ -700,6 +714,12 @@ def _parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Run forecasting benchmarks on tourism data.", parents=[pre])
     parser.add_argument("--data-dir", type=Path, default=Path("data/tourism"))
+    parser.add_argument(
+        "--data-path",
+        type=Path,
+        default=None,
+        help="Wide CSV path with a date column. Overrides --data-dir/tourism.csv.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/tourism_benchmark_statsforecast"))
     parser.add_argument("--models", type=str, default=DEFAULT_MODELS)
     parser.add_argument("--forecast-mode", choices=["recursive", "rolling-origin"], default="rolling-origin")
@@ -707,6 +727,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--season-length", type=int, default=12)
     parser.add_argument("--freq", type=str, default="MS")
     parser.add_argument("--series-depth", type=int, default=DETAILED_CODE_DEPTH)
+    parser.add_argument(
+        "--series-suffix",
+        type=str,
+        default=BASE_SUFFIX,
+        help="Series-column suffix used for selection; pass '' to use all non-date columns.",
+    )
     parser.add_argument("--max-series", type=int, default=0)
     parser.add_argument("--clip-nonnegative", action="store_true")
     parser.add_argument("--ray-num-cpus", type=int, default=1)
@@ -724,6 +750,7 @@ def main() -> None:
     args = _parse_args()
     summary = run_tourism_benchmark(
         data_dir=args.data_dir,
+        data_path=args.data_path,
         output_dir=args.output_dir,
         models=args.models,
         forecast_mode=args.forecast_mode,
@@ -731,6 +758,7 @@ def main() -> None:
         season_length=args.season_length,
         freq=args.freq,
         series_depth=None if args.series_depth < 0 else args.series_depth,
+        series_suffix=None if args.series_suffix == "" else args.series_suffix,
         max_series=args.max_series,
         clip_nonnegative=args.clip_nonnegative,
         ray_num_cpus=args.ray_num_cpus,
