@@ -22,7 +22,12 @@ from scripts.run_full_simulation import (
     make_simulation_reporting_tables,
     make_simulation_setup_table,
 )
-from scripts.run_tourism_forecast_smoke import _fit_y_transform, _inverse_y_transform
+from scripts.run_tourism_forecast import (
+    _fit_y_transform,
+    _inverse_y_transform,
+    _tourism_tsfeature_matrix,
+    run_tourism_forecast,
+)
 
 
 class ScriptHelperTests(unittest.TestCase):
@@ -45,6 +50,69 @@ class ScriptHelperTests(unittest.TestCase):
             atol=1e-10,
             rtol=1e-10,
         )
+
+    def test_tourism_tsfeature_matrix_uses_training_window(self):
+        dates = pd.date_range("2020-01-01", periods=24, freq="MS")
+        wide = pd.DataFrame({
+            "date": dates,
+            "AAAAll": np.linspace(10.0, 20.0, 24),
+            "AABAll": np.linspace(30.0, 50.0, 24),
+        })
+
+        Z, feature_df, feature_cols = _tourism_tsfeature_matrix(
+            wide,
+            ["AAAAll", "AABAll"],
+            horizon=2,
+            y_transform="level",
+            seasonal_lag=12,
+            feature_functions=("series_length",),
+        )
+
+        self.assertEqual(feature_cols, ["series_length"])
+        self.assertEqual(Z.shape, (2, 1))
+        self.assertTrue(np.isfinite(Z).all())
+        self.assertEqual(list(feature_df["series_id"]), ["AAAAll", "AABAll"])
+        self.assertEqual(list(feature_df["n_obs"]), [22, 22])
+        self.assertEqual(list(feature_df["train_start"]), ["2020-01-01", "2020-01-01"])
+        self.assertEqual(list(feature_df["train_end"]), ["2021-10-01", "2021-10-01"])
+
+    def test_tourism_rolling_origin_refits_each_test_month(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            output_dir = root / "out"
+            data_dir.mkdir()
+            dates = pd.date_range("2020-01-01", periods=24, freq="MS")
+            pd.DataFrame({
+                "date": dates,
+                "AAAAll": np.linspace(10.0, 20.0, 24),
+                "AABAll": np.linspace(30.0, 50.0, 24),
+            }).to_csv(data_dir / "tourism.csv", index=False)
+
+            metrics = run_tourism_forecast(
+                data_dir=data_dir,
+                output_dir=output_dir,
+                max_series=0,
+                horizon=2,
+                grid_size=3,
+                y_transform="center",
+                seasonal_lag=12,
+                ridge=1e-2,
+                series_depth=3,
+                feature_functions=("series_length",),
+                forecast_mode="rolling-origin",
+            )
+
+            self.assertEqual(metrics["forecast_type"], "rolling-origin")
+            self.assertEqual(metrics["n_train"], 22)
+            self.assertEqual(metrics["n_train_final"], 23)
+            self.assertEqual(metrics["n_train_model_final"], 23)
+            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
+            diagnostics = pd.read_csv(output_dir / "tourism_rolling_origin_diagnostics.csv")
+            features = pd.read_csv(output_dir / "tourism_attention_features.csv")
+            self.assertEqual(len(forecast), 2)
+            self.assertEqual(list(diagnostics["origin"]), [1, 2])
+            self.assertEqual(len(features), 4)
 
     def test_full_simulation_output_paths_include_major_config(self):
         detail, summary, paper = _full_simulation_output_paths(
