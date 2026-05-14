@@ -25,6 +25,8 @@ from scripts.run_full_simulation import (
 from scripts.run_tourism_forecast import (
     _fit_y_transform,
     _inverse_y_transform,
+    _seasonal_naive_forecast,
+    _seasonal_naive_residual_panel,
     _tourism_feature_matrix,
     _tourism_specific_feature_matrix,
     _tourism_tsfeature_matrix,
@@ -33,6 +35,15 @@ from scripts.run_tourism_forecast import (
 
 
 class ScriptHelperTests(unittest.TestCase):
+    def test_seasonal_naive_forecast_and_residual_panel(self):
+        history = np.arange(1, 16, dtype=float)[:, None]
+
+        forecast = _seasonal_naive_forecast(history, horizon=3, seasonal_lag=12)
+        residuals = _seasonal_naive_residual_panel(history, seasonal_lag=12)
+
+        np.testing.assert_allclose(forecast[:, 0], np.asarray([4.0, 5.0, 6.0]))
+        np.testing.assert_allclose(residuals[:, 0], np.asarray([12.0, 12.0, 12.0]))
+
     def test_tourism_seasonal_diff_inverse_reconstructs_from_lagged_logs(self):
         train = pd.DataFrame({
             "a": range(1, 16),
@@ -158,6 +169,36 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertIn("growth_12", feature_cols)
         self.assertIn("code_2_ord", feature_cols)
 
+    def test_tourism_seasonal_predictive_feature_matrix_is_score_matrix(self):
+        dates = pd.date_range("2020-01-01", periods=48, freq="MS")
+        seasonal = np.sin(2.0 * np.pi * np.arange(48) / 12.0)
+        shock = np.sin(2.0 * np.pi * np.arange(48) / 6.0)
+        wide = pd.DataFrame({
+            "date": dates,
+            "AAAAll": 20.0 + np.linspace(0.0, 3.0, 48) + seasonal + 0.2 * shock,
+            "AABAll": 30.0 + np.linspace(0.0, 5.0, 48) + 1.5 * seasonal + 0.5 * np.roll(shock, 1),
+            "ABAAll": 18.0 + np.linspace(0.0, 2.0, 48) - seasonal + 0.3 * np.roll(shock, 12),
+        })
+
+        Z, feature_df, feature_cols = _tourism_feature_matrix(
+            wide,
+            ["AAAAll", "AABAll", "ABAAll"],
+            horizon=2,
+            feature_source="seasonal-predictive",
+            y_transform="level",
+            seasonal_lag=12,
+            feature_freq=12,
+            feature_functions=("series_length",),
+        )
+
+        self.assertEqual(Z.shape, (3, 3))
+        self.assertTrue(np.isfinite(Z).all())
+        self.assertTrue(np.all(np.abs(Z) <= 1.0 + 1e-8))
+        np.testing.assert_allclose(np.diag(Z), np.zeros(3), atol=1e-12)
+        self.assertEqual(list(feature_df["transform"]), ["seasonal_predictive"] * 3)
+        self.assertEqual(list(feature_df["train_end"]), ["2023-10-01"] * 3)
+        self.assertEqual(feature_cols, ["score_from_AAAAll", "score_from_AABAll", "score_from_ABAAll"])
+
     def test_tourism_rolling_origin_refits_each_test_month(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -185,9 +226,13 @@ class ScriptHelperTests(unittest.TestCase):
                 forecast_mode="rolling-origin",
                 feature_update_policy="periodic",
                 feature_update_interval=2,
+                attention_mode="topk",
+                attention_top_k=1,
             )
 
             self.assertEqual(metrics["forecast_type"], "rolling-origin")
+            self.assertEqual(metrics["attention_mode"], "topk")
+            self.assertEqual(metrics["attention_top_k"], 1)
             self.assertEqual(metrics["attention_feature_update_policy"], "periodic")
             self.assertEqual(metrics["attention_feature_update_interval"], 2)
             self.assertEqual(metrics["attention_feature_exact_origins"], "1")
@@ -214,6 +259,55 @@ class ScriptHelperTests(unittest.TestCase):
             self.assertIn("rmsse", metrics_summary.columns)
             self.assertEqual(set(metrics_by_series["series_id"]), {"AAAAll", "AABAll"})
             self.assertEqual(list(metrics_by_origin["date"]), ["2021-11-01", "2021-12-01"])
+
+    def test_tourism_seasonal_naive_residual_scenario_outputs_components(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            output_dir = root / "out"
+            data_dir.mkdir()
+            dates = pd.date_range("2020-01-01", periods=36, freq="MS")
+            seasonal = np.sin(2.0 * np.pi * np.arange(36) / 12.0)
+            pd.DataFrame({
+                "date": dates,
+                "AAAAll": 20.0 + np.linspace(0.0, 4.0, 36) + seasonal,
+                "AABAll": 30.0 + np.linspace(0.0, 6.0, 36) + 1.2 * seasonal,
+            }).to_csv(data_dir / "tourism.csv", index=False)
+
+            metrics = run_tourism_forecast(
+                data_dir=data_dir,
+                output_dir=output_dir,
+                max_series=0,
+                horizon=2,
+                grid_size=3,
+                y_transform="log1p-seasonal-diff",
+                seasonal_lag=12,
+                ridge=1e-2,
+                series_depth=3,
+                feature_source="tourism",
+                forecast_mode="rolling-origin",
+                forecast_scenario="seasonal-naive-residual",
+                residual_transform="center",
+            )
+
+            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
+            baseline = pd.read_csv(output_dir / "tourism_baseline_forecast.csv")
+            residual = pd.read_csv(output_dir / "tourism_residual_forecast.csv")
+            summary = pd.read_csv(output_dir / "metrics_summary.csv")
+
+            self.assertEqual(metrics["forecast_scenario"], "seasonal-naive-residual")
+            self.assertEqual(metrics["residual_baseline"], "seasonal_naive")
+            self.assertEqual(metrics["residual_transform"], "center")
+            self.assertEqual(metrics["n_train"], 34)
+            self.assertEqual(metrics["n_train_model_final"], 23)
+            pd.testing.assert_frame_equal(
+                forecast.drop(columns=["date"]),
+                baseline.drop(columns=["date"]) + residual.drop(columns=["date"]),
+                check_dtype=False,
+                atol=1e-10,
+                rtol=1e-10,
+            )
+            self.assertEqual(list(summary["model"]), ["vara"])
 
     def test_full_simulation_output_paths_include_major_config(self):
         detail, summary, paper = _full_simulation_output_paths(

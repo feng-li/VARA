@@ -86,6 +86,69 @@ class AttentionTests(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(mv), np.asarray(W @ v), rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(np.asarray(X2), np.asarray(Y_lag @ W.T), rtol=1e-6, atol=1e-6)
 
+    def test_score_attention_uses_direct_score_matrix(self):
+        scores = jnp.asarray([
+            [0.0, 2.0, 1.0, -1.0, 0.5],
+            [1.5, 0.0, -0.5, 0.2, 1.0],
+            [-1.0, 0.1, 0.0, 1.2, 0.4],
+            [0.3, -0.2, 1.1, 0.0, 0.6],
+            [1.0, 0.4, -0.3, 0.8, 0.0],
+        ])
+        v = jnp.arange(5.0)
+        Y_lag = jax.random.normal(jax.random.PRNGKey(654), (7, 5))
+        W = build_attention(scores, eta=0.7, scale=1.0, attention_mode="score")
+        rows = attention_rows(scores, eta=0.7, scale=1.0, start=1, stop=4, attention_mode="score")
+        mv = attention_matvec(
+            scores, 0.7, v, self.params_scale,
+            batch_size=2,
+            dense_threshold=1,
+            attention_mode="score",
+        )
+        X2 = attention_weighted_lags(
+            Y_lag, scores, 0.7, self.params_scale,
+            batch_size=2,
+            dense_threshold=1,
+            attention_mode="score",
+        )
+
+        np.testing.assert_allclose(np.asarray(W.sum(axis=1)), np.ones(5), rtol=1e-6)
+        self.assertTrue(np.all(np.asarray(jnp.diag(W)) < 1e-5))
+        np.testing.assert_allclose(np.asarray(rows), np.asarray(W[1:4]), rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(np.asarray(mv), np.asarray(W @ v), rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(np.asarray(X2), np.asarray(Y_lag @ W.T), rtol=1e-6, atol=1e-6)
+
+    def test_score_topk_attention_is_sparse_and_matches_matrix(self):
+        scores = jnp.asarray([
+            [0.0, 2.0, 1.0, -1.0, 0.5],
+            [1.5, 0.0, -0.5, 0.2, 1.0],
+            [-1.0, 0.1, 0.0, 1.2, 0.4],
+            [0.3, -0.2, 1.1, 0.0, 0.6],
+            [1.0, 0.4, -0.3, 0.8, 0.0],
+        ])
+        v = jnp.arange(5.0)
+        Y_lag = jax.random.normal(jax.random.PRNGKey(655), (7, 5))
+        W = build_attention(scores, eta=0.7, scale=1.0, attention_mode="score-topk", top_k=2)
+        mv = attention_matvec(
+            scores, 0.7, v, self.params_scale,
+            batch_size=2,
+            dense_threshold=1,
+            attention_mode="score-topk",
+            attention_top_k=2,
+        )
+        X2 = attention_weighted_lags(
+            Y_lag, scores, 0.7, self.params_scale,
+            batch_size=2,
+            dense_threshold=1,
+            attention_mode="score-topk",
+            attention_top_k=2,
+        )
+
+        np.testing.assert_allclose(np.asarray(W.sum(axis=1)), np.ones(5), rtol=1e-6)
+        self.assertTrue(bool(jnp.all(jnp.sum(W > 0, axis=1) <= 2)))
+        self.assertTrue(np.all(np.asarray(jnp.diag(W)) < 1e-5))
+        np.testing.assert_allclose(np.asarray(mv), np.asarray(W @ v), rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(np.asarray(X2), np.asarray(Y_lag @ W.T), rtol=1e-6, atol=1e-6)
+
     def test_topk_attention_cache_matches_uncached_positive_and_negative_eta(self):
         v = jnp.arange(5.0)
         Y_lag = jax.random.normal(jax.random.PRNGKey(987), (7, 5))

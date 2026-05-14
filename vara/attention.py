@@ -35,9 +35,14 @@ def _top_k_size(p: int, top_k: Optional[int]) -> int:
 
 
 def _check_attention_mode(attention_mode: str) -> str:
-    if attention_mode not in {"dense", "topk"}:
-        raise ValueError("attention_mode must be 'dense' or 'topk'.")
+    if attention_mode not in {"dense", "topk", "score", "score-topk"}:
+        raise ValueError("attention_mode must be 'dense', 'topk', 'score', or 'score-topk'.")
     return attention_mode
+
+
+def _validate_score_matrix(scores: jnp.ndarray) -> None:
+    if scores.ndim != 2 or scores.shape[0] != scores.shape[1]:
+        raise ValueError("score attention modes require Z to be a square score matrix.")
 
 
 def _build_exact_topk_attention_cache(
@@ -537,6 +542,49 @@ def topk_attention_indices_weights(
     return top_idx, weights
 
 
+def score_topk_attention_indices_weights(
+    scores_full: jnp.ndarray,
+    eta: float,
+    scale: float,
+    start: int,
+    stop: int,
+    top_k: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Return top-k indices and weights when ``Z`` is a direct score matrix."""
+    _validate_score_matrix(scores_full)
+    p = scores_full.shape[0]
+    k = _top_k_size(p, top_k)
+    scores = eta * scale * scores_full[start:stop]
+
+    row_ids = jnp.arange(start, stop)
+    col_ids = jnp.arange(p)
+    diag_mask = row_ids[:, None] == col_ids[None, :]
+    scores = jnp.where(diag_mask, -1e6, scores)
+
+    top_scores, top_idx = jax.lax.top_k(scores, k)
+    weights = jax.nn.softmax(top_scores, axis=1)
+    return top_idx, weights
+
+
+def score_attention_rows(
+    scores_full: jnp.ndarray,
+    eta: float,
+    scale: float,
+    start: int,
+    stop: int,
+) -> jnp.ndarray:
+    """Return attention rows when ``Z`` is a direct score matrix."""
+    _validate_score_matrix(scores_full)
+    p = scores_full.shape[0]
+    scores = eta * scale * scores_full[start:stop]
+
+    row_ids = jnp.arange(start, stop)
+    col_ids = jnp.arange(p)
+    diag_mask = row_ids[:, None] == col_ids[None, :]
+    scores = jnp.where(diag_mask, -1e6, scores)
+    return jax.nn.softmax(scores, axis=1)
+
+
 def build_attention(
     Z: jnp.ndarray,
     eta: float,
@@ -561,6 +609,15 @@ def build_attention(
         rows = jnp.arange(p)[:, None]
         W = jnp.zeros((p, p), dtype=Z.dtype)
         return W.at[rows, idx].add(weights)
+    if attention_mode == "score-topk":
+        idx, weights = score_topk_attention_indices_weights(
+            Z, eta, scale, 0, p, _top_k_size(p, top_k),
+        )
+        rows = jnp.arange(p)[:, None]
+        W = jnp.zeros((p, p), dtype=Z.dtype)
+        return W.at[rows, idx].add(weights)
+    if attention_mode == "score":
+        return score_attention_rows(Z, eta, scale, 0, p)
 
     scores = Z @ Z.T
     scores = eta * scores
@@ -590,6 +647,15 @@ def attention_rows(
         rows = jnp.arange(stop - start)[:, None]
         Wb = jnp.zeros((stop - start, p), dtype=Z.dtype)
         return Wb.at[rows, idx].add(weights)
+    if attention_mode == "score-topk":
+        idx, weights = score_topk_attention_indices_weights(
+            Z, eta, scale, start, stop, _top_k_size(p, top_k),
+        )
+        rows = jnp.arange(stop - start)[:, None]
+        Wb = jnp.zeros((stop - start, p), dtype=Z.dtype)
+        return Wb.at[rows, idx].add(weights)
+    if attention_mode == "score":
+        return score_attention_rows(Z, eta, scale, start, stop)
 
     Zb = Z[start:stop]
     scores = Zb @ Z.T
@@ -616,8 +682,8 @@ def attention_matvec(
     """Compute ``W(eta) @ v`` with optional row batching for large ``p``."""
     attention_mode = _check_attention_mode(attention_mode)
     p = Z.shape[0]
-    if attention_mode == "dense" and p <= dense_threshold:
-        W = build_attention(Z, eta, params_scale["eta_a"])
+    if attention_mode in {"dense", "score"} and p <= dense_threshold:
+        W = build_attention(Z, eta, params_scale["eta_a"], attention_mode=attention_mode)
         return W @ v
 
     out = jnp.zeros((p,), dtype=Z.dtype)
@@ -629,8 +695,13 @@ def attention_matvec(
                 attention_cache=attention_cache,
             )
             out = out.at[start:stop].set(jnp.sum(weights * v[idx], axis=1))
+        elif attention_mode == "score-topk":
+            idx, weights = score_topk_attention_indices_weights(
+                Z, eta, params_scale["eta_a"], start, stop, _top_k_size(p, attention_top_k),
+            )
+            out = out.at[start:stop].set(jnp.sum(weights * v[idx], axis=1))
         else:
-            Wb = attention_rows(Z, eta, params_scale["eta_a"], start, stop)
+            Wb = attention_rows(Z, eta, params_scale["eta_a"], start, stop, attention_mode=attention_mode)
             out = out.at[start:stop].set(Wb @ v)
     return out
 
@@ -649,8 +720,8 @@ def attention_weighted_lags(
     """Compute ``X2[:, k] = sum_j W[k, j] * Y_lag[:, j]`` for all ``k``."""
     attention_mode = _check_attention_mode(attention_mode)
     T_eff, p = Y_lag.shape
-    if attention_mode == "dense" and p <= dense_threshold:
-        W = build_attention(Z, eta, params_scale["eta_a"])
+    if attention_mode in {"dense", "score"} and p <= dense_threshold:
+        W = build_attention(Z, eta, params_scale["eta_a"], attention_mode=attention_mode)
         return Y_lag @ W.T
 
     X2 = jnp.zeros((T_eff, p), dtype=Y_lag.dtype)
@@ -662,8 +733,13 @@ def attention_weighted_lags(
                 attention_cache=attention_cache,
             )
             X2b = jnp.sum(Y_lag[:, idx] * weights[None, :, :], axis=2)
+        elif attention_mode == "score-topk":
+            idx, weights = score_topk_attention_indices_weights(
+                Z, eta, params_scale["eta_a"], start, stop, _top_k_size(p, attention_top_k),
+            )
+            X2b = jnp.sum(Y_lag[:, idx] * weights[None, :, :], axis=2)
         else:
-            Wb = attention_rows(Z, eta, params_scale["eta_a"], start, stop)
+            Wb = attention_rows(Z, eta, params_scale["eta_a"], start, stop, attention_mode=attention_mode)
             X2b = Y_lag @ Wb.T
         X2 = X2.at[:, start:stop].set(X2b)
     return X2

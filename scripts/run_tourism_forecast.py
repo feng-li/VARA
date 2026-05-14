@@ -50,6 +50,8 @@ TOURISM_FEATURE_FUNCTIONS = "hierarchy,seasonal_profile,recent_dynamics"
 SEASONAL_CORR_FEATURE_FUNCTIONS = (
     "seasonal_naive_residual_correlation,seasonal_profile_pca,recent_dynamics,hierarchy"
 )
+SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS = "seasonal_diff_predictive_corr_lag1_lag12"
+FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual")
 
 
 def _fit_y_transform(train: np.ndarray, method: str, seasonal_lag: int) -> tuple[np.ndarray, dict]:
@@ -112,6 +114,25 @@ def _inverse_y_transform(Y: np.ndarray, transform: dict) -> np.ndarray:
     if str(transform["method"]).startswith("log1p"):
         out = np.maximum(np.expm1(out), 0.0)
     return out
+
+
+def _seasonal_naive_forecast(history: np.ndarray, horizon: int, seasonal_lag: int) -> np.ndarray:
+    if history.shape[0] < seasonal_lag:
+        raise ValueError("History must have at least seasonal_lag rows for seasonal naive forecasting.")
+    values = [row.copy() for row in np.asarray(history, dtype=float)]
+    forecasts = []
+    for _ in range(int(horizon)):
+        y_hat = values[-seasonal_lag].copy()
+        values.append(y_hat)
+        forecasts.append(y_hat)
+    return np.vstack(forecasts)
+
+
+def _seasonal_naive_residual_panel(history: np.ndarray, seasonal_lag: int) -> np.ndarray:
+    if history.shape[0] <= seasonal_lag:
+        raise ValueError("History must have more rows than seasonal_lag for residual correction.")
+    values = np.asarray(history, dtype=float)
+    return values[seasonal_lag:] - values[:-seasonal_lag]
 
 
 def _series_code(series_id: str, suffix: str = BASE_SUFFIX) -> str:
@@ -237,6 +258,14 @@ def _code_ordinal_features(series_id: str) -> dict[str, float]:
     return out
 
 
+def _lagged_cross_correlation_matrix(values: np.ndarray, lag: int) -> np.ndarray:
+    if values.shape[0] <= lag:
+        return np.zeros((values.shape[1], values.shape[1]), dtype=float)
+    target = _standardize_array(values[lag:])
+    source = _standardize_array(values[:-lag])
+    return (target.T @ source) / max(target.shape[0], 1)
+
+
 def _tourism_specific_feature_matrix(
     wide: pd.DataFrame,
     series_ids: list[str],
@@ -303,6 +332,49 @@ def _tourism_specific_feature_matrix(
     Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
     if not np.isfinite(Z).all():
         raise ValueError("Tourism-specific feature matrix contains non-finite values.")
+    return Z, feature_df, feature_cols
+
+
+def _tourism_seasonal_predictive_score_matrix(
+    wide: pd.DataFrame,
+    series_ids: list[str],
+    *,
+    horizon: int,
+    seasonal_lag: int,
+) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    train = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_ids]].copy()
+    if len(train) <= 2 * seasonal_lag:
+        raise ValueError("Training data must have more than 2 * seasonal_lag rows for seasonal-predictive attention.")
+
+    dates = pd.to_datetime(train["date"])
+    values = _fill_nonfinite_by_column(train.loc[:, series_ids].to_numpy(dtype=float))
+    log_values = np.log1p(np.maximum(values, 0.0))
+    residuals = log_values[seasonal_lag:] - log_values[:-seasonal_lag]
+
+    score_1 = _lagged_cross_correlation_matrix(residuals, lag=1)
+    score_12 = _lagged_cross_correlation_matrix(residuals, lag=seasonal_lag)
+    scores = 0.5 * (score_1 + score_12)
+    scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+    np.fill_diagonal(scores, 0.0)
+
+    rows = []
+    for j, series_id in enumerate(series_ids):
+        row = {
+            "series_id": series_id,
+            "transform": "seasonal_predictive",
+            "n_obs": int(len(train)),
+            "train_start": str(dates.iloc[0].date()),
+            "train_end": str(dates.iloc[-1].date()),
+        }
+        for source_id, value in zip(series_ids, scores[j], strict=True):
+            row[f"score_from_{source_id}"] = float(value)
+        rows.append(row)
+
+    feature_df = pd.DataFrame(rows)
+    feature_cols = [col for col in feature_df.columns if col not in set(META_COLUMNS)]
+    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
+    if not np.isfinite(Z).all():
+        raise ValueError("Seasonal-predictive score matrix contains non-finite values.")
     return Z, feature_df, feature_cols
 
 
@@ -408,6 +480,13 @@ def _tourism_feature_matrix(
             horizon=horizon,
             seasonal_lag=seasonal_lag,
         )
+    if feature_source == "seasonal-predictive":
+        return _tourism_seasonal_predictive_score_matrix(
+            wide,
+            series_ids,
+            horizon=horizon,
+            seasonal_lag=seasonal_lag,
+        )
     if feature_source == "hybrid":
         _, tourism_df, tourism_cols = _tourism_specific_feature_matrix(wide, series_ids, horizon=horizon)
         _, tsfeature_df, tsfeature_cols = _tourism_tsfeature_matrix(
@@ -432,15 +511,22 @@ def _tourism_feature_matrix(
         if not np.isfinite(Z).all():
             raise ValueError("Hybrid tourism feature matrix contains non-finite values.")
         return Z, feature_df, feature_cols
-    raise ValueError("feature_source must be 'tsfeatures', 'tourism', 'hybrid', or 'seasonal-corr'.")
+    raise ValueError("feature_source must be 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
 
 
-def _new_forecaster(grid_size: int, ridge: float) -> VARAForecaster:
+def _new_forecaster(
+    grid_size: int,
+    ridge: float,
+    attention_mode: str = "dense",
+    attention_top_k: int | None = None,
+) -> VARAForecaster:
     return VARAForecaster(
         grid_size=grid_size,
         eta_bounds=(-2.0, 2.0),
         ridge=ridge,
         dense_threshold=2500,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
     )
 
 
@@ -455,6 +541,8 @@ def _feature_transform_label(feature_source: str, y_transform: str) -> str:
         return "raw_tourism_panel"
     if feature_source == "seasonal-corr":
         return "log1p_seasonal_naive_residuals"
+    if feature_source == "seasonal-predictive":
+        return "log1p_seasonal_diff_predictive_scores"
     if feature_source == "hybrid":
         return f"raw_tourism_panel+{_feature_transform_from_y_transform(y_transform)}"
     return _feature_transform_from_y_transform(y_transform)
@@ -465,6 +553,8 @@ def _feature_function_metric(feature_source: str, feature_functions: str | Seque
         return TOURISM_FEATURE_FUNCTIONS
     if feature_source == "seasonal-corr":
         return SEASONAL_CORR_FEATURE_FUNCTIONS
+    if feature_source == "seasonal-predictive":
+        return SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS
     if feature_source == "hybrid":
         return f"{TOURISM_FEATURE_FUNCTIONS},{_feature_function_label(feature_functions)}"
     return _feature_function_label(feature_functions)
@@ -486,11 +576,27 @@ def run_tourism_forecast(
     forecast_mode: str = "recursive",
     feature_update_policy: str = "exact",
     feature_update_interval: int = 1,
+    attention_mode: str = "dense",
+    attention_top_k: int | None = None,
+    forecast_scenario: str = "direct",
+    residual_transform: str = "center",
 ) -> dict:
+    if forecast_scenario not in set(FORECAST_SCENARIOS):
+        raise ValueError(f"forecast_scenario must be one of {FORECAST_SCENARIOS}.")
     if forecast_mode not in {"recursive", "rolling-origin"}:
         raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
-    if feature_source not in {"tsfeatures", "tourism", "hybrid", "seasonal-corr"}:
-        raise ValueError("feature_source must be 'tsfeatures', 'tourism', 'hybrid', or 'seasonal-corr'.")
+    if residual_transform not in {"center", "standardize"}:
+        raise ValueError("residual_transform must be 'center' or 'standardize'.")
+    if feature_source not in {"tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"}:
+        raise ValueError("feature_source must be 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
+    if attention_mode not in {"dense", "topk", "score", "score-topk"}:
+        raise ValueError("attention_mode must be 'dense', 'topk', 'score', or 'score-topk'.")
+    if attention_mode in {"topk", "score-topk"} and attention_top_k is None:
+        raise ValueError("attention_top_k must be provided when attention_mode uses top-k.")
+    if feature_source == "seasonal-predictive" and attention_mode not in {"score", "score-topk"}:
+        raise ValueError("feature_source='seasonal-predictive' requires attention_mode='score' or 'score-topk'.")
+    if feature_source != "seasonal-predictive" and attention_mode in {"score", "score-topk"}:
+        raise ValueError("score attention modes require feature_source='seasonal-predictive'.")
     if feature_update_policy not in {"exact", "periodic"}:
         raise ValueError("feature_update_policy must be 'exact' or 'periodic'.")
     if int(feature_update_interval) < 1:
@@ -513,9 +619,19 @@ def run_tourism_forecast(
     feature_frames = []
     rolling_diagnostics = []
     exact_feature_origins = []
+    baseline_forecasts = []
+    residual_forecasts = []
 
     if forecast_mode == "recursive":
-        Y_train, fitted_y_transform = _fit_y_transform(train, y_transform, seasonal_lag)
+        baseline_forecast = np.zeros((horizon, len(series_ids)), dtype=float)
+        if forecast_scenario == "direct":
+            model_train = train
+            model_transform = y_transform
+        else:
+            baseline_forecast = _seasonal_naive_forecast(train, horizon, seasonal_lag)
+            model_train = _seasonal_naive_residual_panel(train, seasonal_lag)
+            model_transform = residual_transform
+        Y_train, fitted_y_transform = _fit_y_transform(model_train, model_transform, seasonal_lag)
         Z, feature_df, feature_cols = _tourism_feature_matrix(
             wide,
             series_ids,
@@ -527,11 +643,14 @@ def run_tourism_forecast(
             feature_functions=feature_functions,
         )
 
-        forecaster = _new_forecaster(grid_size, ridge)
+        forecaster = _new_forecaster(grid_size, ridge, attention_mode, attention_top_k)
         forecaster.fit(jnp.asarray(Y_train), jnp.asarray(Z))
         forecast_model_scale = np.asarray(forecaster.predict(h=horizon))
         forecast_transformed = _unscale_y_transform(forecast_model_scale, fitted_y_transform)
-        forecast = _inverse_y_transform(forecast_model_scale, fitted_y_transform)
+        residual_forecast = _inverse_y_transform(forecast_model_scale, fitted_y_transform)
+        forecast = residual_forecast if forecast_scenario == "direct" else baseline_forecast + residual_forecast
+        baseline_forecasts.append(baseline_forecast)
+        residual_forecasts.append(residual_forecast)
         feature_frames.append(feature_df)
         fit_diagnostics = forecaster.diagnostics()
         n_train_model_initial = int(Y_train.shape[0])
@@ -540,6 +659,8 @@ def run_tourism_forecast(
         exact_feature_origins = [1]
     else:
         forecasts = []
+        baseline_steps = []
+        residual_steps = []
         transformed_forecasts = []
         forecaster = None
         fitted_y_transform = None
@@ -554,7 +675,15 @@ def run_tourism_forecast(
         for step in range(horizon):
             origin_end = len(wide) - horizon + step
             origin_train = Y_raw[:origin_end]
-            Y_train, fitted_y_transform = _fit_y_transform(origin_train, y_transform, seasonal_lag)
+            baseline_one = np.zeros((1, len(series_ids)), dtype=float)
+            if forecast_scenario == "direct":
+                model_train = origin_train
+                model_transform = y_transform
+            else:
+                baseline_one = _seasonal_naive_forecast(origin_train, 1, seasonal_lag)
+                model_train = _seasonal_naive_residual_panel(origin_train, seasonal_lag)
+                model_transform = residual_transform
+            Y_train, fitted_y_transform = _fit_y_transform(model_train, model_transform, seasonal_lag)
             origin = step + 1
             use_exact_features = (
                 feature_update_policy == "exact"
@@ -583,14 +712,17 @@ def run_tourism_forecast(
                 feature_df = cached_feature_df.copy()
                 feature_cols = list(cached_feature_cols)
 
-            forecaster = _new_forecaster(grid_size, ridge)
+            forecaster = _new_forecaster(grid_size, ridge, attention_mode, attention_top_k)
             forecaster.fit(jnp.asarray(Y_train), jnp.asarray(Z))
             if step == 0:
                 n_train_model_initial = int(Y_train.shape[0])
             forecast_model_scale = np.asarray(forecaster.predict(h=1))
             transformed_one = _unscale_y_transform(forecast_model_scale, fitted_y_transform)
-            forecast_one = _inverse_y_transform(forecast_model_scale, fitted_y_transform)
+            residual_one = _inverse_y_transform(forecast_model_scale, fitted_y_transform)
+            forecast_one = residual_one if forecast_scenario == "direct" else baseline_one + residual_one
             transformed_forecasts.append(transformed_one[0])
+            baseline_steps.append(baseline_one[0])
+            residual_steps.append(residual_one[0])
             forecasts.append(forecast_one[0])
 
             forecast_date = str(wide["date"].iloc[origin_end])
@@ -620,9 +752,14 @@ def run_tourism_forecast(
             n_train_model_final = int(Y_train.shape[0])
 
         forecast = np.vstack(forecasts)
+        baseline_forecasts.append(np.vstack(baseline_steps))
+        residual_forecasts.append(np.vstack(residual_steps))
         forecast_transformed = np.vstack(transformed_forecasts)
         fit_diagnostics = forecaster.diagnostics()
         n_feature_columns = len(feature_cols)
+
+    baseline_forecast = np.vstack(baseline_forecasts) if baseline_forecasts else np.zeros_like(forecast)
+    residual_forecast = np.vstack(residual_forecasts) if residual_forecasts else forecast.copy()
 
     errors = forecast - test
     rmse = float(np.sqrt(np.mean(errors ** 2)))
@@ -637,6 +774,14 @@ def run_tourism_forecast(
     forecast_df = pd.DataFrame(forecast, columns=series_ids)
     forecast_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
     forecast_df.to_csv(output_dir / "tourism_forecast.csv", index=False)
+
+    baseline_df = pd.DataFrame(baseline_forecast, columns=series_ids)
+    baseline_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
+    baseline_df.to_csv(output_dir / "tourism_baseline_forecast.csv", index=False)
+
+    residual_forecast_df = pd.DataFrame(residual_forecast, columns=series_ids)
+    residual_forecast_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
+    residual_forecast_df.to_csv(output_dir / "tourism_residual_forecast.csv", index=False)
 
     forecast_transformed_df = pd.DataFrame(forecast_transformed, columns=series_ids)
     forecast_transformed_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
@@ -686,6 +831,9 @@ def run_tourism_forecast(
         "n_test": int(test.shape[0]),
         "horizon": int(horizon),
         "forecast_type": forecast_mode,
+        "forecast_scenario": forecast_scenario,
+        "residual_baseline": "seasonal_naive" if forecast_scenario == "seasonal-naive-residual" else "",
+        "residual_transform": residual_transform if forecast_scenario == "seasonal-naive-residual" else "",
         "train_start": str(wide["date"].iloc[0]),
         "train_end": str(wide["date"].iloc[-horizon - 1]),
         "test_start": str(wide["date"].iloc[-horizon]),
@@ -732,6 +880,33 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--grid-size", type=int, default=7)
     parser.add_argument("--ridge", type=float, default=1e-2)
+    parser.add_argument(
+        "--forecast-scenario",
+        type=str,
+        default="direct",
+        choices=list(FORECAST_SCENARIOS),
+        help="Forecasting scenario: direct VARA or residual correction around a baseline.",
+    )
+    parser.add_argument(
+        "--residual-transform",
+        type=str,
+        default="center",
+        choices=["center", "standardize"],
+        help="Transform used for VARA when fitting residual-correction scenarios.",
+    )
+    parser.add_argument(
+        "--attention-mode",
+        type=str,
+        default="dense",
+        choices=["dense", "topk", "score", "score-topk"],
+        help="Attention computation mode for VARA.",
+    )
+    parser.add_argument(
+        "--attention-top-k",
+        type=int,
+        default=None,
+        help="Top-k neighbor count when --attention-mode topk.",
+    )
     parser.add_argument("--seasonal-lag", type=int, default=12)
     parser.add_argument("--feature-freq", type=int, default=12)
     parser.add_argument("--feature-functions", type=str, default=DEFAULT_TOURISM_TSFEATURES)
@@ -739,7 +914,7 @@ def main() -> None:
         "--feature-source",
         type=str,
         default="tsfeatures",
-        choices=["tsfeatures", "tourism", "hybrid", "seasonal-corr"],
+        choices=["tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"],
         help="Feature source for attention construction.",
     )
     parser.add_argument(
@@ -786,6 +961,10 @@ def main() -> None:
         forecast_mode=args.forecast_mode,
         feature_update_policy=args.feature_update_policy,
         feature_update_interval=args.feature_update_interval,
+        attention_mode=args.attention_mode,
+        attention_top_k=args.attention_top_k,
+        forecast_scenario=args.forecast_scenario,
+        residual_transform=args.residual_transform,
     )
     summary = pd.read_csv(args.output_dir / "metrics_summary.csv")
     print("Tourism VARA forecast summary:")
