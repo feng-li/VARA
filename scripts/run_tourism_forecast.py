@@ -16,7 +16,8 @@ import numpy as np
 import pandas as pd
 
 from vara.forecast import VARAForecaster
-from vara.series_features import META_COLUMNS, extract_series_tsfeatures
+from vara.forecast_metrics import forecast_metric_tables
+from vara.series_features import META_COLUMNS, clean_feature_frame, extract_series_tsfeatures
 
 BASE_SUFFIX = "All"
 DETAILED_CODE_DEPTH = 3
@@ -45,6 +46,7 @@ TOURISM_TSFEATURES = (
     "pacf_features",
 )
 DEFAULT_TOURISM_TSFEATURES = ",".join(TOURISM_TSFEATURES)
+TOURISM_FEATURE_FUNCTIONS = "hierarchy,seasonal_profile,recent_dynamics"
 
 
 def _fit_y_transform(train: np.ndarray, method: str, seasonal_lag: int) -> tuple[np.ndarray, dict]:
@@ -169,6 +171,112 @@ def _tourism_tsfeature_matrix(
     return Z, feature_df, feature_cols
 
 
+def _cyclic_month(month: int, prefix: str) -> dict[str, float]:
+    angle = 2.0 * np.pi * (int(month) - 1) / 12.0
+    return {f"{prefix}_sin": float(np.sin(angle)), f"{prefix}_cos": float(np.cos(angle))}
+
+
+def _log_growth(log_values: np.ndarray, lag: int) -> float:
+    if log_values.size <= lag:
+        return 0.0
+    return float(log_values[-1] - log_values[-1 - lag])
+
+
+def _tourism_specific_feature_matrix(
+    wide: pd.DataFrame,
+    series_ids: list[str],
+    *,
+    horizon: int,
+) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    train = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_ids]].copy()
+    dates = pd.to_datetime(train["date"])
+    values = train.loc[:, series_ids].to_numpy(dtype=float)
+    months = dates.dt.month.to_numpy()
+
+    rows = []
+    for j, series_id in enumerate(series_ids):
+        code = _series_code(series_id)
+        is_total = code == "Total"
+        y = np.asarray(values[:, j], dtype=float)
+        y = np.where(np.isfinite(y), y, np.nan)
+        log_y = np.log1p(np.maximum(y, 0.0))
+        mean_y = float(np.nanmean(y))
+        denom = mean_y if abs(mean_y) > 1e-12 else np.nan
+
+        month_means = pd.DataFrame({"month": months, "y": y}).groupby("month")["y"].mean()
+        seasonal = np.asarray([month_means.get(m, np.nan) for m in range(1, 13)], dtype=float)
+        if np.all(np.isnan(seasonal)):
+            seasonal = np.zeros(12, dtype=float)
+        fill_value = float(np.nanmean(seasonal)) if np.isfinite(np.nanmean(seasonal)) else 0.0
+        seasonal = np.where(np.isfinite(seasonal), seasonal, fill_value)
+        normalized_seasonal = seasonal / denom - 1.0 if np.isfinite(denom) else np.zeros(12, dtype=float)
+        peak_month = int(np.argmax(seasonal) + 1)
+        trough_month = int(np.argmin(seasonal) + 1)
+
+        recent_diff = np.diff(log_y[-13:]) if log_y.size >= 2 else np.asarray([0.0])
+        row = {
+            "series_id": series_id,
+            "transform": "tourism",
+            "n_obs": int(len(train)),
+            "train_start": str(dates.iloc[0].date()),
+            "train_end": str(dates.iloc[-1].date()),
+            "code_depth": 0 if is_total else len(code),
+            "is_total": int(is_total),
+            "code_1": "Total" if is_total else code[0],
+            "code_2": "None" if is_total or len(code) < 2 else code[1],
+            "code_3": "None" if is_total or len(code) < 3 else code[2],
+            "seasonal_amplitude": float((np.max(seasonal) - np.min(seasonal)) / denom) if np.isfinite(denom) else 0.0,
+            "growth_1": _log_growth(log_y, 1),
+            "growth_3": _log_growth(log_y, 3),
+            "growth_12": _log_growth(log_y, 12),
+            "recent_vol_12": float(np.nanstd(recent_diff)),
+            "recent_level_log": float(log_y[-1]) if log_y.size else 0.0,
+            "recent_mean_log_12": float(np.nanmean(log_y[-12:])) if log_y.size else 0.0,
+        }
+        row.update(_cyclic_month(peak_month, "season_peak"))
+        row.update(_cyclic_month(trough_month, "season_trough"))
+        for month, value in enumerate(normalized_seasonal, start=1):
+            row[f"season_m{month:02d}"] = float(value)
+        rows.append(row)
+
+    feature_df = pd.DataFrame(rows)
+    feature_df = pd.get_dummies(feature_df, columns=["code_1", "code_2", "code_3"], dtype=float)
+    feature_df = clean_feature_frame(feature_df, standardize_output=True, meta_columns=META_COLUMNS)
+    feature_cols = [col for col in feature_df.columns if col not in set(META_COLUMNS)]
+    if not feature_cols:
+        raise ValueError("No tourism-specific feature columns were produced.")
+    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
+    if not np.isfinite(Z).all():
+        raise ValueError("Tourism-specific feature matrix contains non-finite values.")
+    return Z, feature_df, feature_cols
+
+
+def _tourism_feature_matrix(
+    wide: pd.DataFrame,
+    series_ids: list[str],
+    *,
+    horizon: int,
+    feature_source: str,
+    y_transform: str,
+    seasonal_lag: int,
+    feature_freq: int,
+    feature_functions: str | Sequence[str],
+) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    if feature_source == "tsfeatures":
+        return _tourism_tsfeature_matrix(
+            wide,
+            series_ids,
+            horizon=horizon,
+            y_transform=y_transform,
+            seasonal_lag=seasonal_lag,
+            feature_freq=feature_freq,
+            feature_functions=feature_functions,
+        )
+    if feature_source == "tourism":
+        return _tourism_specific_feature_matrix(wide, series_ids, horizon=horizon)
+    raise ValueError("feature_source must be 'tsfeatures' or 'tourism'.")
+
+
 def _new_forecaster(grid_size: int, ridge: float) -> VARAForecaster:
     return VARAForecaster(
         grid_size=grid_size,
@@ -184,6 +292,18 @@ def _feature_function_label(feature_functions: str | Sequence[str]) -> str:
     return ",".join(str(item) for item in feature_functions)
 
 
+def _feature_transform_label(feature_source: str, y_transform: str) -> str:
+    if feature_source == "tourism":
+        return "raw_tourism_panel"
+    return _feature_transform_from_y_transform(y_transform)
+
+
+def _feature_function_metric(feature_source: str, feature_functions: str | Sequence[str]) -> str:
+    if feature_source == "tourism":
+        return TOURISM_FEATURE_FUNCTIONS
+    return _feature_function_label(feature_functions)
+
+
 def run_tourism_forecast(
     data_dir: Path,
     output_dir: Path,
@@ -196,10 +316,20 @@ def run_tourism_forecast(
     series_depth: int | None = DETAILED_CODE_DEPTH,
     feature_freq: int = 12,
     feature_functions: str | Sequence[str] = TOURISM_TSFEATURES,
+    feature_source: str = "tsfeatures",
     forecast_mode: str = "recursive",
+    feature_update_policy: str = "exact",
+    feature_update_interval: int = 1,
 ) -> dict:
     if forecast_mode not in {"recursive", "rolling-origin"}:
         raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
+    if feature_source not in {"tsfeatures", "tourism"}:
+        raise ValueError("feature_source must be 'tsfeatures' or 'tourism'.")
+    if feature_update_policy not in {"exact", "periodic"}:
+        raise ValueError("feature_update_policy must be 'exact' or 'periodic'.")
+    if int(feature_update_interval) < 1:
+        raise ValueError("feature_update_interval must be at least 1.")
+    feature_update_interval = int(feature_update_interval)
 
     wide = pd.read_csv(data_dir / "tourism.csv")
 
@@ -216,13 +346,15 @@ def run_tourism_forecast(
 
     feature_frames = []
     rolling_diagnostics = []
+    exact_feature_origins = []
 
     if forecast_mode == "recursive":
         Y_train, fitted_y_transform = _fit_y_transform(train, y_transform, seasonal_lag)
-        Z, feature_df, feature_cols = _tourism_tsfeature_matrix(
+        Z, feature_df, feature_cols = _tourism_feature_matrix(
             wide,
             series_ids,
             horizon=horizon,
+            feature_source=feature_source,
             y_transform=y_transform,
             seasonal_lag=seasonal_lag,
             feature_freq=feature_freq,
@@ -239,27 +371,51 @@ def run_tourism_forecast(
         n_train_model_initial = int(Y_train.shape[0])
         n_train_model_final = int(Y_train.shape[0])
         n_feature_columns = len(feature_cols)
+        exact_feature_origins = [1]
     else:
         forecasts = []
         transformed_forecasts = []
         forecaster = None
         fitted_y_transform = None
         feature_cols = []
+        cached_Z = None
+        cached_feature_df = None
+        cached_feature_cols = None
+        cached_feature_source_origin = None
+        cached_feature_source_train_end = None
         n_train_model_initial = 0
         n_train_model_final = 0
         for step in range(horizon):
             origin_end = len(wide) - horizon + step
             origin_train = Y_raw[:origin_end]
             Y_train, fitted_y_transform = _fit_y_transform(origin_train, y_transform, seasonal_lag)
-            Z, feature_df, feature_cols = _tourism_tsfeature_matrix(
-                wide,
-                series_ids,
-                horizon=horizon - step,
-                y_transform=y_transform,
-                seasonal_lag=seasonal_lag,
-                feature_freq=feature_freq,
-                feature_functions=feature_functions,
+            origin = step + 1
+            use_exact_features = (
+                feature_update_policy == "exact"
+                or cached_Z is None
+                or step % feature_update_interval == 0
             )
+            if use_exact_features:
+                Z, feature_df, feature_cols = _tourism_feature_matrix(
+                    wide,
+                    series_ids,
+                    horizon=horizon - step,
+                    feature_source=feature_source,
+                    y_transform=y_transform,
+                    seasonal_lag=seasonal_lag,
+                    feature_freq=feature_freq,
+                    feature_functions=feature_functions,
+                )
+                cached_Z = Z
+                cached_feature_df = feature_df.copy()
+                cached_feature_cols = list(feature_cols)
+                cached_feature_source_origin = origin
+                cached_feature_source_train_end = str(feature_df["train_end"].iloc[0])
+                exact_feature_origins.append(origin)
+            else:
+                Z = cached_Z
+                feature_df = cached_feature_df.copy()
+                feature_cols = list(cached_feature_cols)
 
             forecaster = _new_forecaster(grid_size, ridge)
             forecaster.fit(jnp.asarray(Y_train), jnp.asarray(Z))
@@ -274,18 +430,25 @@ def run_tourism_forecast(
             forecast_date = str(wide["date"].iloc[origin_end])
             train_end = str(wide["date"].iloc[origin_end - 1])
             origin_features = feature_df.copy()
-            origin_features.insert(0, "origin", step + 1)
+            origin_features.insert(0, "origin", origin)
             origin_features.insert(1, "forecast_date", forecast_date)
+            origin_features.insert(2, "feature_exact", bool(use_exact_features))
+            origin_features.insert(3, "feature_source_origin", int(cached_feature_source_origin))
+            origin_features.insert(4, "feature_source_train_end", str(cached_feature_source_train_end))
             feature_frames.append(origin_features)
 
             diag = forecaster.diagnostics()
             diag.update({
-                "origin": step + 1,
+                "origin": origin,
                 "forecast_date": forecast_date,
                 "train_end": train_end,
                 "n_train": int(origin_train.shape[0]),
                 "n_train_model": int(Y_train.shape[0]),
                 "n_attention_feature_columns": len(feature_cols),
+                "feature_update_policy": feature_update_policy,
+                "feature_exact": bool(use_exact_features),
+                "feature_source_origin": int(cached_feature_source_origin),
+                "feature_source_train_end": str(cached_feature_source_train_end),
             })
             rolling_diagnostics.append(diag)
             n_train_model_final = int(Y_train.shape[0])
@@ -321,6 +484,30 @@ def run_tourism_forecast(
     error_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
     error_df.to_csv(output_dir / "tourism_errors.csv", index=False)
 
+    by_series, by_origin, summary = forecast_metric_tables(
+        {"vara": forecast},
+        test,
+        train,
+        wide["date"].iloc[-horizon:].to_numpy(),
+        series_ids,
+        model_names=["vara"],
+        season_length=seasonal_lag,
+        forecast_mode=forecast_mode,
+        horizon=horizon,
+        summary_context={
+            "data": str(data_dir / "tourism.csv"),
+            "series_depth": -1 if series_depth is None else int(series_depth),
+            "season_length": int(seasonal_lag),
+            "train_start": str(wide["date"].iloc[0]),
+            "train_end": str(wide["date"].iloc[-horizon - 1]),
+            "test_start": str(wide["date"].iloc[-horizon]),
+            "test_end": str(wide["date"].iloc[-1]),
+        },
+    )
+    by_series.to_csv(output_dir / "metrics_by_series.csv", index=False)
+    by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
+    summary.to_csv(output_dir / "metrics_summary.csv", index=False)
+
     metrics = {
         "source": str(data_dir / "tourism.csv"),
         "series_suffix": BASE_SUFFIX,
@@ -342,14 +529,23 @@ def run_tourism_forecast(
         "y_transform": y_transform,
         "seasonal_lag": int(seasonal_lag),
         "model_scale": fitted_y_transform["model_scale"],
-        "attention_feature_source": "tsfeatures",
+        "attention_feature_source": feature_source,
         "attention_feature_file": str(feature_path),
-        "attention_feature_transform": _feature_transform_from_y_transform(y_transform),
+        "attention_feature_transform": _feature_transform_label(feature_source, y_transform),
         "attention_feature_freq": int(feature_freq),
-        "attention_feature_functions": _feature_function_label(feature_functions),
+        "attention_feature_functions": _feature_function_metric(feature_source, feature_functions),
+        "attention_feature_update_policy": feature_update_policy,
+        "attention_feature_update_interval": feature_update_interval,
+        "attention_feature_exact_origins": ",".join(str(origin) for origin in exact_feature_origins),
+        "attention_feature_exact_origin_count": len(exact_feature_origins),
         "n_attention_feature_columns": n_feature_columns,
         "rmse": rmse,
         "mae": mae,
+        "mape_pct": float(summary["mape_pct"].iloc[0]),
+        "smape_pct": float(summary["smape_pct"].iloc[0]),
+        "mase": float(summary["mase"].iloc[0]),
+        "rmsse": float(summary["rmsse"].iloc[0]),
+        "bias": float(summary["bias"].iloc[0]),
         **fit_diagnostics,
     }
     pd.DataFrame([metrics]).to_csv(output_dir / "tourism_metrics.csv", index=False)
@@ -373,6 +569,26 @@ def main() -> None:
     parser.add_argument("--seasonal-lag", type=int, default=12)
     parser.add_argument("--feature-freq", type=int, default=12)
     parser.add_argument("--feature-functions", type=str, default=DEFAULT_TOURISM_TSFEATURES)
+    parser.add_argument(
+        "--feature-source",
+        type=str,
+        default="tsfeatures",
+        choices=["tsfeatures", "tourism"],
+        help="Feature source for attention construction.",
+    )
+    parser.add_argument(
+        "--feature-update-policy",
+        type=str,
+        default="exact",
+        choices=["exact", "periodic"],
+        help="Feature update policy for rolling-origin mode.",
+    )
+    parser.add_argument(
+        "--feature-update-interval",
+        type=int,
+        default=1,
+        help="For periodic feature updates, recompute exact features every K rolling origins.",
+    )
     parser.add_argument(
         "--forecast-mode",
         type=str,
@@ -400,7 +616,10 @@ def main() -> None:
         series_depth=None if args.series_depth < 0 else args.series_depth,
         feature_freq=args.feature_freq,
         feature_functions=args.feature_functions,
+        feature_source=args.feature_source,
         forecast_mode=args.forecast_mode,
+        feature_update_policy=args.feature_update_policy,
+        feature_update_interval=args.feature_update_interval,
     )
     print("Tourism VARA forecast metrics:")
     for key, value in metrics.items():

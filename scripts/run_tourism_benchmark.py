@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,15 +14,31 @@ import numpy as np
 import pandas as pd
 from statsforecast import StatsForecast
 from statsforecast.models import AutoARIMA, AutoETS, Naive, RandomWalkWithDrift, SeasonalNaive
+from statsmodels.tsa.ar_model import AutoReg
 from statsmodels.tsa.api import VAR
+
+from vara.forecast_metrics import forecast_metric_tables
+
+try:
+    import ray
+except Exception as exc:
+    ray = None
+    RAY_IMPORT_ERROR = exc
+else:
+    RAY_IMPORT_ERROR = None
 
 BASE_SUFFIX = "All"
 DETAILED_CODE_DEPTH = 3
 STATSFORECAST_MODELS = {"naive", "seasonal_naive", "drift", "auto_ets", "auto_arima"}
-STATSMODELS_MODELS = {"var1"}
+STATSMODELS_MODELS = {"ar1", "var1"}
 ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS
-DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,var1"
+DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1"
 STATSFORECAST_N_JOBS = 1
+
+
+def _print_progress(message: str) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 def _series_code(series_id: str, suffix: str = BASE_SUFFIX) -> str:
@@ -52,6 +70,8 @@ def _parse_model_names(models: str | list[str]) -> list[str]:
         "autoets": "auto_ets",
         "arima": "auto_arima",
         "autoarima": "auto_arima",
+        "ar": "ar1",
+        "ar_1": "ar1",
         "var": "var1",
         "var_1": "var1",
     }
@@ -110,6 +130,31 @@ def _forecast_statsforecast_once(
     return out.rename(columns={"unique_id": "series_id", "ds": "date"})
 
 
+def _forecast_ar1_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+) -> pd.DataFrame:
+    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
+    if len(dates) != h:
+        raise RuntimeError("AR(1) forecast_dates length does not match h.")
+
+    rows = []
+    for series_id in series_cols:
+        y = train_wide.loc[:, series_id].to_numpy(dtype=float)
+        if y.shape[0] <= 1:
+            raise ValueError("AR(1) requires at least two training observations.")
+        try:
+            forecast = AutoReg(y, lags=1, trend="c", old_names=False).fit().forecast(steps=h)
+        except Exception:
+            forecast = np.repeat(y[-1], h)
+        for i, date in enumerate(dates):
+            rows.append({"series_id": series_id, "date": date, "ar1": float(forecast[i])})
+    return pd.DataFrame(rows)
+
+
 def _forecast_var1_once(
     train_wide: pd.DataFrame,
     series_cols: list[str],
@@ -159,6 +204,8 @@ def _forecast_once(
                 n_jobs=n_jobs,
             )
         )
+    if "ar1" in model_names:
+        frames.append(_forecast_ar1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
     if "var1" in model_names:
         frames.append(_forecast_var1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
 
@@ -225,25 +272,216 @@ def _forecast_rolling_origin(
     return pd.concat(rows, ignore_index=True)
 
 
+def _merge_forecast_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    if not frames:
+        raise ValueError("No forecast frames to merge.")
+    keys = ["series_id", "date"]
+    if all("origin" in frame.columns for frame in frames):
+        keys = ["origin", "train_end", *keys]
+
+    out = frames[0]
+    for frame in frames[1:]:
+        out = out.merge(frame, on=keys, how="outer", sort=False)
+    return out
+
+
+def _forecast_single_model(
+    wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    model_name: str,
+    forecast_mode: str,
+    horizon: int,
+    season_length: int,
+    freq: str,
+    n_jobs: int,
+) -> pd.DataFrame:
+    if forecast_mode == "recursive":
+        return _forecast_recursive(
+            wide,
+            series_cols,
+            horizon=horizon,
+            model_names=[model_name],
+            season_length=season_length,
+            freq=freq,
+            n_jobs=n_jobs,
+        )
+    return _forecast_rolling_origin(
+        wide,
+        series_cols,
+        horizon=horizon,
+        model_names=[model_name],
+        season_length=season_length,
+        freq=freq,
+        n_jobs=n_jobs,
+    )
+
+
+def _forecast_single_model_remote(
+    wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    model_name: str,
+    forecast_mode: str,
+    horizon: int,
+    season_length: int,
+    freq: str,
+    n_jobs: int,
+    ray_debug: bool,
+) -> tuple[str, pd.DataFrame]:
+    if ray_debug:
+        _print_progress(f"[Ray benchmark start] model={model_name}")
+    start = time.time()
+    frame = _forecast_single_model(
+        wide,
+        series_cols,
+        model_name=model_name,
+        forecast_mode=forecast_mode,
+        horizon=horizon,
+        season_length=season_length,
+        freq=freq,
+        n_jobs=n_jobs,
+    )
+    if ray_debug:
+        _print_progress(f"[Ray benchmark done] model={model_name}, elapsed_sec={time.time() - start:.2f}")
+    return model_name, frame
+
+
+def _forecast_univariate_series_remote(
+    wide: pd.DataFrame,
+    series_id: str,
+    *,
+    model_name: str,
+    forecast_mode: str,
+    horizon: int,
+    season_length: int,
+    freq: str,
+    n_jobs: int,
+    ray_debug: bool,
+) -> tuple[str, str, pd.DataFrame]:
+    if ray_debug:
+        _print_progress(f"[Ray benchmark start] model={model_name}, series={series_id}")
+    start = time.time()
+    frame = _forecast_single_model(
+        wide,
+        [series_id],
+        model_name=model_name,
+        forecast_mode=forecast_mode,
+        horizon=horizon,
+        season_length=season_length,
+        freq=freq,
+        n_jobs=n_jobs,
+    )
+    if ray_debug:
+        _print_progress(
+            f"[Ray benchmark done] model={model_name}, series={series_id}, "
+            f"elapsed_sec={time.time() - start:.2f}"
+        )
+    return model_name, series_id, frame
+
+
+def _forecast_models_with_ray(
+    wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    model_names: list[str],
+    forecast_mode: str,
+    horizon: int,
+    season_length: int,
+    freq: str,
+    n_jobs: int,
+    max_cpus_per_task: int,
+    ray_debug: bool,
+) -> pd.DataFrame:
+    univariate_models = [model_name for model_name in model_names if model_name != "var1"]
+    panel_models = [model_name for model_name in model_names if model_name == "var1"]
+    remote_univariate_task = ray.remote(num_cpus=max_cpus_per_task)(_forecast_univariate_series_remote)
+    remote_panel_task = ray.remote(num_cpus=max_cpus_per_task)(_forecast_single_model_remote)
+    wide_arg = ray.put(wide)
+
+    futures = []
+    submit_times = {}
+    for model_name in univariate_models:
+        for series_id in series_cols:
+            ref = remote_univariate_task.remote(
+                wide_arg,
+                series_id,
+                model_name=model_name,
+                forecast_mode=forecast_mode,
+                horizon=horizon,
+                season_length=season_length,
+                freq=freq,
+                n_jobs=n_jobs,
+                ray_debug=ray_debug,
+            )
+            futures.append(ref)
+            submit_times[ref] = time.time()
+
+    for model_name in panel_models:
+        ref = remote_panel_task.remote(
+            wide_arg,
+            series_cols,
+            model_name=model_name,
+            forecast_mode=forecast_mode,
+            horizon=horizon,
+            season_length=season_length,
+            freq=freq,
+            n_jobs=n_jobs,
+            ray_debug=ray_debug,
+        )
+        futures.append(ref)
+        submit_times[ref] = time.time()
+
+    _print_progress(
+        "Submitted Ray benchmark tasks: "
+        f"univariate_tasks={len(univariate_models) * len(series_cols)}, "
+        f"panel_tasks={len(panel_models)}, total={len(futures)}"
+    )
+    pending = list(futures)
+    completed = 0
+    frames_by_model = {model_name: [] for model_name in model_names}
+    while pending:
+        ready, pending = ray.wait(pending, num_returns=1, timeout=60.0)
+        if not ready:
+            now = time.time()
+            slowest_wait = now - min(submit_times.values()) if submit_times else 0.0
+            _print_progress(
+                "Ray benchmark wait: "
+                f"done={completed}/{len(futures)}, pending={len(pending)}, "
+                f"slowest_pending_sec={slowest_wait:.1f}, available={ray.available_resources()}"
+            )
+            continue
+
+        for ref in ready:
+            result = ray.get(ref)
+            if len(result) == 3:
+                model_name, series_id, frame = result
+            else:
+                model_name, frame = result
+                series_id = "panel"
+            frames_by_model[model_name].append(frame)
+            submit_times.pop(ref, None)
+            completed += 1
+            if ray_debug:
+                _print_progress(
+                    f"Ray benchmark collected: model={model_name}, series={series_id}, "
+                    f"done={completed}/{len(futures)}"
+                )
+
+    model_frames = []
+    for model_name in model_names:
+        frame = pd.concat(frames_by_model[model_name], ignore_index=True, sort=False)
+        sort_cols = [col for col in ("origin", "date", "series_id") if col in frame.columns]
+        if sort_cols:
+            frame = frame.sort_values(sort_cols).reset_index(drop=True)
+        model_frames.append(frame)
+    return _merge_forecast_frames(model_frames)
+
+
 def _wide_model_frame(long_forecasts: pd.DataFrame, model: str, series_cols: list[str]) -> pd.DataFrame:
     wide = long_forecasts.pivot(index="date", columns="series_id", values=model).reset_index()
     wide.columns.name = None
     return wide.loc[:, ["date", *series_cols]]
-
-
-def _safe_pct(numer: np.ndarray, denom: np.ndarray) -> np.ndarray:
-    return numer / np.where(np.abs(denom) > 1e-12, np.abs(denom), np.nan)
-
-
-def _seasonal_scales(train: np.ndarray, season_length: int) -> tuple[np.ndarray, np.ndarray]:
-    if train.shape[0] <= season_length:
-        raise ValueError("Training data must have more rows than season_length for MASE/RMSSE.")
-    diff = train[season_length:] - train[:-season_length]
-    mae_scale = np.nanmean(np.abs(diff), axis=0)
-    rmse_scale = np.nanmean(diff ** 2, axis=0)
-    mae_scale = np.where(mae_scale > 1e-12, mae_scale, np.nan)
-    rmse_scale = np.where(rmse_scale > 1e-12, rmse_scale, np.nan)
-    return mae_scale, rmse_scale
 
 
 def _compute_metrics(
@@ -256,68 +494,25 @@ def _compute_metrics(
     season_length: int,
     forecast_mode: str,
     horizon: int,
+    summary_context: dict[str, Any],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     test = test_wide.loc[:, series_cols].to_numpy(dtype=float)
     train = train_wide.loc[:, series_cols].to_numpy(dtype=float)
-    mase_scale, rmsse_scale = _seasonal_scales(train, season_length)
-
-    by_series_rows = []
-    by_origin_rows = []
-    summary_rows = []
-    for model in model_names:
-        forecast = _wide_model_frame(long_forecasts, model, series_cols).loc[:, series_cols].to_numpy(dtype=float)
-        error = forecast - test
-        abs_error = np.abs(error)
-        squared_error = error ** 2
-        pct_error = _safe_pct(abs_error, test)
-        smape = 2.0 * abs_error / np.where(np.abs(test) + np.abs(forecast) > 1e-12, np.abs(test) + np.abs(forecast), np.nan)
-
-        series_rmse = np.sqrt(np.nanmean(squared_error, axis=0))
-        series_mae = np.nanmean(abs_error, axis=0)
-        series_rows = pd.DataFrame({
-            "model": model,
-            "series_id": series_cols,
-            "rmse": series_rmse,
-            "mae": series_mae,
-            "mape_pct": np.nanmean(pct_error, axis=0) * 100.0,
-            "smape_pct": np.nanmean(smape, axis=0) * 100.0,
-            "mase": series_mae / mase_scale,
-            "rmsse": np.sqrt(np.nanmean(squared_error, axis=0) / rmsse_scale),
-            "bias": np.nanmean(error, axis=0),
-            "mean_actual": np.nanmean(test, axis=0),
-            "mean_forecast": np.nanmean(forecast, axis=0),
-        })
-        by_series_rows.append(series_rows)
-
-        by_origin_rows.append(pd.DataFrame({
-            "model": model,
-            "date": test_wide["date"],
-            "rmse": np.sqrt(np.nanmean(squared_error, axis=1)),
-            "mae": np.nanmean(abs_error, axis=1),
-            "mape_pct": np.nanmean(pct_error, axis=1) * 100.0,
-            "smape_pct": np.nanmean(smape, axis=1) * 100.0,
-            "bias": np.nanmean(error, axis=1),
-        }))
-
-        summary_rows.append({
-            "model": model,
-            "forecast_mode": forecast_mode,
-            "horizon": int(horizon),
-            "n_series": len(series_cols),
-            "n_test": int(test.shape[0]),
-            "rmse": float(np.sqrt(np.nanmean(squared_error))),
-            "mae": float(np.nanmean(abs_error)),
-            "mape_pct": float(np.nanmean(pct_error) * 100.0),
-            "smape_pct": float(np.nanmean(smape) * 100.0),
-            "mase": float(np.nanmean(series_rows["mase"])),
-            "rmsse": float(np.nanmean(series_rows["rmsse"])),
-            "bias": float(np.nanmean(error)),
-        })
-
-    return (
-        pd.concat(by_series_rows, ignore_index=True),
-        pd.concat(by_origin_rows, ignore_index=True),
-        pd.DataFrame(summary_rows),
+    forecasts = {
+        model: _wide_model_frame(long_forecasts, model, series_cols).loc[:, series_cols].to_numpy(dtype=float)
+        for model in model_names
+    }
+    return forecast_metric_tables(
+        forecasts,
+        test,
+        train,
+        test_wide["date"],
+        series_cols,
+        model_names=model_names,
+        season_length=season_length,
+        forecast_mode=forecast_mode,
+        horizon=horizon,
+        summary_context=summary_context,
     )
 
 
@@ -341,9 +536,21 @@ def run_tourism_benchmark(
     series_depth: int | None = DETAILED_CODE_DEPTH,
     max_series: int = 0,
     clip_nonnegative: bool = False,
+    ray_num_cpus: int = 1,
+    max_cpus_per_task: int = 1,
+    ray_debug: bool = False,
 ) -> pd.DataFrame:
     if forecast_mode not in {"recursive", "rolling-origin"}:
         raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
+    if ray_num_cpus < 1:
+        raise ValueError("ray_num_cpus must be >= 1.")
+    if max_cpus_per_task < 1:
+        raise ValueError("max_cpus_per_task must be >= 1.")
+    use_ray = ray_num_cpus > 1
+    if use_ray and ray is None:
+        raise RuntimeError(f"Ray could not be imported: {RAY_IMPORT_ERROR!r}")
+    if use_ray and max_cpus_per_task > ray_num_cpus:
+        raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
 
     wide = pd.read_csv(data_dir / "tourism.csv")
     wide["date"] = pd.to_datetime(wide["date"])
@@ -355,77 +562,121 @@ def run_tourism_benchmark(
         raise ValueError("No tourism series selected.")
 
     model_names = _parse_model_names(models)
-    if forecast_mode == "recursive":
-        long_forecasts = _forecast_recursive(
-            wide,
-            series_cols,
-            horizon=horizon,
-            model_names=model_names,
-            season_length=season_length,
-            freq=freq,
-            n_jobs=STATSFORECAST_N_JOBS,
+    ray_started_here = False
+    if use_ray and not ray.is_initialized():
+        _print_progress(f"Starting Ray: ray_num_cpus={ray_num_cpus}, max_cpus_per_task={max_cpus_per_task}")
+        ray.init(
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            num_cpus=ray_num_cpus,
+            _node_ip_address="127.0.0.1",
         )
-    else:
-        long_forecasts = _forecast_rolling_origin(
-            wide,
+        ray_started_here = True
+        _print_progress("Ray started")
+    if use_ray:
+        available = ray.available_resources()
+        available_cpus = float(available.get("CPU", 0.0))
+        if available_cpus < float(max_cpus_per_task):
+            raise RuntimeError(
+                f"Ray has no available CPUs after initialization: {available}. "
+                "Stop stale Ray workers with `ray stop --force` or reduce other Ray jobs."
+            )
+
+    try:
+        if use_ray:
+            long_forecasts = _forecast_models_with_ray(
+                wide,
+                series_cols,
+                model_names=model_names,
+                forecast_mode=forecast_mode,
+                horizon=horizon,
+                season_length=season_length,
+                freq=freq,
+                n_jobs=STATSFORECAST_N_JOBS,
+                max_cpus_per_task=max_cpus_per_task,
+                ray_debug=ray_debug,
+            )
+        elif forecast_mode == "recursive":
+            long_forecasts = _forecast_recursive(
+                wide,
+                series_cols,
+                horizon=horizon,
+                model_names=model_names,
+                season_length=season_length,
+                freq=freq,
+                n_jobs=STATSFORECAST_N_JOBS,
+            )
+        else:
+            long_forecasts = _forecast_rolling_origin(
+                wide,
+                series_cols,
+                horizon=horizon,
+                model_names=model_names,
+                season_length=season_length,
+                freq=freq,
+                n_jobs=STATSFORECAST_N_JOBS,
+            )
+
+        if clip_nonnegative:
+            long_forecasts.loc[:, model_names] = long_forecasts.loc[:, model_names].clip(lower=0.0)
+
+        test_wide = wide.iloc[-horizon:].loc[:, ["date", *series_cols]].reset_index(drop=True)
+        train_wide = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_cols]].reset_index(drop=True)
+
+        by_series, by_origin, summary = _compute_metrics(
+            long_forecasts,
+            test_wide,
+            train_wide,
             series_cols,
-            horizon=horizon,
-            model_names=model_names,
+            model_names,
             season_length=season_length,
-            freq=freq,
-            n_jobs=STATSFORECAST_N_JOBS,
+            forecast_mode=forecast_mode,
+            horizon=horizon,
+            summary_context={
+                "data": str(data_dir / "tourism.csv"),
+                "series_depth": -1 if series_depth is None else int(series_depth),
+                "season_length": int(season_length),
+                "train_start": str(train_wide["date"].iloc[0].date()),
+                "train_end": str(train_wide["date"].iloc[-1].date()),
+                "test_start": str(test_wide["date"].iloc[0].date()),
+                "test_end": str(test_wide["date"].iloc[-1].date()),
+            },
         )
 
-    if clip_nonnegative:
-        long_forecasts.loc[:, model_names] = long_forecasts.loc[:, model_names].clip(lower=0.0)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        long_forecasts.to_csv(output_dir / "tourism_benchmark_forecasts_long.csv", index=False)
+        test_wide.to_csv(output_dir / "tourism_test.csv", index=False)
+        for model in model_names:
+            forecast_wide = _wide_model_frame(long_forecasts, model, series_cols)
+            forecast_wide.to_csv(output_dir / f"tourism_forecast_{model}.csv", index=False)
+            error_wide = forecast_wide.copy()
+            error_wide.loc[:, series_cols] = forecast_wide.loc[:, series_cols].to_numpy(dtype=float) - test_wide.loc[:, series_cols].to_numpy(dtype=float)
+            error_wide.to_csv(output_dir / f"tourism_errors_{model}.csv", index=False)
 
-    test_wide = wide.iloc[-horizon:].loc[:, ["date", *series_cols]].reset_index(drop=True)
-    train_wide = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_cols]].reset_index(drop=True)
-
-    by_series, by_origin, summary = _compute_metrics(
-        long_forecasts,
-        test_wide,
-        train_wide,
-        series_cols,
-        model_names,
-        season_length=season_length,
-        forecast_mode=forecast_mode,
-        horizon=horizon,
-    )
-    summary.insert(1, "data", str(data_dir / "tourism.csv"))
-    summary.insert(2, "series_depth", -1 if series_depth is None else int(series_depth))
-    summary.insert(3, "season_length", int(season_length))
-    summary.insert(4, "train_start", str(train_wide["date"].iloc[0].date()))
-    summary.insert(5, "train_end", str(train_wide["date"].iloc[-1].date()))
-    summary.insert(6, "test_start", str(test_wide["date"].iloc[0].date()))
-    summary.insert(7, "test_end", str(test_wide["date"].iloc[-1].date()))
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    long_forecasts.to_csv(output_dir / "tourism_benchmark_forecasts_long.csv", index=False)
-    test_wide.to_csv(output_dir / "tourism_test.csv", index=False)
-    for model in model_names:
-        forecast_wide = _wide_model_frame(long_forecasts, model, series_cols)
-        forecast_wide.to_csv(output_dir / f"tourism_forecast_{model}.csv", index=False)
-        error_wide = forecast_wide.copy()
-        error_wide.loc[:, series_cols] = forecast_wide.loc[:, series_cols].to_numpy(dtype=float) - test_wide.loc[:, series_cols].to_numpy(dtype=float)
-        error_wide.to_csv(output_dir / f"tourism_errors_{model}.csv", index=False)
-
-    by_series.to_csv(output_dir / "metrics_by_series.csv", index=False)
-    by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
-    summary.to_csv(output_dir / "metrics_summary.csv", index=False)
-    _save_config(output_dir, {
-        "data_dir": str(data_dir),
-        "output_dir": str(output_dir),
-        "models": model_names,
-        "forecast_mode": forecast_mode,
-        "horizon": int(horizon),
-        "season_length": int(season_length),
-        "freq": freq,
-        "series_depth": -1 if series_depth is None else int(series_depth),
-        "max_series": int(max_series),
-        "clip_nonnegative": bool(clip_nonnegative),
-    })
-    return summary
+        by_series.to_csv(output_dir / "metrics_by_series.csv", index=False)
+        by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
+        summary.to_csv(output_dir / "metrics_summary.csv", index=False)
+        _save_config(output_dir, {
+            "data_dir": str(data_dir),
+            "output_dir": str(output_dir),
+            "models": model_names,
+            "forecast_mode": forecast_mode,
+            "horizon": int(horizon),
+            "season_length": int(season_length),
+            "freq": freq,
+            "series_depth": -1 if series_depth is None else int(series_depth),
+            "max_series": int(max_series),
+            "clip_nonnegative": bool(clip_nonnegative),
+            "ray_num_cpus": int(ray_num_cpus),
+            "max_cpus_per_task": int(max_cpus_per_task),
+            "ray_debug": bool(ray_debug),
+        })
+        return summary
+    finally:
+        if ray_started_here:
+            _print_progress("Shutting down Ray")
+            ray.shutdown()
+            _print_progress("Ray shut down")
 
 
 def _load_config_defaults(path: Path | None) -> dict[str, Any]:
@@ -458,6 +709,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--series-depth", type=int, default=DETAILED_CODE_DEPTH)
     parser.add_argument("--max-series", type=int, default=0)
     parser.add_argument("--clip-nonnegative", action="store_true")
+    parser.add_argument("--ray-num-cpus", type=int, default=1)
+    parser.add_argument("--max-cpus-per-task", type=int, default=1)
+    parser.add_argument(
+        "--ray-debug",
+        action="store_true",
+        help="Print Ray benchmark model task start/end messages.",
+    )
     parser.set_defaults(**defaults)
     return parser.parse_args()
 
@@ -475,6 +733,9 @@ def main() -> None:
         series_depth=None if args.series_depth < 0 else args.series_depth,
         max_series=args.max_series,
         clip_nonnegative=args.clip_nonnegative,
+        ray_num_cpus=args.ray_num_cpus,
+        max_cpus_per_task=args.max_cpus_per_task,
+        ray_debug=args.ray_debug,
     )
     print("Tourism benchmark summary:")
     print(summary.to_string(index=False))
