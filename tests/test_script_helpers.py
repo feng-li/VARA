@@ -64,6 +64,44 @@ class ScriptHelperTests(unittest.TestCase):
             rtol=1e-10,
         )
 
+    def test_first_difference_inverse_reconstructs_from_last_level(self):
+        train = np.asarray([
+            [1.0, 10.0],
+            [3.0, 13.0],
+            [6.0, 17.0],
+            [10.0, 22.0],
+        ])
+        _, transform = _fit_y_transform(train, "diff", seasonal_lag=12)
+
+        target_diff = np.asarray([
+            [5.0, 6.0],
+            [7.0, 8.0],
+        ])
+        model_scale = (target_diff - transform["mean"]) / transform["scale"]
+        forecast = _inverse_y_transform(model_scale, transform)
+
+        expected = np.asarray([
+            [15.0, 28.0],
+            [22.0, 36.0],
+        ])
+        np.testing.assert_allclose(forecast, expected, atol=1e-10, rtol=1e-10)
+
+    def test_log_first_difference_inverse_reconstructs_from_last_log_level(self):
+        train = np.asarray([
+            [1.0, 10.0],
+            [3.0, 13.0],
+            [6.0, 17.0],
+            [10.0, 22.0],
+        ])
+        _, transform = _fit_y_transform(train, "log1p-diff", seasonal_lag=12)
+
+        target_log_diff = np.zeros((2, 2))
+        model_scale = (target_log_diff - transform["mean"]) / transform["scale"]
+        forecast = _inverse_y_transform(model_scale, transform)
+
+        expected = np.vstack([train[-1], train[-1]])
+        np.testing.assert_allclose(forecast, expected, atol=1e-10, rtol=1e-10)
+
     def test_tourism_tsfeature_matrix_uses_training_window(self):
         dates = pd.date_range("2020-01-01", periods=24, freq="MS")
         wide = pd.DataFrame({

@@ -55,6 +55,22 @@ FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual")
 
 
 def _fit_y_transform(train: np.ndarray, method: str, seasonal_lag: int) -> tuple[np.ndarray, dict]:
+    if method in {"diff", "log1p-diff"}:
+        if train.shape[0] <= 1:
+            raise ValueError("Training data must have at least two rows for first differences.")
+        history = np.log1p(np.maximum(train, 0.0)) if method == "log1p-diff" else np.asarray(train, dtype=float)
+        base = history[1:] - history[:-1]
+        mean = base.mean(axis=0, keepdims=True)
+        scale = base.std(axis=0, keepdims=True)
+        scale = np.where(scale > 0.0, scale, 1.0)
+        return (base - mean) / scale, {
+            "method": method,
+            "mean": mean,
+            "scale": scale,
+            "history": history,
+            "model_scale": "standardized",
+        }
+
     if method == "log1p-seasonal-diff":
         if train.shape[0] <= seasonal_lag:
             raise ValueError("Training data must have more rows than seasonal_lag.")
@@ -102,6 +118,17 @@ def _unscale_y_transform(Y: np.ndarray, transform: dict) -> np.ndarray:
 def _inverse_y_transform(Y: np.ndarray, transform: dict) -> np.ndarray:
     method = str(transform["method"])
     out = _unscale_y_transform(Y, transform)
+    if method in {"diff", "log1p-diff"}:
+        history = [row.copy() for row in np.asarray(transform["history"], dtype=float)]
+        forecasts = []
+        for first_diff in out:
+            forecast = history[-1] + first_diff
+            history.append(forecast)
+            forecasts.append(forecast)
+        out = np.vstack(forecasts)
+        if method == "log1p-diff":
+            return np.maximum(np.expm1(out), 0.0)
+        return out
     if method == "log1p-seasonal-diff":
         seasonal_lag = int(transform["seasonal_lag"])
         history = [row.copy() for row in np.asarray(transform["log_history"], dtype=float)]
@@ -967,7 +994,7 @@ def main() -> None:
         "--y-transform",
         type=str,
         default="log1p-seasonal-diff",
-        choices=["center", "standardize", "log1p-center", "log1p-standardize", "log1p-seasonal-diff"],
+        choices=["center", "standardize", "diff", "log1p-center", "log1p-standardize", "log1p-diff", "log1p-seasonal-diff"],
     )
     args = parser.parse_args()
 
