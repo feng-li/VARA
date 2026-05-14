@@ -47,6 +47,9 @@ TOURISM_TSFEATURES = (
 )
 DEFAULT_TOURISM_TSFEATURES = ",".join(TOURISM_TSFEATURES)
 TOURISM_FEATURE_FUNCTIONS = "hierarchy,seasonal_profile,recent_dynamics"
+SEASONAL_CORR_FEATURE_FUNCTIONS = (
+    "seasonal_naive_residual_correlation,seasonal_profile_pca,recent_dynamics,hierarchy"
+)
 
 
 def _fit_y_transform(train: np.ndarray, method: str, seasonal_lag: int) -> tuple[np.ndarray, dict]:
@@ -182,6 +185,58 @@ def _log_growth(log_values: np.ndarray, lag: int) -> float:
     return float(log_values[-1] - log_values[-1 - lag])
 
 
+def _fill_nonfinite_by_column(values: np.ndarray) -> np.ndarray:
+    out = np.asarray(values, dtype=float).copy()
+    if out.ndim == 1:
+        out = out[:, None]
+    for j in range(out.shape[1]):
+        col = out[:, j]
+        finite = np.isfinite(col)
+        fill = float(np.mean(col[finite])) if finite.any() else 0.0
+        col[~finite] = fill
+        out[:, j] = col
+    return out
+
+
+def _standardize_array(values: np.ndarray) -> np.ndarray:
+    out = _fill_nonfinite_by_column(values)
+    scale = out.std(axis=0, keepdims=True)
+    scale = np.where(scale > 0.0, scale, 1.0)
+    return (out - out.mean(axis=0, keepdims=True)) / scale
+
+
+def _orient_columns(scores: np.ndarray) -> np.ndarray:
+    out = np.asarray(scores, dtype=float).copy()
+    for j in range(out.shape[1]):
+        pivot = int(np.argmax(np.abs(out[:, j])))
+        if out[pivot, j] < 0.0:
+            out[:, j] *= -1.0
+    return out
+
+
+def _pca_scores(values: np.ndarray, n_components: int) -> np.ndarray:
+    X = _standardize_array(values)
+    k = min(int(n_components), X.shape[0], X.shape[1])
+    if k <= 0:
+        return np.zeros((X.shape[0], 0), dtype=float)
+    _, _, vt = np.linalg.svd(X, full_matrices=False)
+    return _orient_columns(X @ vt[:k].T)
+
+
+def _code_ordinal_features(series_id: str) -> dict[str, float]:
+    code = _series_code(series_id)
+    if code == "Total":
+        code = ""
+    out = {"code_depth": float(len(code))}
+    for pos in range(3):
+        if pos < len(code):
+            char = code[pos].upper()
+            out[f"code_{pos + 1}_ord"] = float(ord(char) - ord("A") + 1) if "A" <= char <= "Z" else 0.0
+        else:
+            out[f"code_{pos + 1}_ord"] = 0.0
+    return out
+
+
 def _tourism_specific_feature_matrix(
     wide: pd.DataFrame,
     series_ids: list[str],
@@ -251,6 +306,78 @@ def _tourism_specific_feature_matrix(
     return Z, feature_df, feature_cols
 
 
+def _tourism_seasonal_corr_feature_matrix(
+    wide: pd.DataFrame,
+    series_ids: list[str],
+    *,
+    horizon: int,
+    seasonal_lag: int,
+) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    train = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_ids]].copy()
+    if len(train) <= seasonal_lag:
+        raise ValueError("Training data must have more rows than seasonal_lag for seasonal-corr features.")
+
+    dates = pd.to_datetime(train["date"])
+    months = dates.dt.month.to_numpy()
+    values = _fill_nonfinite_by_column(train.loc[:, series_ids].to_numpy(dtype=float))
+    log_values = np.log1p(np.maximum(values, 0.0))
+    residuals = log_values[seasonal_lag:] - log_values[:-seasonal_lag]
+    residual_z = _standardize_array(residuals)
+
+    corr = (residual_z.T @ residual_z) / max(residual_z.shape[0], 1)
+    corr = np.nan_to_num((corr + corr.T) / 2.0)
+    eigvals, eigvecs = np.linalg.eigh(corr)
+    order = np.argsort(eigvals)[::-1]
+    n_corr = min(8, len(series_ids))
+    corr_scores = eigvecs[:, order[:n_corr]] * np.sqrt(np.maximum(eigvals[order[:n_corr]], 0.0))
+    corr_scores = _orient_columns(corr_scores)
+
+    profile = np.zeros((len(series_ids), 12), dtype=float)
+    center = np.mean(log_values, axis=0)
+    for month in range(1, 13):
+        mask = months == month
+        month_mean = np.mean(log_values[mask, :], axis=0) if mask.any() else center
+        profile[:, month - 1] = month_mean - center
+    seasonal_scores = _pca_scores(profile, n_components=4)
+
+    growth_1 = log_values[-1] - log_values[-2] if log_values.shape[0] > 1 else np.zeros(len(series_ids))
+    growth_3 = log_values[-1] - log_values[-4] if log_values.shape[0] > 3 else np.zeros(len(series_ids))
+    growth_12 = log_values[-1] - log_values[-13] if log_values.shape[0] > 12 else np.zeros(len(series_ids))
+    recent_resid = residuals[-12:] if residuals.shape[0] else np.zeros((1, len(series_ids)))
+    resid_vol_12 = np.std(recent_resid, axis=0)
+
+    rows = []
+    for j, series_id in enumerate(series_ids):
+        row = {
+            "series_id": series_id,
+            "transform": "seasonal_corr",
+            "n_obs": int(len(train)),
+            "train_start": str(dates.iloc[0].date()),
+            "train_end": str(dates.iloc[-1].date()),
+            "growth_1": float(growth_1[j]),
+            "growth_3": float(growth_3[j]),
+            "growth_12": float(growth_12[j]),
+            "resid_vol_12": float(resid_vol_12[j]),
+            "recent_level_log": float(log_values[-1, j]),
+        }
+        row.update(_code_ordinal_features(series_id))
+        for k in range(corr_scores.shape[1]):
+            row[f"corr_embed_{k + 1:02d}"] = float(corr_scores[j, k])
+        for k in range(seasonal_scores.shape[1]):
+            row[f"seasonal_pc_{k + 1:02d}"] = float(seasonal_scores[j, k])
+        rows.append(row)
+
+    feature_df = pd.DataFrame(rows)
+    feature_df = clean_feature_frame(feature_df, standardize_output=True, meta_columns=META_COLUMNS)
+    feature_cols = [col for col in feature_df.columns if col not in set(META_COLUMNS)]
+    if not feature_cols:
+        raise ValueError("No seasonal-corr tourism feature columns were produced.")
+    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
+    if not np.isfinite(Z).all():
+        raise ValueError("Seasonal-corr tourism feature matrix contains non-finite values.")
+    return Z, feature_df, feature_cols
+
+
 def _tourism_feature_matrix(
     wide: pd.DataFrame,
     series_ids: list[str],
@@ -274,7 +401,38 @@ def _tourism_feature_matrix(
         )
     if feature_source == "tourism":
         return _tourism_specific_feature_matrix(wide, series_ids, horizon=horizon)
-    raise ValueError("feature_source must be 'tsfeatures' or 'tourism'.")
+    if feature_source == "seasonal-corr":
+        return _tourism_seasonal_corr_feature_matrix(
+            wide,
+            series_ids,
+            horizon=horizon,
+            seasonal_lag=seasonal_lag,
+        )
+    if feature_source == "hybrid":
+        _, tourism_df, tourism_cols = _tourism_specific_feature_matrix(wide, series_ids, horizon=horizon)
+        _, tsfeature_df, tsfeature_cols = _tourism_tsfeature_matrix(
+            wide,
+            series_ids,
+            horizon=horizon,
+            y_transform=y_transform,
+            seasonal_lag=seasonal_lag,
+            feature_freq=feature_freq,
+            feature_functions=feature_functions,
+        )
+        if list(tourism_df["series_id"]) != list(tsfeature_df["series_id"]):
+            raise ValueError("Tourism and tsfeatures series order does not match.")
+
+        feature_df = tourism_df.loc[:, [col for col in META_COLUMNS if col in tourism_df.columns]].copy()
+        feature_df["transform"] = "hybrid"
+        tourism_block = tourism_df.loc[:, tourism_cols].add_prefix("tourism__")
+        tsfeature_block = tsfeature_df.loc[:, tsfeature_cols].add_prefix("tsfeatures__")
+        feature_df = pd.concat([feature_df, tourism_block, tsfeature_block], axis=1)
+        feature_cols = [*tourism_block.columns.tolist(), *tsfeature_block.columns.tolist()]
+        Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
+        if not np.isfinite(Z).all():
+            raise ValueError("Hybrid tourism feature matrix contains non-finite values.")
+        return Z, feature_df, feature_cols
+    raise ValueError("feature_source must be 'tsfeatures', 'tourism', 'hybrid', or 'seasonal-corr'.")
 
 
 def _new_forecaster(grid_size: int, ridge: float) -> VARAForecaster:
@@ -295,12 +453,20 @@ def _feature_function_label(feature_functions: str | Sequence[str]) -> str:
 def _feature_transform_label(feature_source: str, y_transform: str) -> str:
     if feature_source == "tourism":
         return "raw_tourism_panel"
+    if feature_source == "seasonal-corr":
+        return "log1p_seasonal_naive_residuals"
+    if feature_source == "hybrid":
+        return f"raw_tourism_panel+{_feature_transform_from_y_transform(y_transform)}"
     return _feature_transform_from_y_transform(y_transform)
 
 
 def _feature_function_metric(feature_source: str, feature_functions: str | Sequence[str]) -> str:
     if feature_source == "tourism":
         return TOURISM_FEATURE_FUNCTIONS
+    if feature_source == "seasonal-corr":
+        return SEASONAL_CORR_FEATURE_FUNCTIONS
+    if feature_source == "hybrid":
+        return f"{TOURISM_FEATURE_FUNCTIONS},{_feature_function_label(feature_functions)}"
     return _feature_function_label(feature_functions)
 
 
@@ -323,8 +489,8 @@ def run_tourism_forecast(
 ) -> dict:
     if forecast_mode not in {"recursive", "rolling-origin"}:
         raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
-    if feature_source not in {"tsfeatures", "tourism"}:
-        raise ValueError("feature_source must be 'tsfeatures' or 'tourism'.")
+    if feature_source not in {"tsfeatures", "tourism", "hybrid", "seasonal-corr"}:
+        raise ValueError("feature_source must be 'tsfeatures', 'tourism', 'hybrid', or 'seasonal-corr'.")
     if feature_update_policy not in {"exact", "periodic"}:
         raise ValueError("feature_update_policy must be 'exact' or 'periodic'.")
     if int(feature_update_interval) < 1:
@@ -573,7 +739,7 @@ def main() -> None:
         "--feature-source",
         type=str,
         default="tsfeatures",
-        choices=["tsfeatures", "tourism"],
+        choices=["tsfeatures", "tourism", "hybrid", "seasonal-corr"],
         help="Feature source for attention construction.",
     )
     parser.add_argument(
@@ -604,7 +770,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    metrics = run_tourism_forecast(
+    run_tourism_forecast(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         max_series=args.max_series,
@@ -621,9 +787,9 @@ def main() -> None:
         feature_update_policy=args.feature_update_policy,
         feature_update_interval=args.feature_update_interval,
     )
-    print("Tourism VARA forecast metrics:")
-    for key, value in metrics.items():
-        print(f"  {key}: {value}")
+    summary = pd.read_csv(args.output_dir / "metrics_summary.csv")
+    print("Tourism VARA forecast summary:")
+    print(summary.to_string(index=False))
 
 
 if __name__ == "__main__":

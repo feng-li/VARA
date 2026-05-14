@@ -25,6 +25,7 @@ from scripts.run_full_simulation import (
 from scripts.run_tourism_forecast import (
     _fit_y_transform,
     _inverse_y_transform,
+    _tourism_feature_matrix,
     _tourism_specific_feature_matrix,
     _tourism_tsfeature_matrix,
     run_tourism_forecast,
@@ -99,6 +100,63 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertEqual(list(feature_df["series_id"]), ["AAAAll", "AABAll"])
         self.assertEqual(list(feature_df["n_obs"]), [22, 22])
         self.assertEqual(list(feature_df["train_end"]), ["2021-10-01", "2021-10-01"])
+
+    def test_tourism_hybrid_feature_matrix_combines_sources(self):
+        dates = pd.date_range("2020-01-01", periods=24, freq="MS")
+        wide = pd.DataFrame({
+            "date": dates,
+            "AAAAll": np.linspace(10.0, 20.0, 24),
+            "AABAll": np.linspace(30.0, 50.0, 24),
+        })
+
+        Z, feature_df, feature_cols = _tourism_feature_matrix(
+            wide,
+            ["AAAAll", "AABAll"],
+            horizon=2,
+            feature_source="hybrid",
+            y_transform="level",
+            seasonal_lag=12,
+            feature_freq=12,
+            feature_functions=("series_length",),
+        )
+
+        self.assertEqual(Z.shape[0], 2)
+        self.assertTrue(np.isfinite(Z).all())
+        self.assertEqual(list(feature_df["transform"]), ["hybrid", "hybrid"])
+        self.assertIn("tourism__season_m01", feature_cols)
+        self.assertIn("tourism__growth_1", feature_cols)
+        self.assertIn("tsfeatures__series_length", feature_cols)
+
+    def test_tourism_seasonal_corr_feature_matrix_is_compact(self):
+        dates = pd.date_range("2020-01-01", periods=36, freq="MS")
+        seasonal = np.sin(2.0 * np.pi * np.arange(36) / 12.0)
+        wide = pd.DataFrame({
+            "date": dates,
+            "AAAAll": 20.0 + np.linspace(0.0, 3.0, 36) + seasonal,
+            "AABAll": 30.0 + np.linspace(0.0, 5.0, 36) + 1.5 * seasonal,
+            "ABAAll": 18.0 + np.linspace(0.0, 2.0, 36) - seasonal,
+        })
+
+        Z, feature_df, feature_cols = _tourism_feature_matrix(
+            wide,
+            ["AAAAll", "AABAll", "ABAAll"],
+            horizon=2,
+            feature_source="seasonal-corr",
+            y_transform="level",
+            seasonal_lag=12,
+            feature_freq=12,
+            feature_functions=("series_length",),
+        )
+
+        self.assertEqual(Z.shape[0], 3)
+        self.assertLessEqual(Z.shape[1], 25)
+        self.assertTrue(np.isfinite(Z).all())
+        self.assertEqual(list(feature_df["transform"]), ["seasonal_corr", "seasonal_corr", "seasonal_corr"])
+        self.assertEqual(list(feature_df["train_end"]), ["2022-10-01", "2022-10-01", "2022-10-01"])
+        self.assertTrue(any(col.startswith("corr_embed_") for col in feature_cols))
+        self.assertTrue(any(col.startswith("seasonal_pc_") for col in feature_cols))
+        self.assertIn("growth_12", feature_cols)
+        self.assertIn("code_2_ord", feature_cols)
 
     def test_tourism_rolling_origin_refits_each_test_month(self):
         with tempfile.TemporaryDirectory() as tmp:
