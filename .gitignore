@@ -7,6 +7,7 @@ outputs/
 results_coverage_@*.csv
 *.npz
 *.pdf
+*.parquet
 *.tex
 *~
 #*#
