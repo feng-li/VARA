@@ -30,7 +30,6 @@ class TourismBenchmarkTests(unittest.TestCase):
                 horizon=2,
                 season_length=12,
                 series_depth=3,
-                n_jobs=1,
             )
 
             self.assertEqual(set(summary["model"]), {"naive", "seasonal_naive", "drift", "var1"})

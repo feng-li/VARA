@@ -20,6 +20,7 @@ STATSFORECAST_MODELS = {"naive", "seasonal_naive", "drift", "auto_ets", "auto_ar
 STATSMODELS_MODELS = {"var1"}
 ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,var1"
+STATSFORECAST_N_JOBS = 1
 
 
 def _series_code(series_id: str, suffix: str = BASE_SUFFIX) -> str:
@@ -339,7 +340,6 @@ def run_tourism_benchmark(
     freq: str = "MS",
     series_depth: int | None = DETAILED_CODE_DEPTH,
     max_series: int = 0,
-    n_jobs: int = 1,
     clip_nonnegative: bool = False,
 ) -> pd.DataFrame:
     if forecast_mode not in {"recursive", "rolling-origin"}:
@@ -363,7 +363,7 @@ def run_tourism_benchmark(
             model_names=model_names,
             season_length=season_length,
             freq=freq,
-            n_jobs=n_jobs,
+            n_jobs=STATSFORECAST_N_JOBS,
         )
     else:
         long_forecasts = _forecast_rolling_origin(
@@ -373,7 +373,7 @@ def run_tourism_benchmark(
             model_names=model_names,
             season_length=season_length,
             freq=freq,
-            n_jobs=n_jobs,
+            n_jobs=STATSFORECAST_N_JOBS,
         )
 
     if clip_nonnegative:
@@ -423,7 +423,6 @@ def run_tourism_benchmark(
         "freq": freq,
         "series_depth": -1 if series_depth is None else int(series_depth),
         "max_series": int(max_series),
-        "n_jobs": int(n_jobs),
         "clip_nonnegative": bool(clip_nonnegative),
     })
     return summary
@@ -458,7 +457,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--freq", type=str, default="MS")
     parser.add_argument("--series-depth", type=int, default=DETAILED_CODE_DEPTH)
     parser.add_argument("--max-series", type=int, default=0)
-    parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--clip-nonnegative", action="store_true")
     parser.set_defaults(**defaults)
     return parser.parse_args()
@@ -476,7 +474,6 @@ def main() -> None:
         freq=args.freq,
         series_depth=None if args.series_depth < 0 else args.series_depth,
         max_series=args.max_series,
-        n_jobs=args.n_jobs,
         clip_nonnegative=args.clip_nonnegative,
     )
     print("Tourism benchmark summary:")
