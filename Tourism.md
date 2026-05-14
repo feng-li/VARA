@@ -13,7 +13,7 @@
 
 ## Implemented Forecasting Components
 
-- `scripts/run_tourism_forecast.py` runs VARA forecasts and writes:
+- `scripts/run_vara_forecast.py` runs VARA forecasts and writes:
   - `tourism_forecast.csv`
   - `tourism_test.csv`
   - `tourism_errors.csv`
@@ -100,4 +100,3 @@ The main saved comparison uses `series_depth=3`, `horizon=12`, and rolling-origi
 5. Current evaluation is honest but limited.
    - The test period is only 12 months.
    - Model choices should be selected on a validation window before evaluating 2016.
-

@@ -22,7 +22,7 @@ from scripts.run_full_simulation import (
     make_simulation_reporting_tables,
     make_simulation_setup_table,
 )
-from scripts.run_tourism_forecast import (
+from scripts.run_vara_forecast import (
     _fit_y_transform,
     _inverse_y_transform,
     _seasonal_naive_forecast,
@@ -30,7 +30,7 @@ from scripts.run_tourism_forecast import (
     _tourism_feature_matrix,
     _tourism_specific_feature_matrix,
     _tourism_tsfeature_matrix,
-    run_tourism_forecast,
+    run_vara_forecast,
 )
 
 
@@ -212,7 +212,7 @@ class ScriptHelperTests(unittest.TestCase):
                 "AABAll": np.linspace(30.0, 50.0, 24),
             }).to_csv(data_dir / "tourism.csv", index=False)
 
-            metrics = run_tourism_forecast(
+            metrics = run_vara_forecast(
                 data_dir=data_dir,
                 output_dir=output_dir,
                 max_series=0,
@@ -260,6 +260,44 @@ class ScriptHelperTests(unittest.TestCase):
             self.assertEqual(set(metrics_by_series["series_id"]), {"AAAAll", "AABAll"})
             self.assertEqual(list(metrics_by_origin["date"]), ["2021-11-01", "2021-12-01"])
 
+    def test_vara_forecast_accepts_generic_wide_csv_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_path = root / "m4_like.csv"
+            output_dir = root / "out"
+            dates = pd.date_range("2000-01-01", periods=12, freq="YS")
+            pd.DataFrame({
+                "date": dates,
+                "Y1": np.linspace(10.0, 20.0, 12),
+                "Y2": np.linspace(30.0, 40.0, 12),
+                "Y3": np.linspace(50.0, 65.0, 12),
+            }).to_csv(data_path, index=False)
+
+            metrics = run_vara_forecast(
+                data_dir=root,
+                data_path=data_path,
+                output_dir=output_dir,
+                max_series=0,
+                horizon=2,
+                grid_size=3,
+                y_transform="center",
+                seasonal_lag=1,
+                ridge=1e-2,
+                series_depth=None,
+                series_suffix=None,
+                feature_freq=1,
+                feature_functions=("series_length",),
+                attention_mode="topk",
+                attention_top_k=2,
+            )
+
+            self.assertEqual(metrics["source"], str(data_path))
+            self.assertEqual(metrics["series_suffix"], "")
+            self.assertEqual(metrics["series_depth"], -1)
+            self.assertEqual(metrics["n_series"], 3)
+            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
+            self.assertEqual(set(forecast.columns), {"date", "Y1", "Y2", "Y3"})
+
     def test_tourism_seasonal_naive_residual_scenario_outputs_components(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -274,7 +312,7 @@ class ScriptHelperTests(unittest.TestCase):
                 "AABAll": 30.0 + np.linspace(0.0, 6.0, 36) + 1.2 * seasonal,
             }).to_csv(data_dir / "tourism.csv", index=False)
 
-            metrics = run_tourism_forecast(
+            metrics = run_vara_forecast(
                 data_dir=data_dir,
                 output_dir=output_dir,
                 max_series=0,

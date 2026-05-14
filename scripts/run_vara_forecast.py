@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run VARA forecasting on the tourism dataset."""
+"""Run VARA forecasting on wide-panel time-series data."""
 
 from __future__ import annotations
 
@@ -144,12 +144,19 @@ def _series_depth(series_id: str, suffix: str = BASE_SUFFIX) -> int:
     return 0 if code == "Total" else len(code)
 
 
-def _base_series_columns(wide: pd.DataFrame, series_depth: int | None = DETAILED_CODE_DEPTH) -> list[str]:
-    cols = [c for c in wide.columns if c != "date" and c.endswith(BASE_SUFFIX)]
-    if series_depth is not None:
-        cols = [c for c in cols if _series_depth(c) == series_depth]
+def _base_series_columns(
+    wide: pd.DataFrame,
+    series_depth: int | None = DETAILED_CODE_DEPTH,
+    series_suffix: str | None = BASE_SUFFIX,
+) -> list[str]:
+    cols = [c for c in wide.columns if c != "date"]
+    if series_suffix:
+        cols = [c for c in cols if c.endswith(series_suffix)]
+    if series_depth is not None and series_suffix:
+        cols = [c for c in cols if _series_depth(c, series_suffix) == series_depth]
     if not cols:
-        raise ValueError(f"No tourism series ending with {BASE_SUFFIX!r} found for series_depth={series_depth}.")
+        suffix_msg = f" ending with {series_suffix!r}" if series_suffix else ""
+        raise ValueError(f"No series columns{suffix_msg} found for series_depth={series_depth}.")
     return cols
 
 
@@ -560,7 +567,7 @@ def _feature_function_metric(feature_source: str, feature_functions: str | Seque
     return _feature_function_label(feature_functions)
 
 
-def run_tourism_forecast(
+def run_vara_forecast(
     data_dir: Path,
     output_dir: Path,
     max_series: int,
@@ -569,7 +576,9 @@ def run_tourism_forecast(
     y_transform: str,
     seasonal_lag: int,
     ridge: float,
+    data_path: Path | None = None,
     series_depth: int | None = DETAILED_CODE_DEPTH,
+    series_suffix: str | None = BASE_SUFFIX,
     feature_freq: int = 12,
     feature_functions: str | Sequence[str] = TOURISM_TSFEATURES,
     feature_source: str = "tsfeatures",
@@ -603,14 +612,16 @@ def run_tourism_forecast(
         raise ValueError("feature_update_interval must be at least 1.")
     feature_update_interval = int(feature_update_interval)
 
-    wide = pd.read_csv(data_dir / "tourism.csv")
+    input_path = data_path if data_path is not None else data_dir / "tourism.csv"
+    series_suffix = None if series_suffix == "" else series_suffix
+    wide = pd.read_csv(input_path)
 
-    all_series = _base_series_columns(wide, series_depth=series_depth)
+    all_series = _base_series_columns(wide, series_depth=series_depth, series_suffix=series_suffix)
     series_ids = all_series[: min(max_series, len(all_series))] if max_series > 0 else all_series
     if len(series_ids) < 2:
-        raise ValueError("Need at least two tourism series for VARA forecasting.")
+        raise ValueError("Need at least two series for VARA forecasting.")
     if horizon < 1 or horizon >= len(wide):
-        raise ValueError("horizon must be positive and smaller than the number of months.")
+        raise ValueError("horizon must be positive and smaller than the number of observations.")
 
     Y_raw = wide[series_ids].to_numpy(dtype=float)
     train = Y_raw[:-horizon]
@@ -806,7 +817,7 @@ def run_tourism_forecast(
         forecast_mode=forecast_mode,
         horizon=horizon,
         summary_context={
-            "data": str(data_dir / "tourism.csv"),
+            "data": str(input_path),
             "series_depth": -1 if series_depth is None else int(series_depth),
             "season_length": int(seasonal_lag),
             "train_start": str(wide["date"].iloc[0]),
@@ -820,8 +831,8 @@ def run_tourism_forecast(
     summary.to_csv(output_dir / "metrics_summary.csv", index=False)
 
     metrics = {
-        "source": str(data_dir / "tourism.csv"),
-        "series_suffix": BASE_SUFFIX,
+        "source": str(input_path),
+        "series_suffix": "" if series_suffix is None else str(series_suffix),
         "series_depth": -1 if series_depth is None else int(series_depth),
         "n_series": len(series_ids),
         "n_train": int(train.shape[0]),
@@ -866,16 +877,31 @@ def run_tourism_forecast(
     return metrics
 
 
+run_tourism_forecast = run_vara_forecast
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a VARA forecast on tourism data.")
+    parser = argparse.ArgumentParser(description="Run a VARA forecast on wide-panel time-series data.")
     parser.add_argument("--data-dir", type=Path, default=Path("data/tourism"))
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/tourism_forecast"))
+    parser.add_argument(
+        "--data-path",
+        type=Path,
+        default=None,
+        help="Wide CSV path with a date column. Overrides --data-dir/tourism.csv.",
+    )
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/vara_forecast"))
     parser.add_argument("--max-series", type=int, default=0, help="0 means use all selected series.")
     parser.add_argument(
         "--series-depth",
         type=int,
         default=DETAILED_CODE_DEPTH,
         help="Hierarchy code depth to forecast; use -1 for all All-suffix series.",
+    )
+    parser.add_argument(
+        "--series-suffix",
+        type=str,
+        default=BASE_SUFFIX,
+        help="Series-column suffix used for selection; pass '' to use all non-date columns.",
     )
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--grid-size", type=int, default=7)
@@ -945,7 +971,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    run_tourism_forecast(
+    run_vara_forecast(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         max_series=args.max_series,
@@ -954,7 +980,9 @@ def main() -> None:
         y_transform=args.y_transform,
         seasonal_lag=args.seasonal_lag,
         ridge=args.ridge,
+        data_path=args.data_path,
         series_depth=None if args.series_depth < 0 else args.series_depth,
+        series_suffix=None if args.series_suffix == "" else args.series_suffix,
         feature_freq=args.feature_freq,
         feature_functions=args.feature_functions,
         feature_source=args.feature_source,
@@ -967,7 +995,7 @@ def main() -> None:
         residual_transform=args.residual_transform,
     )
     summary = pd.read_csv(args.output_dir / "metrics_summary.csv")
-    print("Tourism VARA forecast summary:")
+    print("VARA forecast summary:")
     print(summary.to_string(index=False))
 
 
