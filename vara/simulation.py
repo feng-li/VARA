@@ -665,6 +665,7 @@ def full_single_replication(
     batch_size: int,
     dense_threshold: int,
     dgp_attention: Optional[jnp.ndarray] = None,
+    params_scale: Optional[Dict[str, float]] = None,
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
     attention_cache: Optional[TopKAttentionCache] = None,
@@ -675,6 +676,9 @@ def full_single_replication(
     method level so a failed QMLE run does not prevent the two-stage estimator
     from being reported for the same simulated dataset.
     """
+    if params_scale is None:
+        params_scale = PARAMS_SCALE
+
     sim_key, qmle_key = jax.random.split(key)
     kappa4 = kappa4_for_dist(dist)
 
@@ -686,7 +690,7 @@ def full_single_replication(
         p=p,
         q=q,
         dist=dist,
-        params_scale=PARAMS_SCALE,
+        params_scale=params_scale,
         batch_size=batch_size,
         dense_threshold=dense_threshold,
         precomputed_attention=dgp_attention,
@@ -705,7 +709,7 @@ def full_single_replication(
                     Y=Y,
                     Z=Z,
                     params_true=params_true,
-                    params_scale=PARAMS_SCALE,
+                    params_scale=params_scale,
                     alpha=alpha,
                     kappa4=kappa4,
                     algorithm=qmle_algorithm,
@@ -719,7 +723,7 @@ def full_single_replication(
                     Y=Y,
                     Z=Z,
                     params_true=params_true,
-                    params_scale=PARAMS_SCALE,
+                    params_scale=params_scale,
                     alpha=alpha,
                     kappa4=kappa4,
                     setting=setting,
@@ -825,6 +829,8 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
             optional_first_cols = [
                 "G",
                 "Z_design",
+                "attention_score_scale",
+                "attention_score_scale_value",
                 "Z_screened",
                 "Z_parallel",
                 "Z_parallel_workers",

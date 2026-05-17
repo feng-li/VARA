@@ -446,9 +446,9 @@ class ScriptHelperTests(unittest.TestCase):
     def test_draw_simulation_dgp_params_uses_identification_stable_ranges(self):
         params, stat_info = draw_simulation_dgp_params(jax.random.PRNGKey(2026), p=10)
 
-        self.assertAlmostEqual(float(params["eta_a"]), 2.0)
-        self.assertTrue(bool(jnp.all(params["gamma_a"] >= 0.35)))
-        self.assertTrue(bool(jnp.all(params["gamma_a"] <= 0.45)))
+        self.assertAlmostEqual(float(params["eta_a"]), 1.0)
+        self.assertTrue(bool(jnp.all(params["gamma_a"] >= 0.55)))
+        self.assertTrue(bool(jnp.all(params["gamma_a"] <= 0.75)))
         self.assertTrue(bool(jnp.all(params["beta"] >= -0.20)))
         self.assertTrue(bool(jnp.all(params["beta"] <= 0.20)))
         self.assertTrue(bool(jnp.all(params["sigma2"] >= 0.50)))

@@ -85,9 +85,9 @@ def _ensure_runtime_imports() -> None:
     })
 
 
-SIMULATION_ETA_A = 2.0
-SIMULATION_GAMMA_A_MIN = 0.35
-SIMULATION_GAMMA_A_MAX = 0.45
+SIMULATION_ETA_A = 1.0
+SIMULATION_GAMMA_A_MIN = 0.55
+SIMULATION_GAMMA_A_MAX = 0.75
 SIMULATION_BETA_MIN = -0.20
 SIMULATION_BETA_MAX = 0.20
 SIMULATION_SIGMA2_MIN = 0.50
@@ -115,6 +115,11 @@ SIMULATION_ATTENTION_CACHE_PROBES = 4
 SIMULATION_ATTENTION_CACHE_CANDIDATE_SIZE = None
 SIMULATION_ATTENTION_CACHE_CANDIDATE_MULTIPLIER = 5.0
 SIMULATION_ATTENTION_CACHE_DIAGNOSTIC_ROWS = 64
+
+
+def _simulation_params_scale(p: int) -> Dict[str, float]:
+    """Scale attention scores as log(p) for the manuscript simulation DGP."""
+    return {"eta_a": math.log(max(int(p), 2))}
 
 RUN_CONFIG_KEYS = (
     "seed",
@@ -403,6 +408,8 @@ def make_simulation_setup_table(
                     "G": int(feature_clusters),
                     "R": int(R),
                     "gamma": dgp_eta_a,
+                    "attention_score_scale": "log(p)",
+                    "attention_score_scale_value": _simulation_params_scale(p)["eta_a"],
                     "alpha_range": f"U({SIMULATION_BETA_MIN:.2f},{SIMULATION_BETA_MAX:.2f})",
                     "beta_range": f"U({SIMULATION_GAMMA_A_MIN:.2f},{SIMULATION_GAMMA_A_MAX:.2f})",
                     "sigma2_range": f"U({SIMULATION_SIGMA2_MIN:.2f},{SIMULATION_SIGMA2_MAX:.2f})",
@@ -437,6 +444,8 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
     diag_cols = [
         "G",
         "Z_design",
+        "attention_score_scale",
+        "attention_score_scale_value",
         "valid_rate",
         "eta_boundary_rate",
         "Z_screened",
@@ -1042,6 +1051,7 @@ def run_full_simulation(
                 _print_progress(f"Starting setting: setting={setting}, dist={dist}, T={T}, p={p}, q={q}")
                 _print_progress("Drawing DGP parameters")
                 params_true, stat_info = draw_simulation_dgp_params(k_params, p, eta_a=dgp_eta_a)
+                params_scale = _simulation_params_scale(p)
                 _print_progress("DGP parameters ready")
 
                 print("\n" + "=" * 80)
@@ -1059,6 +1069,7 @@ def run_full_simulation(
                 print(f"ray_num_cpus : {ray_num_cpus} ({'ray' if use_ray else 'sequential'})")
                 print(f"ray_debug    : {ray_debug}")
                 print(f"attention    : {attention_mode}" + (f", top_k={attention_top_k}" if attention_mode == "topk" else ""))
+                print(f"attention scale: log(p)={params_scale['eta_a']:.4f}")
                 if attention_mode == "topk":
                     cache_detail = f"mode={attention_cache_mode}"
                     if attention_cache_mode == "cluster":
@@ -1103,7 +1114,7 @@ def run_full_simulation(
                             q=q,
                             n_clusters=feature_clusters,
                             params_true=params_true,
-                            params_scale=PARAMS_SCALE,
+                            params_scale=params_scale,
                             max_tries=z_max_tries,
                             min_offdiag_std=SIMULATION_Z_MIN_OFFDIAG_STD,
                             max_abs_score=z_max_abs_score,
@@ -1132,7 +1143,7 @@ def run_full_simulation(
                             q=q,
                             n_clusters=feature_clusters,
                             params_true=params_true,
-                            params_scale=PARAMS_SCALE,
+                            params_scale=params_scale,
                             max_tries=z_max_tries,
                             min_offdiag_std=SIMULATION_Z_MIN_OFFDIAG_STD,
                             max_abs_score=z_max_abs_score,
@@ -1209,7 +1220,7 @@ def run_full_simulation(
                     dgp_attention = build_attention(
                         Z,
                         float(params_true["eta_a"]),
-                        PARAMS_SCALE["eta_a"],
+                        params_scale["eta_a"],
                         attention_mode=attention_mode,
                         top_k=attention_top_k,
                     )
@@ -1259,6 +1270,7 @@ def run_full_simulation(
                                 batch_size=batch_size,
                                 dense_threshold=dense_threshold,
                                 dgp_attention=dgp_attention_arg,
+                                params_scale=params_scale,
                                 attention_mode=attention_mode,
                                 attention_top_k=attention_top_k,
                                 attention_cache=attention_cache_arg,
@@ -1342,6 +1354,7 @@ def run_full_simulation(
                             batch_size=batch_size,
                             dense_threshold=dense_threshold,
                             dgp_attention=dgp_attention,
+                            params_scale=params_scale,
                             attention_mode=attention_mode,
                             attention_top_k=attention_top_k,
                             attention_cache=attention_cache,
@@ -1354,6 +1367,8 @@ def run_full_simulation(
                     row["setting_elapsed_sec"] = elapsed_setting
                     row["G"] = int(feature_clusters)
                     row["Z_design"] = "clustered"
+                    row["attention_score_scale"] = "log(p)"
+                    row["attention_score_scale_value"] = params_scale["eta_a"]
                     row["Z_screened"] = bool(screen_z)
                     row["Z_parallel"] = bool(Z_info.get("parallel", False))
                     row["Z_parallel_workers"] = Z_info.get("parallel_workers", math.nan)

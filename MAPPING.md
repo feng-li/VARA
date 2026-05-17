@@ -59,17 +59,17 @@ Current full-simulation DGP ranges are:
 
 | Paper symbol | Code parameter | Current draw |
 |---|---|---|
-| `gamma` | `eta_a` | fixed by `--dgp-eta-a`, default `2.0` |
+| `gamma` | `eta_a` | fixed by `--dgp-eta-a`, default `1.0` |
 | `alpha` | `beta` | uniform on `[-0.20, 0.20]` |
-| `beta` | `gamma_a` | uniform on `[0.35, 0.45]` |
+| `beta` | `gamma_a` | uniform on `[0.55, 0.75]` |
 | `sigma^2` | `sigma2` | uniform on `[0.50, 1.00]` |
 
 The stationarity check rescales code `beta` and `gamma_a` together only if
 needed.
 
 The manuscript simulation uses unit-normalized clustered feature vectors. The
-attention score is therefore the raw inner product `Z @ Z.T`; there is no extra
-division by `sqrt(q)` in the code path.
+attention score is `log(p) * (Z @ Z.T)`; there is no extra division by `sqrt(q)`
+in the code path.
 
 ## Practical Reading Guide
 
