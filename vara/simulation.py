@@ -36,9 +36,9 @@ from .two_stage import concentrated_eta_loglik, fit_all_components_two_stage
 
 PARAMS_SCALE = {"eta_a": 1.0}
 Z_CRIT_975 = 1.959963984540054
-LOW_P_BY_T = {100: 5, 200: 10, 500: 20}
+LOW_P_BY_T = {100: 8, 200: 12, 500: 16}
 HIGH_P_BY_T = {100: 100, 200: 300, 500: 1000}
-LOW_FEATURE_CLUSTERS_BY_T = {100: 2, 200: 2, 500: 2}
+LOW_FEATURE_CLUSTERS_BY_T = {100: 2, 200: 3, 500: 4}
 HIGH_FEATURE_CLUSTERS_BY_T = {100: 5, 200: 10, 500: 15}
 
 
