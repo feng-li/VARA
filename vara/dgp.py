@@ -270,6 +270,9 @@ def _score_Z_for_eta_approx(
     attention_effective_neighbors_mean = jnp.mean(eff_neighbors)
     attention_effective_neighbors_p95 = jnp.quantile(eff_neighbors, 0.95)
     attention_max_weight_mean = jnp.mean(jnp.max(Wa, axis=1))
+    gamma_a_x2_resid_std_mean = attention_x2_std_mean
+    gamma_a_x2_resid_std_min = attention_x2_std_min
+    gamma_a_x1_x2_corr_abs_mean = jnp.asarray(0.0)
 
     good_design = bool(
         (off_std > min_offdiag_std) and
@@ -286,6 +289,7 @@ def _score_Z_for_eta_approx(
     score_value = float(
         eta_info
         * jnp.maximum(attention_x2_std_mean, 1e-12)
+        * jnp.maximum(gamma_a_x2_resid_std_mean, 1e-12)
         / jnp.sqrt(jnp.maximum(attention_effective_neighbors_mean, 1.0))
     )
     return {
@@ -310,6 +314,9 @@ def _score_Z_for_eta_approx(
         "attention_effective_neighbors_p95": float(attention_effective_neighbors_p95),
         "attention_effective_neighbors_limit": float(effective_neighbor_limit) if effective_neighbor_limit is not None else float("nan"),
         "attention_max_weight_mean": float(attention_max_weight_mean),
+        "gamma_a_x2_resid_std_mean": float(gamma_a_x2_resid_std_mean),
+        "gamma_a_x2_resid_std_min": float(gamma_a_x2_resid_std_min),
+        "gamma_a_x1_x2_corr_abs_mean": float(gamma_a_x1_x2_corr_abs_mean),
         "selection_score": score_value,
         "accepted": good_design,
         "approximate": True,
@@ -423,6 +430,7 @@ def draw_good_Z_for_eta_approx(
             f"eta_info={selected_info['eta_info']:.4f}, "
             f"x2_std_mean={selected_info['attention_x2_std_mean']:.4f}, "
             f"x2_std_min_required={selected_info['attention_x2_std_effective_min']:.4f}, "
+            f"gamma_a_x2_resid_std={selected_info['gamma_a_x2_resid_std_mean']:.4f}, "
             f"eff_neighbors_mean={selected_info['attention_effective_neighbors_mean']:.1f}, "
             f"eff_neighbors_limit={selected_info['attention_effective_neighbors_limit']:.1f}, "
             f"approx_rows={selected_info['approx_rows']}, "
@@ -625,6 +633,16 @@ def draw_good_Z_for_eta(
         attention_effective_neighbors_mean = jnp.mean(eff_neighbors)
         attention_effective_neighbors_p95 = jnp.quantile(eff_neighbors, 0.95)
         attention_max_weight_mean = jnp.mean(jnp.max(Wa, axis=1))
+        x1_var = jnp.diag(Gamma0)
+        x2_var = jnp.sum((Wa @ Gamma0) * Wa, axis=1)
+        x1_x2_cov = jnp.sum(Wa * Gamma0, axis=1)
+        x2_resid_var = x2_var - x1_x2_cov ** 2 / jnp.maximum(x1_var, 1e-12)
+        x2_resid_std = jnp.sqrt(jnp.maximum(x2_resid_var, 0.0))
+        gamma_a_x2_resid_std_mean = jnp.mean(x2_resid_std)
+        gamma_a_x2_resid_std_min = jnp.min(x2_resid_std)
+        gamma_a_x1_x2_corr_abs_mean = jnp.mean(
+            jnp.abs(x1_x2_cov) / jnp.sqrt(jnp.maximum(x1_var * x2_var, 1e-12))
+        )
 
         good_design = bool(
             (off_std > min_offdiag_std) and
@@ -660,6 +678,9 @@ def draw_good_Z_for_eta(
             "attention_effective_neighbors_p95": float(attention_effective_neighbors_p95),
             "attention_effective_neighbors_limit": float(effective_neighbor_limit) if effective_neighbor_limit is not None else float("nan"),
             "attention_max_weight_mean": float(attention_max_weight_mean),
+            "gamma_a_x2_resid_std_mean": float(gamma_a_x2_resid_std_mean),
+            "gamma_a_x2_resid_std_min": float(gamma_a_x2_resid_std_min),
+            "gamma_a_x1_x2_corr_abs_mean": float(gamma_a_x1_x2_corr_abs_mean),
             "accepted": good_design,
             "approximate": False,
             "attention_mode": attention_mode,
@@ -669,6 +690,7 @@ def draw_good_Z_for_eta(
         score_value = float(
             eta_info
             * jnp.maximum(attention_x2_std_mean, 1e-12)
+            * jnp.maximum(gamma_a_x2_resid_std_mean, 1e-12)
             / jnp.sqrt(jnp.maximum(attention_effective_neighbors_mean, 1.0))
         )
         info["selection_score"] = score_value
@@ -694,6 +716,7 @@ def draw_good_Z_for_eta(
             f"eta_signal={selected_info['eta_signal']:.4f}, "
             f"eta_info={selected_info['eta_info']:.4f}, "
             f"x2_std_mean={selected_info['attention_x2_std_mean']:.4f}, "
+            f"gamma_a_x2_resid_std={selected_info['gamma_a_x2_resid_std_mean']:.4f}, "
             f"eff_neighbors_mean={selected_info['attention_effective_neighbors_mean']:.1f}, "
             f"eff_neighbors_limit={selected_info['attention_effective_neighbors_limit']:.1f}"
         )

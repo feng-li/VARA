@@ -516,6 +516,8 @@ class ScriptHelperTests(unittest.TestCase):
                 "Z_attention_x2_std_effective_min": 0.02,
                 "Z_attention_effective_neighbors_mean": 500.0,
                 "Z_attention_effective_neighbors_limit": 1000.0,
+                "Z_gamma_a_x2_resid_std_mean": 0.03,
+                "Z_gamma_a_x1_x2_corr_abs_mean": 0.1,
                 "DGP_attention_precomputed": True,
                 "TopK_attention_cached": False,
                 "TopK_cache_recall_pos_mean": float("nan"),
@@ -551,6 +553,8 @@ class ScriptHelperTests(unittest.TestCase):
                 "Z_attention_x2_std_effective_min": 0.02,
                 "Z_attention_effective_neighbors_mean": 600.0,
                 "Z_attention_effective_neighbors_limit": 1000.0,
+                "Z_gamma_a_x2_resid_std_mean": 0.04,
+                "Z_gamma_a_x1_x2_corr_abs_mean": 0.2,
                 "DGP_attention_precomputed": True,
                 "TopK_attention_cached": False,
                 "TopK_cache_recall_pos_mean": float("nan"),
@@ -570,6 +574,8 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertIn("Z_attention_x2_std_mean", tables["eta_diagnostics"].columns)
         self.assertIn("Z_attention_x2_std_effective_min", tables["eta_diagnostics"].columns)
         self.assertIn("Z_attention_effective_neighbors_limit", tables["eta_diagnostics"].columns)
+        self.assertIn("Z_gamma_a_x2_resid_std_mean", tables["eta_diagnostics"].columns)
+        self.assertIn("Z_gamma_a_x1_x2_corr_abs_mean", tables["eta_diagnostics"].columns)
         self.assertIn("Z_approximate", tables["eta_diagnostics"].columns)
         self.assertIn("Z_approx_rows", tables["eta_diagnostics"].columns)
         self.assertIn("DGP_attention_precomputed", tables["eta_diagnostics"].columns)

@@ -475,6 +475,9 @@ def make_simulation_reporting_tables(summary: pd.DataFrame, setup: pd.DataFrame)
         "Z_attention_effective_neighbors_p95",
         "Z_attention_effective_neighbors_limit",
         "Z_attention_max_weight_mean",
+        "Z_gamma_a_x2_resid_std_mean",
+        "Z_gamma_a_x2_resid_std_min",
+        "Z_gamma_a_x1_x2_corr_abs_mean",
         "Z_selection_score",
         "DGP_attention_precomputed",
         "TopK_attention_cached",
@@ -742,6 +745,7 @@ def _print_selected_z_info(info: Dict[str, Any]) -> None:
         f"eta_info={info.get('eta_info', math.nan):.4f}, "
         f"x2_std_mean={info.get('attention_x2_std_mean', math.nan):.4f}, "
         f"x2_std_min_required={info.get('attention_x2_std_effective_min', math.nan):.4f}, "
+        f"gamma_a_x2_resid_std={info.get('gamma_a_x2_resid_std_mean', math.nan):.4f}, "
         f"eff_neighbors_mean={info.get('attention_effective_neighbors_mean', math.nan):.1f}, "
         f"eff_neighbors_limit={info.get('attention_effective_neighbors_limit', math.nan):.1f}"
         f"{suffix}"
@@ -1397,6 +1401,9 @@ def run_full_simulation(
                     row["Z_attention_effective_neighbors_p95"] = Z_info.get("attention_effective_neighbors_p95", math.nan)
                     row["Z_attention_effective_neighbors_limit"] = Z_info.get("attention_effective_neighbors_limit", math.nan)
                     row["Z_attention_max_weight_mean"] = Z_info.get("attention_max_weight_mean", math.nan)
+                    row["Z_gamma_a_x2_resid_std_mean"] = Z_info.get("gamma_a_x2_resid_std_mean", math.nan)
+                    row["Z_gamma_a_x2_resid_std_min"] = Z_info.get("gamma_a_x2_resid_std_min", math.nan)
+                    row["Z_gamma_a_x1_x2_corr_abs_mean"] = Z_info.get("gamma_a_x1_x2_corr_abs_mean", math.nan)
                     row["Z_selection_score"] = Z_info.get("selection_score", math.nan)
                     row["DGP_attention_precomputed"] = dgp_attention is not None
                     row["TopK_attention_cached"] = attention_cache is not None
