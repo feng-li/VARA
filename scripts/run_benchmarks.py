@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +32,9 @@ BASE_SUFFIX = "All"
 DETAILED_CODE_DEPTH = 3
 STATSFORECAST_MODELS = {"naive", "seasonal_naive", "drift", "auto_ets", "auto_arima"}
 STATSMODELS_MODELS = {"ar1", "var1"}
-ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS
+NEURALFORECAST_MODELS = {"deepar"}
+PANEL_MODELS = {"var1", "deepar"}
+ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS | NEURALFORECAST_MODELS
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1"
 STATSFORECAST_N_JOBS = 1
 
@@ -81,6 +84,8 @@ def _parse_model_names(models: str | list[str]) -> list[str]:
         "ar_1": "ar1",
         "var": "var1",
         "var_1": "var1",
+        "deep_ar": "deepar",
+        "neural_deepar": "deepar",
     }
     out = []
     for name in names:
@@ -119,6 +124,85 @@ def _wide_to_statsforecast_long(wide: pd.DataFrame, series_cols: list[str]) -> p
     long["ds"] = pd.to_datetime(long["ds"])
     long["y"] = long["y"].astype(float)
     return long
+
+
+def _load_deepar():
+    try:
+        from neuralforecast import NeuralForecast
+        from neuralforecast.models import DeepAR
+    except Exception as exc:
+        raise RuntimeError(
+            "DeepAR benchmark requires neuralforecast and its PyTorch dependencies. "
+            "The current import failed; install/repair neuralforecast dependencies "
+            f"before running --models deepar. Original error: {exc!r}"
+        ) from exc
+    return NeuralForecast, DeepAR
+
+
+def _deepar_input_size(h: int, season_length: int, requested: int) -> int:
+    if requested > 0:
+        return int(requested)
+    return int(max(3 * h, 2 * season_length, 1))
+
+
+def _forecast_deepar_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+    season_length: int,
+    freq: str,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
+) -> pd.DataFrame:
+    NeuralForecast, DeepAR = _load_deepar()
+    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+    input_size = _deepar_input_size(h, season_length, deepar_input_size)
+    model = DeepAR(
+        h=h,
+        input_size=input_size,
+        lstm_n_layers=int(deepar_lstm_layers),
+        lstm_hidden_size=int(deepar_hidden_size),
+        lstm_dropout=0.0,
+        max_steps=int(deepar_max_steps),
+        learning_rate=float(deepar_learning_rate),
+        batch_size=int(deepar_batch_size),
+        scaler_type=str(deepar_scaler_type),
+        random_seed=int(deepar_random_seed),
+        alias="deepar",
+        accelerator="cpu",
+        devices=1,
+        enable_progress_bar=False,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        logger=False,
+    )
+    nf = NeuralForecast(models=[model], freq=freq)
+    train_long = _wide_to_statsforecast_long(train_wide, series_cols)
+    nf.fit(df=train_long, verbose=False)
+    out = nf.predict(verbose=False).rename(columns={"unique_id": "series_id", "ds": "date"})
+
+    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
+    expected = pd.MultiIndex.from_product(
+        [series_cols, dates], names=["series_id", "date"]
+    ).to_frame(index=False)
+    out = expected.merge(out.loc[:, ["series_id", "date", "deepar"]], on=["series_id", "date"], how="left")
+    if out["deepar"].isna().any():
+        raise RuntimeError("DeepAR did not return forecasts for all requested series/date pairs.")
+    return out
 
 
 def _forecast_statsforecast_once(
@@ -196,6 +280,14 @@ def _forecast_once(
     h: int,
     n_jobs: int,
     forecast_dates: pd.Series | list[pd.Timestamp],
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
 ) -> pd.DataFrame:
     frames = []
     statsforecast_names = [name for name in model_names if name in STATSFORECAST_MODELS]
@@ -215,6 +307,25 @@ def _forecast_once(
         frames.append(_forecast_ar1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
     if "var1" in model_names:
         frames.append(_forecast_var1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
+    if "deepar" in model_names:
+        frames.append(
+            _forecast_deepar_once(
+                train_wide,
+                series_cols,
+                forecast_dates=forecast_dates,
+                h=h,
+                season_length=season_length,
+                freq=freq,
+                deepar_input_size=deepar_input_size,
+                deepar_max_steps=deepar_max_steps,
+                deepar_hidden_size=deepar_hidden_size,
+                deepar_lstm_layers=deepar_lstm_layers,
+                deepar_batch_size=deepar_batch_size,
+                deepar_learning_rate=deepar_learning_rate,
+                deepar_scaler_type=deepar_scaler_type,
+                deepar_random_seed=deepar_random_seed,
+            )
+        )
 
     if not frames:
         raise ValueError("No forecast models selected.")
@@ -234,6 +345,14 @@ def _forecast_recursive(
     season_length: int,
     freq: str,
     n_jobs: int,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
 ) -> pd.DataFrame:
     train = wide.iloc[: len(wide) - horizon]
     out = _forecast_once(
@@ -245,6 +364,14 @@ def _forecast_recursive(
         h=horizon,
         n_jobs=n_jobs,
         forecast_dates=wide["date"].iloc[-horizon:],
+        deepar_input_size=deepar_input_size,
+        deepar_max_steps=deepar_max_steps,
+        deepar_hidden_size=deepar_hidden_size,
+        deepar_lstm_layers=deepar_lstm_layers,
+        deepar_batch_size=deepar_batch_size,
+        deepar_learning_rate=deepar_learning_rate,
+        deepar_scaler_type=deepar_scaler_type,
+        deepar_random_seed=deepar_random_seed,
     )
     return out
 
@@ -258,6 +385,14 @@ def _forecast_rolling_origin(
     season_length: int,
     freq: str,
     n_jobs: int,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
 ) -> pd.DataFrame:
     rows = []
     for step in range(horizon):
@@ -272,6 +407,14 @@ def _forecast_rolling_origin(
             h=1,
             n_jobs=n_jobs,
             forecast_dates=[wide["date"].iloc[origin_end]],
+            deepar_input_size=deepar_input_size,
+            deepar_max_steps=deepar_max_steps,
+            deepar_hidden_size=deepar_hidden_size,
+            deepar_lstm_layers=deepar_lstm_layers,
+            deepar_batch_size=deepar_batch_size,
+            deepar_learning_rate=deepar_learning_rate,
+            deepar_scaler_type=deepar_scaler_type,
+            deepar_random_seed=deepar_random_seed,
         )
         out.insert(0, "origin", step + 1)
         out.insert(1, "train_end", wide["date"].iloc[origin_end - 1])
@@ -302,6 +445,14 @@ def _forecast_single_model(
     season_length: int,
     freq: str,
     n_jobs: int,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
 ) -> pd.DataFrame:
     if forecast_mode == "recursive":
         return _forecast_recursive(
@@ -312,6 +463,14 @@ def _forecast_single_model(
             season_length=season_length,
             freq=freq,
             n_jobs=n_jobs,
+            deepar_input_size=deepar_input_size,
+            deepar_max_steps=deepar_max_steps,
+            deepar_hidden_size=deepar_hidden_size,
+            deepar_lstm_layers=deepar_lstm_layers,
+            deepar_batch_size=deepar_batch_size,
+            deepar_learning_rate=deepar_learning_rate,
+            deepar_scaler_type=deepar_scaler_type,
+            deepar_random_seed=deepar_random_seed,
         )
     return _forecast_rolling_origin(
         wide,
@@ -321,6 +480,14 @@ def _forecast_single_model(
         season_length=season_length,
         freq=freq,
         n_jobs=n_jobs,
+        deepar_input_size=deepar_input_size,
+        deepar_max_steps=deepar_max_steps,
+        deepar_hidden_size=deepar_hidden_size,
+        deepar_lstm_layers=deepar_lstm_layers,
+        deepar_batch_size=deepar_batch_size,
+        deepar_learning_rate=deepar_learning_rate,
+        deepar_scaler_type=deepar_scaler_type,
+        deepar_random_seed=deepar_random_seed,
     )
 
 
@@ -334,6 +501,14 @@ def _forecast_single_model_remote(
     season_length: int,
     freq: str,
     n_jobs: int,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
     ray_debug: bool,
 ) -> tuple[str, pd.DataFrame]:
     if ray_debug:
@@ -348,6 +523,14 @@ def _forecast_single_model_remote(
         season_length=season_length,
         freq=freq,
         n_jobs=n_jobs,
+        deepar_input_size=deepar_input_size,
+        deepar_max_steps=deepar_max_steps,
+        deepar_hidden_size=deepar_hidden_size,
+        deepar_lstm_layers=deepar_lstm_layers,
+        deepar_batch_size=deepar_batch_size,
+        deepar_learning_rate=deepar_learning_rate,
+        deepar_scaler_type=deepar_scaler_type,
+        deepar_random_seed=deepar_random_seed,
     )
     if ray_debug:
         _print_progress(f"[Ray benchmark done] model={model_name}, elapsed_sec={time.time() - start:.2f}")
@@ -364,6 +547,14 @@ def _forecast_univariate_series_remote(
     season_length: int,
     freq: str,
     n_jobs: int,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
     ray_debug: bool,
 ) -> tuple[str, str, pd.DataFrame]:
     if ray_debug:
@@ -378,6 +569,14 @@ def _forecast_univariate_series_remote(
         season_length=season_length,
         freq=freq,
         n_jobs=n_jobs,
+        deepar_input_size=deepar_input_size,
+        deepar_max_steps=deepar_max_steps,
+        deepar_hidden_size=deepar_hidden_size,
+        deepar_lstm_layers=deepar_lstm_layers,
+        deepar_batch_size=deepar_batch_size,
+        deepar_learning_rate=deepar_learning_rate,
+        deepar_scaler_type=deepar_scaler_type,
+        deepar_random_seed=deepar_random_seed,
     )
     if ray_debug:
         _print_progress(
@@ -398,10 +597,18 @@ def _forecast_models_with_ray(
     freq: str,
     n_jobs: int,
     max_cpus_per_task: int,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
     ray_debug: bool,
 ) -> pd.DataFrame:
-    univariate_models = [model_name for model_name in model_names if model_name != "var1"]
-    panel_models = [model_name for model_name in model_names if model_name == "var1"]
+    univariate_models = [model_name for model_name in model_names if model_name not in PANEL_MODELS]
+    panel_models = [model_name for model_name in model_names if model_name in PANEL_MODELS]
     remote_univariate_task = ray.remote(num_cpus=max_cpus_per_task)(_forecast_univariate_series_remote)
     remote_panel_task = ray.remote(num_cpus=max_cpus_per_task)(_forecast_single_model_remote)
     wide_arg = ray.put(wide)
@@ -419,6 +626,14 @@ def _forecast_models_with_ray(
                 season_length=season_length,
                 freq=freq,
                 n_jobs=n_jobs,
+                deepar_input_size=deepar_input_size,
+                deepar_max_steps=deepar_max_steps,
+                deepar_hidden_size=deepar_hidden_size,
+                deepar_lstm_layers=deepar_lstm_layers,
+                deepar_batch_size=deepar_batch_size,
+                deepar_learning_rate=deepar_learning_rate,
+                deepar_scaler_type=deepar_scaler_type,
+                deepar_random_seed=deepar_random_seed,
                 ray_debug=ray_debug,
             )
             futures.append(ref)
@@ -434,6 +649,14 @@ def _forecast_models_with_ray(
             season_length=season_length,
             freq=freq,
             n_jobs=n_jobs,
+            deepar_input_size=deepar_input_size,
+            deepar_max_steps=deepar_max_steps,
+            deepar_hidden_size=deepar_hidden_size,
+            deepar_lstm_layers=deepar_lstm_layers,
+            deepar_batch_size=deepar_batch_size,
+            deepar_learning_rate=deepar_learning_rate,
+            deepar_scaler_type=deepar_scaler_type,
+            deepar_random_seed=deepar_random_seed,
             ray_debug=ray_debug,
         )
         futures.append(ref)
@@ -548,6 +771,14 @@ def run_tourism_benchmark(
     ray_num_cpus: int = 1,
     max_cpus_per_task: int = 1,
     ray_debug: bool = False,
+    deepar_input_size: int = 0,
+    deepar_max_steps: int = 200,
+    deepar_hidden_size: int = 64,
+    deepar_lstm_layers: int = 2,
+    deepar_batch_size: int = 32,
+    deepar_learning_rate: float = 1e-3,
+    deepar_scaler_type: str = "robust",
+    deepar_random_seed: int = 2026,
 ) -> pd.DataFrame:
     if forecast_mode not in {"recursive", "rolling-origin"}:
         raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
@@ -606,6 +837,14 @@ def run_tourism_benchmark(
                 freq=freq,
                 n_jobs=STATSFORECAST_N_JOBS,
                 max_cpus_per_task=max_cpus_per_task,
+                deepar_input_size=deepar_input_size,
+                deepar_max_steps=deepar_max_steps,
+                deepar_hidden_size=deepar_hidden_size,
+                deepar_lstm_layers=deepar_lstm_layers,
+                deepar_batch_size=deepar_batch_size,
+                deepar_learning_rate=deepar_learning_rate,
+                deepar_scaler_type=deepar_scaler_type,
+                deepar_random_seed=deepar_random_seed,
                 ray_debug=ray_debug,
             )
         elif forecast_mode == "recursive":
@@ -617,6 +856,14 @@ def run_tourism_benchmark(
                 season_length=season_length,
                 freq=freq,
                 n_jobs=STATSFORECAST_N_JOBS,
+                deepar_input_size=deepar_input_size,
+                deepar_max_steps=deepar_max_steps,
+                deepar_hidden_size=deepar_hidden_size,
+                deepar_lstm_layers=deepar_lstm_layers,
+                deepar_batch_size=deepar_batch_size,
+                deepar_learning_rate=deepar_learning_rate,
+                deepar_scaler_type=deepar_scaler_type,
+                deepar_random_seed=deepar_random_seed,
             )
         else:
             long_forecasts = _forecast_rolling_origin(
@@ -627,6 +874,14 @@ def run_tourism_benchmark(
                 season_length=season_length,
                 freq=freq,
                 n_jobs=STATSFORECAST_N_JOBS,
+                deepar_input_size=deepar_input_size,
+                deepar_max_steps=deepar_max_steps,
+                deepar_hidden_size=deepar_hidden_size,
+                deepar_lstm_layers=deepar_lstm_layers,
+                deepar_batch_size=deepar_batch_size,
+                deepar_learning_rate=deepar_learning_rate,
+                deepar_scaler_type=deepar_scaler_type,
+                deepar_random_seed=deepar_random_seed,
             )
 
         if clip_nonnegative:
@@ -659,7 +914,17 @@ def run_tourism_benchmark(
         long_forecasts.to_csv(output_dir / "tourism_benchmark_forecasts_long.csv", index=False)
         test_wide.to_csv(output_dir / "tourism_test.csv", index=False)
         for model in model_names:
-            forecast_wide = _wide_model_frame(long_forecasts, model, series_cols)
+            forecast_wide_raw = _wide_model_frame(long_forecasts, model, series_cols)
+            forecast_wide = pd.concat(
+                [
+                    forecast_wide_raw.loc[:, ["date"]].reset_index(drop=True),
+                    pd.DataFrame(
+                        forecast_wide_raw.loc[:, series_cols].to_numpy(dtype=float),
+                        columns=series_cols,
+                    ),
+                ],
+                axis=1,
+            )
             forecast_wide.to_csv(output_dir / f"tourism_forecast_{model}.csv", index=False)
             error_wide = forecast_wide.copy()
             error_wide.loc[:, series_cols] = forecast_wide.loc[:, series_cols].to_numpy(dtype=float) - test_wide.loc[:, series_cols].to_numpy(dtype=float)
@@ -684,6 +949,14 @@ def run_tourism_benchmark(
             "ray_num_cpus": int(ray_num_cpus),
             "max_cpus_per_task": int(max_cpus_per_task),
             "ray_debug": bool(ray_debug),
+            "deepar_input_size": int(deepar_input_size),
+            "deepar_max_steps": int(deepar_max_steps),
+            "deepar_hidden_size": int(deepar_hidden_size),
+            "deepar_lstm_layers": int(deepar_lstm_layers),
+            "deepar_batch_size": int(deepar_batch_size),
+            "deepar_learning_rate": float(deepar_learning_rate),
+            "deepar_scaler_type": str(deepar_scaler_type),
+            "deepar_random_seed": int(deepar_random_seed),
         })
         return summary
     finally:
@@ -738,6 +1011,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ray-num-cpus", type=int, default=1)
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
     parser.add_argument(
+        "--deepar-input-size",
+        type=int,
+        default=0,
+        help="DeepAR context length; 0 uses max(3*h, 2*season_length).",
+    )
+    parser.add_argument("--deepar-max-steps", type=int, default=200)
+    parser.add_argument("--deepar-hidden-size", type=int, default=64)
+    parser.add_argument("--deepar-lstm-layers", type=int, default=2)
+    parser.add_argument("--deepar-batch-size", type=int, default=32)
+    parser.add_argument("--deepar-learning-rate", type=float, default=1e-3)
+    parser.add_argument("--deepar-scaler-type", type=str, default="robust")
+    parser.add_argument("--deepar-random-seed", type=int, default=2026)
+    parser.add_argument(
         "--ray-debug",
         action="store_true",
         help="Print Ray benchmark model task start/end messages.",
@@ -764,6 +1050,14 @@ def main() -> None:
         ray_num_cpus=args.ray_num_cpus,
         max_cpus_per_task=args.max_cpus_per_task,
         ray_debug=args.ray_debug,
+        deepar_input_size=args.deepar_input_size,
+        deepar_max_steps=args.deepar_max_steps,
+        deepar_hidden_size=args.deepar_hidden_size,
+        deepar_lstm_layers=args.deepar_lstm_layers,
+        deepar_batch_size=args.deepar_batch_size,
+        deepar_learning_rate=args.deepar_learning_rate,
+        deepar_scaler_type=args.deepar_scaler_type,
+        deepar_random_seed=args.deepar_random_seed,
     )
     print("Tourism benchmark summary:")
     print(summary.to_string(index=False))
