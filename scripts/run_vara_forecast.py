@@ -18,7 +18,7 @@ import pandas as pd
 from vara.forecast import VARAForecaster
 from vara.forecast_data import load_panel_data
 from vara.forecast_metrics import forecast_metric_tables
-from vara.series_features import META_COLUMNS, clean_feature_frame, extract_series_tsfeatures
+from vara.series_features import META_COLUMNS, clean_feature_frame, extract_series_tsfeatures, load_series_feature_matrix
 
 BASE_SUFFIX = "All"
 DETAILED_CODE_DEPTH = 3
@@ -501,7 +501,12 @@ def _tourism_feature_matrix(
     seasonal_lag: int,
     feature_freq: int,
     feature_functions: str | Sequence[str],
+    feature_path: Path | None = None,
 ) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    if feature_source == "file":
+        if feature_path is None:
+            raise ValueError("feature_path must be provided when feature_source='file'.")
+        return load_series_feature_matrix(feature_path, series_ids, standardize_output=True)
     if feature_source == "tsfeatures":
         return _tourism_tsfeature_matrix(
             wide,
@@ -552,7 +557,7 @@ def _tourism_feature_matrix(
         if not np.isfinite(Z).all():
             raise ValueError("Hybrid tourism feature matrix contains non-finite values.")
         return Z, feature_df, feature_cols
-    raise ValueError("feature_source must be 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
+    raise ValueError("feature_source must be 'file', 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
 
 
 def _new_forecaster(
@@ -578,6 +583,8 @@ def _feature_function_label(feature_functions: str | Sequence[str]) -> str:
 
 
 def _feature_transform_label(feature_source: str, y_transform: str) -> str:
+    if feature_source == "file":
+        return "prepared_feature_file"
     if feature_source == "tourism":
         return "raw_tourism_panel"
     if feature_source == "seasonal-corr":
@@ -590,6 +597,8 @@ def _feature_transform_label(feature_source: str, y_transform: str) -> str:
 
 
 def _feature_function_metric(feature_source: str, feature_functions: str | Sequence[str]) -> str:
+    if feature_source == "file":
+        return "prepared_feature_file"
     if feature_source == "tourism":
         return TOURISM_FEATURE_FUNCTIONS
     if feature_source == "seasonal-corr":
@@ -620,6 +629,7 @@ def run_vara_forecast(
     feature_freq: int = 12,
     feature_functions: str | Sequence[str] = TOURISM_TSFEATURES,
     feature_source: str = "tsfeatures",
+    feature_path: Path | None = None,
     forecast_mode: str = "recursive",
     feature_update_policy: str = "exact",
     feature_update_interval: int = 1,
@@ -634,12 +644,15 @@ def run_vara_forecast(
         raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
     if residual_transform not in {"center", "standardize"}:
         raise ValueError("residual_transform must be 'center' or 'standardize'.")
-    if feature_source not in {"tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"}:
-        raise ValueError("feature_source must be 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
+    if feature_source not in {"file", "tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"}:
+        raise ValueError("feature_source must be 'file', 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
     if attention_mode not in {"dense", "topk", "score", "score-topk"}:
         raise ValueError("attention_mode must be 'dense', 'topk', 'score', or 'score-topk'.")
     if attention_mode in {"topk", "score-topk"} and attention_top_k is None:
         raise ValueError("attention_top_k must be provided when attention_mode uses top-k.")
+    input_feature_path = feature_path
+    if feature_source == "file" and input_feature_path is None:
+        raise ValueError("feature_path must be provided when feature_source='file'.")
     if feature_source == "seasonal-predictive" and attention_mode not in {"score", "score-topk"}:
         raise ValueError("feature_source='seasonal-predictive' requires attention_mode='score' or 'score-topk'.")
     if feature_source != "seasonal-predictive" and attention_mode in {"score", "score-topk"}:
@@ -696,6 +709,7 @@ def run_vara_forecast(
             seasonal_lag=seasonal_lag,
             feature_freq=feature_freq,
             feature_functions=feature_functions,
+            feature_path=input_feature_path,
         )
 
         forecaster = _new_forecaster(grid_size, ridge, attention_mode, attention_top_k)
@@ -755,6 +769,7 @@ def run_vara_forecast(
                     seasonal_lag=seasonal_lag,
                     feature_freq=feature_freq,
                     feature_functions=feature_functions,
+                    feature_path=input_feature_path,
                 )
                 cached_Z = Z
                 cached_feature_df = feature_df.copy()
@@ -821,8 +836,8 @@ def run_vara_forecast(
     mae = float(np.mean(np.abs(errors)))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    feature_path = output_dir / "tourism_attention_features.csv"
-    pd.concat(feature_frames, ignore_index=True, sort=False).to_csv(feature_path, index=False)
+    attention_feature_output_path = output_dir / "tourism_attention_features.csv"
+    pd.concat(feature_frames, ignore_index=True, sort=False).to_csv(attention_feature_output_path, index=False)
     if rolling_diagnostics:
         pd.DataFrame(rolling_diagnostics).to_csv(output_dir / "tourism_rolling_origin_diagnostics.csv", index=False)
 
@@ -903,7 +918,8 @@ def run_vara_forecast(
         "seasonal_lag": int(seasonal_lag),
         "model_scale": fitted_y_transform["model_scale"],
         "attention_feature_source": feature_source,
-        "attention_feature_file": str(feature_path),
+        "attention_feature_file": str(attention_feature_output_path),
+        "attention_feature_input_file": "" if input_feature_path is None else str(input_feature_path),
         "attention_feature_transform": _feature_transform_label(feature_source, y_transform),
         "attention_feature_freq": int(feature_freq),
         "attention_feature_functions": _feature_function_metric(feature_source, feature_functions),
@@ -992,8 +1008,14 @@ def main() -> None:
         "--feature-source",
         type=str,
         default="tsfeatures",
-        choices=["tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"],
+        choices=["file", "tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"],
         help="Feature source for attention construction.",
+    )
+    parser.add_argument(
+        "--feature-path",
+        type=Path,
+        default=None,
+        help="Prepared series-level feature CSV/parquet used when --feature-source file.",
     )
     parser.add_argument(
         "--feature-update-policy",
@@ -1042,6 +1064,7 @@ def main() -> None:
         feature_freq=args.feature_freq,
         feature_functions=args.feature_functions,
         feature_source=args.feature_source,
+        feature_path=args.feature_path,
         forecast_mode=args.forecast_mode,
         feature_update_policy=args.feature_update_policy,
         feature_update_interval=args.feature_update_interval,

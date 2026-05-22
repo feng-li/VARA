@@ -13,6 +13,16 @@ from .stationarity import PANEL_TRANSFORMS, transform_panel
 
 
 META_COLUMNS = ("series_id", "transform", "n_obs", "train_start", "train_end")
+EXTERNAL_FEATURE_META_COLUMNS = (
+    *META_COLUMNS,
+    "item_id",
+    "dept_id",
+    "cat_id",
+    "store_id",
+    "state_id",
+    "d",
+    "wm_yr_wk",
+)
 
 
 def _series_code(series_id: str, suffix: str | None = None) -> str:
@@ -222,3 +232,82 @@ def extract_series_tsfeatures_csv(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     features.to_csv(output_path, index=False)
     return features
+
+
+def _read_feature_table(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in {".parquet", ".pq"}:
+        return pd.read_parquet(path)
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    raise ValueError(f"Unsupported feature file suffix {path.suffix!r}; use CSV or parquet.")
+
+
+def load_series_feature_matrix(
+    feature_path: Path,
+    series_ids: Sequence[str],
+    *,
+    series_id_col: str = "series_id",
+    standardize_output: bool = True,
+    meta_columns: Sequence[str] = EXTERNAL_FEATURE_META_COLUMNS,
+) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    """Load a prepared series-level feature table and align it to ``series_ids``."""
+    features = _read_feature_table(feature_path)
+    if series_id_col not in features.columns:
+        raise ValueError(f"Feature file must contain {series_id_col!r}.")
+    if series_id_col != "series_id":
+        features = features.rename(columns={series_id_col: "series_id"})
+
+    features = features.copy()
+    features["series_id"] = features["series_id"].astype(str)
+    duplicate = features["series_id"].duplicated()
+    if duplicate.any():
+        example = features.loc[duplicate, "series_id"].head(5).tolist()
+        raise ValueError(f"Feature file has duplicate series_id rows, e.g. {example}")
+
+    requested = [str(series_id) for series_id in series_ids]
+    aligned = features.set_index("series_id").reindex(requested)
+    missing = [series_id for series_id, is_missing in zip(requested, aligned.isna().all(axis=1), strict=True) if bool(is_missing)]
+    if missing:
+        raise ValueError(f"Feature file is missing selected series ids, e.g. {missing[:5]}")
+    aligned = aligned.reset_index()
+
+    meta_set = set(meta_columns)
+    meta_cols = [col for col in aligned.columns if col in meta_set]
+    raw_feature_cols = [col for col in aligned.columns if col not in meta_set]
+    if not raw_feature_cols:
+        raise ValueError("Feature file contains no usable feature columns after removing metadata columns.")
+
+    block = aligned.loc[:, raw_feature_cols].copy()
+    for col in block.columns:
+        if pd.api.types.is_bool_dtype(block[col]):
+            block[col] = block[col].astype(float)
+
+    categorical_cols = [
+        col for col in block.columns
+        if pd.api.types.is_object_dtype(block[col]) or pd.api.types.is_categorical_dtype(block[col])
+    ]
+    if categorical_cols:
+        block = pd.get_dummies(block, columns=categorical_cols, dtype=float)
+
+    for col in block.columns:
+        block[col] = pd.to_numeric(block[col], errors="coerce")
+
+    feature_df = pd.concat([aligned.loc[:, meta_cols], block], axis=1)
+    feature_df = clean_feature_frame(
+        feature_df,
+        standardize_output=standardize_output,
+        meta_columns=meta_columns,
+    )
+    feature_cols = [
+        col for col in feature_df.columns
+        if col not in meta_set and pd.api.types.is_numeric_dtype(feature_df[col])
+    ]
+    if not feature_cols:
+        raise ValueError("Feature file produced no numeric feature columns.")
+    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
+    if not np.isfinite(Z).all():
+        raise ValueError("Feature file produced non-finite feature values after cleaning.")
+    return Z, feature_df, feature_cols
+
