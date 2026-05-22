@@ -87,3 +87,27 @@ The converter writes parquet files with this schema:
 | `item_id`, `dept_id`, `cat_id`, `store_id`, `state_id` | M5 hierarchy metadata. |
 
 Full M5 outputs are large because they contain about 30,490 series by 1,913 or 1,941 days. For smoke tests, use `--max-series N`; for full forecasting, start with filtered subsets before running large panel models.
+
+## Prepared attention feature tables
+
+VARA can use a precomputed series-level feature table for attention construction:
+
+```bash
+python scripts/run_vara_forecast.py \
+  --feature-source file \
+  --feature-path path/to/features.parquet
+```
+
+The feature table must contain one row per selected `series_id`. The loader aligns rows to the selected forecast series, one-hot encodes non-metadata categorical feature columns, cleans non-finite numeric values, and standardizes numeric features before constructing the attention matrix.
+
+For M5, create this table with:
+
+```bash
+python scripts/prepare_m5_attention_features.py \
+  --input-dir data/m5 \
+  --out data/m5/m5_attention_features_CA_1.parquet \
+  --store-id CA_1 \
+  --holdout 28
+```
+
+M5 attention features include hierarchy dummies, demand summaries, day-of-week response, SNAP/event/weekend response, and price summaries computed before the holdout window.
