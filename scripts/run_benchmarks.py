@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run forecasting benchmarks on the tourism dataset."""
+"""Run forecasting benchmarks on panel time-series data."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from statsforecast.models import AutoARIMA, AutoETS, Naive, RandomWalkWithDrift,
 from statsmodels.tsa.ar_model import AutoReg
 from statsmodels.tsa.api import VAR
 
+from vara.forecast_data import load_panel_data
 from vara.forecast_metrics import forecast_metric_tables
 
 try:
@@ -980,6 +981,10 @@ def run_tourism_benchmark(
     data_dir: Path,
     output_dir: Path,
     data_path: Path | None = None,
+    data_format: str = "auto",
+    date_col: str = "date",
+    series_col: str = "series_id",
+    value_col: str = "value",
     models: str | list[str] = DEFAULT_MODELS,
     forecast_mode: str = "rolling-origin",
     horizon: int = 12,
@@ -1016,8 +1021,13 @@ def run_tourism_benchmark(
     input_path = data_path if data_path is not None else data_dir / "tourism.csv"
     series_suffix = None if series_suffix == "" else series_suffix
 
-    wide = pd.read_csv(input_path)
-    wide["date"] = pd.to_datetime(wide["date"])
+    wide = load_panel_data(
+        input_path,
+        data_format=data_format,
+        date_col=date_col,
+        series_col=series_col,
+        value_col=value_col,
+    )
     all_series = _base_series_columns(wide, series_depth=series_depth, series_suffix=series_suffix)
     series_cols = all_series[: min(max_series, len(all_series))] if max_series > 0 else all_series
     if horizon < 1 or horizon >= len(wide):
@@ -1157,6 +1167,10 @@ def run_tourism_benchmark(
         _save_config(output_dir, {
             "data_dir": str(data_dir),
             "data_path": None if data_path is None else str(data_path),
+            "data_format": str(data_format),
+            "date_col": str(date_col),
+            "series_col": str(series_col),
+            "value_col": str(value_col),
             "output_dir": str(output_dir),
             "models": model_names,
             "forecast_mode": forecast_mode,
@@ -1214,15 +1228,19 @@ def _parse_args() -> argparse.Namespace:
     known, _ = pre.parse_known_args()
     defaults = _load_config_defaults(known.config_json)
 
-    parser = argparse.ArgumentParser(description="Run forecasting benchmarks on tourism data.", parents=[pre])
+    parser = argparse.ArgumentParser(description="Run forecasting benchmarks on panel time-series data.", parents=[pre])
     parser.add_argument("--data-dir", type=Path, default=Path("data/tourism"))
     parser.add_argument(
         "--data-path",
         type=Path,
         default=None,
-        help="Wide CSV path with a date column. Overrides --data-dir/tourism.csv.",
+        help="CSV/parquet path in wide or long panel format. Overrides --data-dir/tourism.csv.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/tourism_benchmark_statsforecast"))
+    parser.add_argument("--data-format", choices=["auto", "wide", "long"], default="auto")
+    parser.add_argument("--date-col", type=str, default="date")
+    parser.add_argument("--series-col", type=str, default="series_id")
+    parser.add_argument("--value-col", type=str, default="value")
     parser.add_argument("--models", type=str, default=DEFAULT_MODELS)
     parser.add_argument("--forecast-mode", choices=["recursive", "rolling-origin"], default="rolling-origin")
     parser.add_argument("--horizon", type=int, default=12)
@@ -1280,6 +1298,10 @@ def main() -> None:
     summary = run_tourism_benchmark(
         data_dir=args.data_dir,
         data_path=args.data_path,
+        data_format=args.data_format,
+        date_col=args.date_col,
+        series_col=args.series_col,
+        value_col=args.value_col,
         output_dir=args.output_dir,
         models=args.models,
         forecast_mode=args.forecast_mode,
@@ -1302,7 +1324,7 @@ def main() -> None:
         deepar_scaler_type=args.deepar_scaler_type,
         deepar_random_seed=args.deepar_random_seed,
     )
-    print("Tourism benchmark summary:")
+    print("Benchmark summary:")
     print(summary.to_string(index=False))
 
 

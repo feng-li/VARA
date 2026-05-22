@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run VARA forecasting on wide-panel time-series data."""
+"""Run VARA forecasting on panel time-series data."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from vara.forecast import VARAForecaster
+from vara.forecast_data import load_panel_data
 from vara.forecast_metrics import forecast_metric_tables
 from vara.series_features import META_COLUMNS, clean_feature_frame, extract_series_tsfeatures
 
@@ -610,6 +611,10 @@ def run_vara_forecast(
     seasonal_lag: int,
     ridge: float,
     data_path: Path | None = None,
+    data_format: str = "auto",
+    date_col: str = "date",
+    series_col: str = "series_id",
+    value_col: str = "value",
     series_depth: int | None = DETAILED_CODE_DEPTH,
     series_suffix: str | None = BASE_SUFFIX,
     feature_freq: int = 12,
@@ -647,7 +652,13 @@ def run_vara_forecast(
 
     input_path = data_path if data_path is not None else data_dir / "tourism.csv"
     series_suffix = None if series_suffix == "" else series_suffix
-    wide = pd.read_csv(input_path)
+    wide = load_panel_data(
+        input_path,
+        data_format=data_format,
+        date_col=date_col,
+        series_col=series_col,
+        value_col=value_col,
+    )
 
     all_series = _base_series_columns(wide, series_depth=series_depth, series_suffix=series_suffix)
     series_ids = all_series[: min(max_series, len(all_series))] if max_series > 0 else all_series
@@ -866,6 +877,10 @@ def run_vara_forecast(
     metrics = {
         "source": str(input_path),
         "series_suffix": "" if series_suffix is None else str(series_suffix),
+        "data_format": str(data_format),
+        "date_col": str(date_col),
+        "series_col": str(series_col),
+        "value_col": str(value_col),
         "series_depth": -1 if series_depth is None else int(series_depth),
         "n_series": len(series_ids),
         "n_train": int(train.shape[0]),
@@ -914,15 +929,19 @@ run_tourism_forecast = run_vara_forecast
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a VARA forecast on wide-panel time-series data.")
+    parser = argparse.ArgumentParser(description="Run a VARA forecast on panel time-series data.")
     parser.add_argument("--data-dir", type=Path, default=Path("data/tourism"))
     parser.add_argument(
         "--data-path",
         type=Path,
         default=None,
-        help="Wide CSV path with a date column. Overrides --data-dir/tourism.csv.",
+        help="CSV/parquet path in wide or long panel format. Overrides --data-dir/tourism.csv.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/vara_forecast"))
+    parser.add_argument("--data-format", choices=["auto", "wide", "long"], default="auto")
+    parser.add_argument("--date-col", type=str, default="date")
+    parser.add_argument("--series-col", type=str, default="series_id")
+    parser.add_argument("--value-col", type=str, default="value")
     parser.add_argument("--max-series", type=int, default=0, help="0 means use all selected series.")
     parser.add_argument(
         "--series-depth",
@@ -1014,6 +1033,10 @@ def main() -> None:
         seasonal_lag=args.seasonal_lag,
         ridge=args.ridge,
         data_path=args.data_path,
+        data_format=args.data_format,
+        date_col=args.date_col,
+        series_col=args.series_col,
+        value_col=args.value_col,
         series_depth=None if args.series_depth < 0 else args.series_depth,
         series_suffix=None if args.series_suffix == "" else args.series_suffix,
         feature_freq=args.feature_freq,

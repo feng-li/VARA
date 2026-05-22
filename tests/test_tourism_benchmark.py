@@ -90,6 +90,40 @@ class TourismBenchmarkTests(unittest.TestCase):
             self.assertEqual(set(long_forecasts["series_id"]), {"Y1", "Y2"})
             self.assertTrue((output_dir / "config_tourism_benchmark.json").exists())
 
+    def test_generic_long_csv_path_uses_series_id_value_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_path = root / "m4_like_long.csv"
+            output_dir = root / "out"
+            dates = pd.date_range("2000-01-01", periods=12, freq="YS")
+            wide = pd.DataFrame({
+                "date": dates,
+                "Y1": np.arange(12, dtype=float) + 5.0,
+                "Y2": 2.0 * np.arange(12, dtype=float) + 7.0,
+            })
+            wide.melt(id_vars="date", var_name="series_id", value_name="value").to_csv(data_path, index=False)
+
+            summary = run_tourism_benchmark(
+                data_dir=root,
+                data_path=data_path,
+                data_format="long",
+                output_dir=output_dir,
+                models="naive,drift,ar1",
+                forecast_mode="rolling-origin",
+                horizon=2,
+                season_length=1,
+                freq="YS",
+                series_depth=None,
+                series_suffix=None,
+            )
+
+            self.assertEqual(set(summary["model"]), {"naive", "drift", "ar1"})
+            self.assertEqual(set(summary["data"]), {str(data_path)})
+            long_forecasts = pd.read_csv(output_dir / "tourism_benchmark_forecasts_long.csv")
+            self.assertEqual(set(long_forecasts["series_id"]), {"Y1", "Y2"})
+            config = pd.read_json(output_dir / "config_tourism_benchmark.json", typ="series")
+            self.assertEqual(config["data_format"], "long")
+
 
 if __name__ == "__main__":
     unittest.main()

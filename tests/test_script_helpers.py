@@ -336,6 +336,45 @@ class ScriptHelperTests(unittest.TestCase):
             forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
             self.assertEqual(set(forecast.columns), {"date", "Y1", "Y2", "Y3"})
 
+    def test_vara_forecast_accepts_generic_long_csv_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_path = root / "m4_like_long.csv"
+            output_dir = root / "out"
+            dates = pd.date_range("2000-01-01", periods=12, freq="YS")
+            wide = pd.DataFrame({
+                "date": dates,
+                "Y1": np.linspace(10.0, 20.0, 12),
+                "Y2": np.linspace(30.0, 40.0, 12),
+                "Y3": np.linspace(50.0, 65.0, 12),
+            })
+            wide.melt(id_vars="date", var_name="series_id", value_name="value").to_csv(data_path, index=False)
+
+            metrics = run_vara_forecast(
+                data_dir=root,
+                data_path=data_path,
+                data_format="long",
+                output_dir=output_dir,
+                max_series=0,
+                horizon=2,
+                grid_size=3,
+                y_transform="center",
+                seasonal_lag=1,
+                ridge=1e-2,
+                series_depth=None,
+                series_suffix=None,
+                feature_freq=1,
+                feature_functions=("series_length",),
+                attention_mode="topk",
+                attention_top_k=2,
+            )
+
+            self.assertEqual(metrics["source"], str(data_path))
+            self.assertEqual(metrics["data_format"], "long")
+            self.assertEqual(metrics["n_series"], 3)
+            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
+            self.assertEqual(set(forecast.columns), {"date", "Y1", "Y2", "Y3"})
+
     def test_tourism_seasonal_naive_residual_scenario_outputs_components(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
