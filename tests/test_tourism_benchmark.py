@@ -25,18 +25,20 @@ class TourismBenchmarkTests(unittest.TestCase):
             summary = run_tourism_benchmark(
                 data_dir=data_dir,
                 output_dir=output_dir,
-                models="naive,seasonal_naive,drift,ar1,var1",
+                models="naive,seasonal_naive,drift,ar1,ar1_snaive,var1,var1_snaive",
                 forecast_mode="rolling-origin",
                 horizon=2,
                 season_length=12,
                 series_depth=3,
             )
 
-            self.assertEqual(set(summary["model"]), {"naive", "seasonal_naive", "drift", "ar1", "var1"})
+            self.assertEqual(set(summary["model"]), {"naive", "seasonal_naive", "drift", "ar1", "ar1_snaive", "var1", "var1_snaive"})
             self.assertTrue((output_dir / "tourism_benchmark_forecasts_long.csv").exists())
             self.assertTrue((output_dir / "tourism_forecast_naive.csv").exists())
             self.assertTrue((output_dir / "tourism_forecast_ar1.csv").exists())
+            self.assertTrue((output_dir / "tourism_forecast_ar1_snaive.csv").exists())
             self.assertTrue((output_dir / "tourism_forecast_var1.csv").exists())
+            self.assertTrue((output_dir / "tourism_forecast_var1_snaive.csv").exists())
             self.assertTrue((output_dir / "tourism_errors_seasonal_naive.csv").exists())
             self.assertTrue((output_dir / "metrics_by_series.csv").exists())
             self.assertTrue((output_dir / "metrics_by_origin.csv").exists())
@@ -49,7 +51,9 @@ class TourismBenchmarkTests(unittest.TestCase):
             self.assertEqual(set(long_forecasts["series_id"]), {"AAAAll", "AABAll"})
             self.assertIn("seasonal_naive", long_forecasts.columns)
             self.assertIn("ar1", long_forecasts.columns)
+            self.assertIn("ar1_snaive", long_forecasts.columns)
             self.assertIn("var1", long_forecasts.columns)
+            self.assertIn("var1_snaive", long_forecasts.columns)
 
             seasonal_wide = pd.read_csv(output_dir / "tourism_forecast_seasonal_naive.csv")
             self.assertEqual(list(seasonal_wide["AAAAll"]), [20.0, 21.0])

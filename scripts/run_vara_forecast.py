@@ -55,6 +55,12 @@ FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual")
 
 
 def _fit_y_transform(train: np.ndarray, method: str, seasonal_lag: int) -> tuple[np.ndarray, dict]:
+    if method == "none":
+        base = np.asarray(train, dtype=float)
+        mean = np.zeros((1, base.shape[1]), dtype=float)
+        scale = np.ones_like(mean)
+        return base, {"method": method, "mean": mean, "scale": scale, "model_scale": "original"}
+
     if method in {"diff", "log1p-diff"}:
         if train.shape[0] <= 1:
             raise ValueError("Training data must have at least two rows for first differences.")
@@ -994,7 +1000,7 @@ def main() -> None:
         "--y-transform",
         type=str,
         default="log1p-seasonal-diff",
-        choices=["center", "standardize", "diff", "log1p-center", "log1p-standardize", "log1p-diff", "log1p-seasonal-diff"],
+        choices=["none", "center", "standardize", "diff", "log1p-center", "log1p-standardize", "log1p-diff", "log1p-seasonal-diff"],
     )
     args = parser.parse_args()
 

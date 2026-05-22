@@ -31,9 +31,9 @@ else:
 BASE_SUFFIX = "All"
 DETAILED_CODE_DEPTH = 3
 STATSFORECAST_MODELS = {"naive", "seasonal_naive", "drift", "auto_ets", "auto_arima"}
-STATSMODELS_MODELS = {"ar1", "var1"}
-NEURALFORECAST_MODELS = {"deepar"}
-PANEL_MODELS = {"var1", "deepar"}
+STATSMODELS_MODELS = {"ar1", "var1", "ar1_snaive", "var1_snaive"}
+NEURALFORECAST_MODELS = {"deepar", "nbeats"}
+PANEL_MODELS = {"var1", "var1_snaive", "deepar", "nbeats"}
 ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS | NEURALFORECAST_MODELS
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1"
 STATSFORECAST_N_JOBS = 1
@@ -82,10 +82,18 @@ def _parse_model_names(models: str | list[str]) -> list[str]:
         "autoarima": "auto_arima",
         "ar": "ar1",
         "ar_1": "ar1",
+        "ar1_seasonal_naive": "ar1_snaive",
+        "ar1_seasonal_naive_resid": "ar1_snaive",
+        "ar1_snaive_resid": "ar1_snaive",
         "var": "var1",
         "var_1": "var1",
+        "var1_seasonal_naive": "var1_snaive",
+        "var1_seasonal_naive_resid": "var1_snaive",
+        "var1_snaive_resid": "var1_snaive",
         "deep_ar": "deepar",
         "neural_deepar": "deepar",
+        "n_beats": "nbeats",
+        "neural_nbeats": "nbeats",
     }
     out = []
     for name in names:
@@ -137,6 +145,19 @@ def _load_deepar():
             f"before running --models deepar. Original error: {exc!r}"
         ) from exc
     return NeuralForecast, DeepAR
+
+
+def _load_nbeats():
+    try:
+        from neuralforecast import NeuralForecast
+        from neuralforecast.models import NBEATS
+    except Exception as exc:
+        raise RuntimeError(
+            "NBEATS benchmark requires neuralforecast and its PyTorch dependencies. "
+            "The current import failed; install/repair neuralforecast dependencies "
+            f"before running --models nbeats. Original error: {exc!r}"
+        ) from exc
+    return NeuralForecast, NBEATS
 
 
 def _deepar_input_size(h: int, season_length: int, requested: int) -> int:
@@ -205,6 +226,82 @@ def _forecast_deepar_once(
     return out
 
 
+def _nbeats_stack_config(
+    h: int,
+    hidden_size: int,
+    num_layers: int,
+) -> tuple[list[str], list[int], list[list[int]]]:
+    layers = [int(hidden_size)] * max(int(num_layers), 2)
+    if int(h) <= 1:
+        return ["identity"], [1], [layers.copy()]
+    return (
+        ["identity", "trend", "seasonality"],
+        [1, 1, 1],
+        [layers.copy(), layers.copy(), layers.copy()],
+    )
+
+
+def _forecast_nbeats_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+    season_length: int,
+    freq: str,
+    nbeats_input_size: int,
+    nbeats_max_steps: int,
+    nbeats_hidden_size: int,
+    nbeats_num_layers: int,
+    nbeats_batch_size: int,
+    nbeats_learning_rate: float,
+    nbeats_scaler_type: str,
+    nbeats_random_seed: int,
+) -> pd.DataFrame:
+    NeuralForecast, NBEATS = _load_nbeats()
+    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+    input_size = _deepar_input_size(h, season_length, nbeats_input_size)
+    stack_types, n_blocks, mlp_units = _nbeats_stack_config(h, nbeats_hidden_size, nbeats_num_layers)
+    model = NBEATS(
+        h=h,
+        input_size=input_size,
+        stack_types=stack_types,
+        n_blocks=n_blocks,
+        mlp_units=mlp_units,
+        max_steps=int(nbeats_max_steps),
+        learning_rate=float(nbeats_learning_rate),
+        batch_size=int(nbeats_batch_size),
+        scaler_type=str(nbeats_scaler_type),
+        random_seed=int(nbeats_random_seed),
+        alias="nbeats",
+        accelerator="cpu",
+        devices=1,
+        enable_progress_bar=False,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        logger=False,
+    )
+    nf = NeuralForecast(models=[model], freq=freq)
+    train_long = _wide_to_statsforecast_long(train_wide, series_cols)
+    nf.fit(df=train_long, verbose=False)
+    out = nf.predict(verbose=False).rename(columns={"unique_id": "series_id", "ds": "date"})
+
+    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
+    expected = pd.MultiIndex.from_product(
+        [series_cols, dates], names=["series_id", "date"]
+    ).to_frame(index=False)
+    out = expected.merge(out.loc[:, ["series_id", "date", "nbeats"]], on=["series_id", "date"], how="left")
+    if out["nbeats"].isna().any():
+        raise RuntimeError("NBEATS did not return forecasts for all requested series/date pairs.")
+    return out
+
+
 def _forecast_statsforecast_once(
     train_wide: pd.DataFrame,
     series_cols: list[str],
@@ -219,6 +316,27 @@ def _forecast_statsforecast_once(
     sf = StatsForecast(models=models, freq=freq, n_jobs=n_jobs)
     out = sf.forecast(df=_wide_to_statsforecast_long(train_wide, series_cols), h=h)
     return out.rename(columns={"unique_id": "series_id", "ds": "date"})
+
+
+
+def _seasonal_naive_array(values: np.ndarray, h: int, season_length: int) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.shape[0] < season_length:
+        raise ValueError("Seasonal naive filtering requires at least season_length observations.")
+    history = [row.copy() for row in values]
+    forecasts = []
+    for _ in range(int(h)):
+        y_hat = history[-season_length].copy()
+        history.append(y_hat)
+        forecasts.append(y_hat)
+    return np.vstack(forecasts)
+
+
+def _seasonal_residual_array(values: np.ndarray, season_length: int) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.shape[0] <= season_length:
+        raise ValueError("Seasonal naive filtering requires more than season_length observations.")
+    return values[season_length:] - values[:-season_length]
 
 
 def _forecast_ar1_once(
@@ -246,6 +364,37 @@ def _forecast_ar1_once(
     return pd.DataFrame(rows)
 
 
+
+def _forecast_ar1_snaive_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+    season_length: int,
+) -> pd.DataFrame:
+    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
+    if len(dates) != h:
+        raise RuntimeError("AR(1) seasonal-naive forecast_dates length does not match h.")
+
+    rows = []
+    for series_id in series_cols:
+        y = train_wide.loc[:, series_id].to_numpy(dtype=float)
+        baseline = _seasonal_naive_array(y[:, None], h, season_length)[:, 0]
+        residual = _seasonal_residual_array(y[:, None], season_length)[:, 0]
+        if residual.shape[0] <= 1:
+            residual_forecast = np.zeros(h, dtype=float)
+        else:
+            try:
+                residual_forecast = AutoReg(residual, lags=1, trend="c", old_names=False).fit().forecast(steps=h)
+            except Exception:
+                residual_forecast = np.zeros(h, dtype=float)
+        forecast = baseline + np.asarray(residual_forecast, dtype=float)
+        for i, date in enumerate(dates):
+            rows.append({"series_id": series_id, "date": date, "ar1_snaive": float(forecast[i])})
+    return pd.DataFrame(rows)
+
+
 def _forecast_var1_once(
     train_wide: pd.DataFrame,
     series_cols: list[str],
@@ -267,6 +416,39 @@ def _forecast_var1_once(
     for j, series_id in enumerate(series_cols):
         for i, date in enumerate(dates):
             rows.append({"series_id": series_id, "date": date, "var1": float(forecast[i, j])})
+    return pd.DataFrame(rows)
+
+
+
+def _forecast_var1_snaive_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+    season_length: int,
+) -> pd.DataFrame:
+    Y = train_wide.loc[:, series_cols].to_numpy(dtype=float)
+    baseline = _seasonal_naive_array(Y, h, season_length)
+    residual = _seasonal_residual_array(Y, season_length)
+    if residual.shape[0] <= 1:
+        residual_forecast = np.zeros((h, len(series_cols)), dtype=float)
+    else:
+        try:
+            fit = VAR(pd.DataFrame(residual, columns=series_cols)).fit(maxlags=1, trend="c")
+            residual_forecast = fit.forecast(residual[-fit.k_ar:], steps=h)
+        except Exception:
+            residual_forecast = np.zeros((h, len(series_cols)), dtype=float)
+    forecast = baseline + np.asarray(residual_forecast, dtype=float)
+
+    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
+    if len(dates) != h:
+        raise RuntimeError("VAR(1) seasonal-naive forecast_dates length does not match h.")
+
+    rows = []
+    for j, series_id in enumerate(series_cols):
+        for i, date in enumerate(dates):
+            rows.append({"series_id": series_id, "date": date, "var1_snaive": float(forecast[i, j])})
     return pd.DataFrame(rows)
 
 
@@ -305,8 +487,28 @@ def _forecast_once(
         )
     if "ar1" in model_names:
         frames.append(_forecast_ar1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
+    if "ar1_snaive" in model_names:
+        frames.append(
+            _forecast_ar1_snaive_once(
+                train_wide,
+                series_cols,
+                forecast_dates=forecast_dates,
+                h=h,
+                season_length=season_length,
+            )
+        )
     if "var1" in model_names:
         frames.append(_forecast_var1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
+    if "var1_snaive" in model_names:
+        frames.append(
+            _forecast_var1_snaive_once(
+                train_wide,
+                series_cols,
+                forecast_dates=forecast_dates,
+                h=h,
+                season_length=season_length,
+            )
+        )
     if "deepar" in model_names:
         frames.append(
             _forecast_deepar_once(
@@ -324,6 +526,25 @@ def _forecast_once(
                 deepar_learning_rate=deepar_learning_rate,
                 deepar_scaler_type=deepar_scaler_type,
                 deepar_random_seed=deepar_random_seed,
+            )
+        )
+    if "nbeats" in model_names:
+        frames.append(
+            _forecast_nbeats_once(
+                train_wide,
+                series_cols,
+                forecast_dates=forecast_dates,
+                h=h,
+                season_length=season_length,
+                freq=freq,
+                nbeats_input_size=deepar_input_size,
+                nbeats_max_steps=deepar_max_steps,
+                nbeats_hidden_size=deepar_hidden_size,
+                nbeats_num_layers=deepar_lstm_layers,
+                nbeats_batch_size=deepar_batch_size,
+                nbeats_learning_rate=deepar_learning_rate,
+                nbeats_scaler_type=deepar_scaler_type,
+                nbeats_random_seed=deepar_random_seed,
             )
         )
 
@@ -957,6 +1178,14 @@ def run_tourism_benchmark(
             "deepar_learning_rate": float(deepar_learning_rate),
             "deepar_scaler_type": str(deepar_scaler_type),
             "deepar_random_seed": int(deepar_random_seed),
+            "nbeats_input_size": int(deepar_input_size),
+            "nbeats_max_steps": int(deepar_max_steps),
+            "nbeats_hidden_size": int(deepar_hidden_size),
+            "nbeats_num_layers": int(deepar_lstm_layers),
+            "nbeats_batch_size": int(deepar_batch_size),
+            "nbeats_learning_rate": float(deepar_learning_rate),
+            "nbeats_scaler_type": str(deepar_scaler_type),
+            "nbeats_random_seed": int(deepar_random_seed),
         })
         return summary
     finally:
@@ -1023,6 +1252,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--deepar-learning-rate", type=float, default=1e-3)
     parser.add_argument("--deepar-scaler-type", type=str, default="robust")
     parser.add_argument("--deepar-random-seed", type=int, default=2026)
+    parser.add_argument(
+        "--nbeats-input-size",
+        dest="deepar_input_size",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="NBEATS context length; 0 uses max(3*h, 2*season_length).",
+    )
+    parser.add_argument("--nbeats-max-steps", dest="deepar_max_steps", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--nbeats-hidden-size", dest="deepar_hidden_size", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--nbeats-num-layers", dest="deepar_lstm_layers", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--nbeats-batch-size", dest="deepar_batch_size", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--nbeats-learning-rate", dest="deepar_learning_rate", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--nbeats-scaler-type", dest="deepar_scaler_type", type=str, default=argparse.SUPPRESS)
+    parser.add_argument("--nbeats-random-seed", dest="deepar_random_seed", type=int, default=argparse.SUPPRESS)
     parser.add_argument(
         "--ray-debug",
         action="store_true",
