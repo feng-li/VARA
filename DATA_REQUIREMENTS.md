@@ -105,8 +105,7 @@ For M5, create this table with:
 ```bash
 python scripts/prepare_m5_attention_features.py \
   --input-dir data/m5 \
-  --out data/m5/m5_attention_features_CA_1.parquet \
-  --store-id CA_1 \
+  --out data/m5/m5_attention_features_all_stores.parquet \
   --holdout 28
 ```
 

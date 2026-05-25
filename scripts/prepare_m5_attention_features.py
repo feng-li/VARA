@@ -10,7 +10,7 @@ from vara.m5_features import make_m5_attention_features_from_files
 
 
 DEFAULT_INPUT = Path("data/m5")
-DEFAULT_OUTPUT = Path("data/m5/m5_attention_features_CA_1.parquet")
+DEFAULT_OUTPUT = Path("data/m5/m5_attention_features_all_stores.parquet")
 
 
 def _find_table(input_dir: Path, stem: str) -> Path:
@@ -28,7 +28,7 @@ def main() -> None:
     parser.add_argument("--prices", type=Path, default=None)
     parser.add_argument("--calendar", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--store-id", default="CA_1", help="Use an empty value to prepare all stores.")
+    parser.add_argument("--store-id", default=None, help="Optional store id filter; omit to prepare all stores.")
     parser.add_argument("--holdout", type=int, default=28, help="Last H sales days excluded from feature computation.")
     parser.add_argument("--max-series", type=int, default=0, help="0 keeps all filtered series; positive values are useful for smoke tests.")
     parser.add_argument("--standardize-output", action="store_true", help="Standardize numeric features before saving.")
