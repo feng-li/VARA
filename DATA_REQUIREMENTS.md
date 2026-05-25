@@ -106,7 +106,9 @@ For M5, create this table with:
 python scripts/prepare_m5_attention_features.py \
   --input-dir data/m5 \
   --out data/m5/m5_attention_features_all_stores.parquet \
-  --holdout 28
+  --holdout 28 \
+  --ray-num-cpus 10 \
+  --max-cpus-per-task 1
 ```
 
 M5 attention features include hierarchy dummies, demand summaries, day-of-week response, SNAP/event/weekend response, and price summaries computed before the holdout window.
