@@ -1,10 +1,10 @@
 # Forecast Modes
 
 This note describes the `--forecast-mode` option used by
-`scripts/run_benchmarks.py` and `scripts/run_vara_forecast.py`. In
-`scripts/run_vara_forecast.py`, the option also accepts a comma-separated list,
-such as `--forecast-mode recursive,rolling-origin,closed-loop`, and writes each
-mode to a separate subdirectory.
+`scripts/run_benchmarks.py` and `scripts/run_vara_forecast.py`. In both scripts,
+the option also accepts a comma-separated list, such as
+`--forecast-mode recursive,rolling-origin,closed-loop`, and writes each mode to
+a separate subdirectory.
 
 ## Summary
 

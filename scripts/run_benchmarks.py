@@ -38,7 +38,11 @@ PANEL_MODELS = {"var1", "var1_snaive", "deepar", "nbeats"}
 ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS | NEURALFORECAST_MODELS
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1"
 STATSFORECAST_N_JOBS = 1
-FORECAST_MODES = {"recursive", "rolling-origin", "closed-loop"}
+FORECAST_MODES = ("recursive", "rolling-origin", "closed-loop")
+FORECAST_MODE_ALIASES = {
+    "rolling_origin": "rolling-origin",
+    "closed_loop": "closed-loop",
+}
 TASK_MODEL_COL = "_task_model"
 TASK_SERIES_COL = "_task_series"
 TASK_FORECAST_COL = "_forecast"
@@ -141,6 +145,28 @@ def _base_series_columns(
         suffix_msg = f" ending with {series_suffix!r}" if series_suffix else ""
         raise ValueError(f"No series columns{suffix_msg} found for series_depth={series_depth}.")
     return cols
+
+
+def _normalize_forecast_mode(mode: str) -> str:
+    normalized = str(mode).strip().lower().replace("_", "-")
+    normalized = FORECAST_MODE_ALIASES.get(normalized, normalized)
+    if normalized not in set(FORECAST_MODES):
+        valid = ", ".join(FORECAST_MODES)
+        raise ValueError(f"forecast_mode must be one of {valid}. Got {mode!r}.")
+    return normalized
+
+
+def _parse_forecast_modes(value: str) -> list[str]:
+    modes = [_normalize_forecast_mode(part) for part in str(value).split(",") if part.strip()]
+    if not modes:
+        raise ValueError("forecast_mode must contain at least one mode.")
+    out = []
+    seen = set()
+    for mode in modes:
+        if mode not in seen:
+            out.append(mode)
+            seen.add(mode)
+    return out
 
 
 def _parse_model_names(models: str | list[str]) -> list[str]:
@@ -1244,8 +1270,7 @@ def run_tourism_benchmark(
     deepar_scaler_type: str = "robust",
     deepar_random_seed: int = 2026,
 ) -> pd.DataFrame:
-    if forecast_mode not in FORECAST_MODES:
-        raise ValueError("forecast_mode must be one of: recursive, rolling-origin, closed-loop.")
+    forecast_mode = _normalize_forecast_mode(forecast_mode)
     if ray_num_cpus < 1:
         raise ValueError("ray_num_cpus must be >= 1.")
     if max_cpus_per_task < 1:
@@ -1509,7 +1534,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--series-col", type=str, default="series_id")
     parser.add_argument("--value-col", type=str, default="value")
     parser.add_argument("--models", type=str, default=DEFAULT_MODELS)
-    parser.add_argument("--forecast-mode", choices=["recursive", "rolling-origin", "closed-loop"], default="rolling-origin")
+    parser.add_argument(
+        "--forecast-mode",
+        type=str,
+        default="rolling-origin",
+        help="Forecast mode, or comma-separated modes: recursive, rolling-origin, closed-loop.",
+    )
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--season-length", type=int, default=12)
     parser.add_argument("--freq", type=str, default="MS")
@@ -1565,37 +1595,83 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    summary = run_tourism_benchmark(
-        data_dir=args.data_dir,
-        data_path=args.data_path,
-        data_format=args.data_format,
-        date_col=args.date_col,
-        series_col=args.series_col,
-        value_col=args.value_col,
-        output_dir=args.output_dir,
-        models=args.models,
-        forecast_mode=args.forecast_mode,
-        horizon=args.horizon,
-        season_length=args.season_length,
-        freq=args.freq,
-        series_depth=None if args.series_depth < 0 else args.series_depth,
-        series_suffix=None if args.series_suffix == "" else args.series_suffix,
-        max_series=args.max_series,
-        clip_nonnegative=args.clip_nonnegative,
-        ray_num_cpus=args.ray_num_cpus,
-        max_cpus_per_task=args.max_cpus_per_task,
-        ray_debug=args.ray_debug,
-        resume=args.resume,
-        resume_csv=args.resume_csv,
-        deepar_input_size=args.deepar_input_size,
-        deepar_max_steps=args.deepar_max_steps,
-        deepar_hidden_size=args.deepar_hidden_size,
-        deepar_lstm_layers=args.deepar_lstm_layers,
-        deepar_batch_size=args.deepar_batch_size,
-        deepar_learning_rate=args.deepar_learning_rate,
-        deepar_scaler_type=args.deepar_scaler_type,
-        deepar_random_seed=args.deepar_random_seed,
-    )
+    try:
+        forecast_modes = _parse_forecast_modes(args.forecast_mode)
+    except ValueError as exc:
+        raise SystemExit(f"run_benchmarks.py: error: {exc}") from exc
+
+    run_kwargs = {
+        "data_dir": args.data_dir,
+        "data_path": args.data_path,
+        "data_format": args.data_format,
+        "date_col": args.date_col,
+        "series_col": args.series_col,
+        "value_col": args.value_col,
+        "models": args.models,
+        "horizon": args.horizon,
+        "season_length": args.season_length,
+        "freq": args.freq,
+        "series_depth": None if args.series_depth < 0 else args.series_depth,
+        "series_suffix": None if args.series_suffix == "" else args.series_suffix,
+        "max_series": args.max_series,
+        "clip_nonnegative": args.clip_nonnegative,
+        "ray_num_cpus": args.ray_num_cpus,
+        "max_cpus_per_task": args.max_cpus_per_task,
+        "ray_debug": args.ray_debug,
+        "resume": args.resume,
+        "deepar_input_size": args.deepar_input_size,
+        "deepar_max_steps": args.deepar_max_steps,
+        "deepar_hidden_size": args.deepar_hidden_size,
+        "deepar_lstm_layers": args.deepar_lstm_layers,
+        "deepar_batch_size": args.deepar_batch_size,
+        "deepar_learning_rate": args.deepar_learning_rate,
+        "deepar_scaler_type": args.deepar_scaler_type,
+        "deepar_random_seed": args.deepar_random_seed,
+    }
+
+    if len(forecast_modes) == 1:
+        summary = run_tourism_benchmark(
+            output_dir=args.output_dir,
+            forecast_mode=forecast_modes[0],
+            resume_csv=args.resume_csv,
+            **run_kwargs,
+        )
+    else:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        summary_frames = []
+        by_series_frames = []
+        by_origin_frames = []
+        forecast_frames = []
+        for forecast_mode in forecast_modes:
+            mode_output_dir = args.output_dir / forecast_mode
+            mode_resume_csv = None
+            if args.resume_csv is not None:
+                mode_resume_csv = args.resume_csv.with_name(f"{args.resume_csv.stem}_{forecast_mode}{args.resume_csv.suffix}")
+            _print_progress(f"Running benchmark forecast_mode={forecast_mode}, output_dir={mode_output_dir}")
+            summary_frames.append(run_tourism_benchmark(
+                output_dir=mode_output_dir,
+                forecast_mode=forecast_mode,
+                resume_csv=mode_resume_csv,
+                **run_kwargs,
+            ))
+            by_series_frames.append(pd.read_csv(mode_output_dir / "metrics_by_series.csv"))
+            by_origin_frames.append(pd.read_csv(mode_output_dir / "metrics_by_origin.csv"))
+            forecasts = pd.read_csv(mode_output_dir / "tourism_benchmark_forecasts_long.csv")
+            forecasts.insert(0, "forecast_mode", forecast_mode)
+            forecast_frames.append(forecasts)
+
+        summary = pd.concat(summary_frames, ignore_index=True, sort=False)
+        summary.to_csv(args.output_dir / "metrics_summary.csv", index=False)
+        pd.concat(by_series_frames, ignore_index=True, sort=False).to_csv(
+            args.output_dir / "metrics_by_series.csv", index=False
+        )
+        pd.concat(by_origin_frames, ignore_index=True, sort=False).to_csv(
+            args.output_dir / "metrics_by_origin.csv", index=False
+        )
+        pd.concat(forecast_frames, ignore_index=True, sort=False).to_csv(
+            args.output_dir / "tourism_benchmark_forecasts_long.csv", index=False
+        )
+
     print("Benchmark summary:")
     print(summary.to_string(index=False))
 

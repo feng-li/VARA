@@ -5,10 +5,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from scripts.run_benchmarks import run_tourism_benchmark
+from scripts.run_benchmarks import _parse_forecast_modes, run_tourism_benchmark
 
 
 class TourismBenchmarkTests(unittest.TestCase):
+    def test_parse_forecast_modes_accepts_comma_list(self):
+        self.assertEqual(
+            _parse_forecast_modes("rolling-origin,closed-loop,recursive,recursive"),
+            ["rolling-origin", "closed-loop", "recursive"],
+        )
+
     def test_statsforecast_rolling_benchmark_writes_expected_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
