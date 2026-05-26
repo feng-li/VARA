@@ -25,6 +25,7 @@ from scripts.run_full_simulation import (
 from scripts.run_vara_forecast import (
     _fit_y_transform,
     _inverse_y_transform,
+    _parse_forecast_modes,
     _seasonal_naive_forecast,
     _seasonal_naive_residual_panel,
     _tourism_feature_matrix,
@@ -35,6 +36,12 @@ from scripts.run_vara_forecast import (
 
 
 class ScriptHelperTests(unittest.TestCase):
+    def test_parse_forecast_modes_accepts_comma_list_and_underscore_alias(self):
+        self.assertEqual(
+            _parse_forecast_modes("rolling_origin,closed_loop,recursive,recursive"),
+            ["rolling-origin", "closed-loop", "recursive"],
+        )
+
     def test_seasonal_naive_forecast_and_residual_panel(self):
         history = np.arange(1, 16, dtype=float)[:, None]
 

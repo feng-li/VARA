@@ -52,10 +52,36 @@ SEASONAL_CORR_FEATURE_FUNCTIONS = (
 SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS = "seasonal_diff_predictive_corr_lag1_lag12"
 FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual")
 FORECAST_MODES = ("recursive", "rolling-origin", "closed-loop")
+FORECAST_MODE_ALIASES = {
+    "rolling_origin": "rolling-origin",
+    "closed_loop": "closed-loop",
+}
 META_COLUMNS = ("series_id", "transform", "n_obs", "train_start", "train_end")
 
 _JNP = None
 _VARAForecaster = None
+
+
+def _normalize_forecast_mode(mode: str) -> str:
+    normalized = str(mode).strip().lower().replace("_", "-")
+    normalized = FORECAST_MODE_ALIASES.get(normalized, normalized)
+    if normalized not in set(FORECAST_MODES):
+        valid = ", ".join(FORECAST_MODES)
+        raise ValueError(f"forecast_mode must be one of {valid}. Got {mode!r}.")
+    return normalized
+
+
+def _parse_forecast_modes(value: str) -> list[str]:
+    modes = [_normalize_forecast_mode(part) for part in str(value).split(",") if part.strip()]
+    if not modes:
+        raise ValueError("forecast_mode must contain at least one mode.")
+    out = []
+    seen = set()
+    for mode in modes:
+        if mode not in seen:
+            out.append(mode)
+            seen.add(mode)
+    return out
 
 
 def _runtime_imports():
@@ -1037,8 +1063,7 @@ def run_vara_forecast(
 ) -> dict:
     if forecast_scenario not in set(FORECAST_SCENARIOS):
         raise ValueError(f"forecast_scenario must be one of {FORECAST_SCENARIOS}.")
-    if forecast_mode not in set(FORECAST_MODES):
-        raise ValueError(f"forecast_mode must be one of {FORECAST_MODES}.")
+    forecast_mode = _normalize_forecast_mode(forecast_mode)
     if residual_transform not in {"center", "standardize"}:
         raise ValueError("residual_transform must be 'center' or 'standardize'.")
     input_feature_path = feature_path
@@ -1515,8 +1540,11 @@ def main() -> None:
         "--forecast-mode",
         type=str,
         default="recursive",
-        choices=list(FORECAST_MODES),
-        help="recursive fits once; rolling-origin uses actual test updates; closed-loop feeds forecasts back as pseudo-observations.",
+        help=(
+            "Forecast mode, or comma-separated modes. Valid modes are "
+            "recursive, rolling-origin, and closed-loop. Underscore aliases such as rolling_origin "
+            "and closed_loop are accepted."
+        ),
     )
     parser.add_argument("--ray-num-cpus", type=int, default=1, help="Use Ray for rolling-origin VARA when > 1; closed-loop is sequential.")
     parser.add_argument("--max-cpus-per-task", type=int, default=1, help="Ray CPU resources per rolling-origin task.")
@@ -1529,38 +1557,79 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    run_vara_forecast(
-        data_dir=args.data_dir,
-        output_dir=args.output_dir,
-        max_series=args.max_series,
-        horizon=args.horizon,
-        grid_size=args.grid_size,
-        y_transform=args.y_transform,
-        seasonal_lag=args.seasonal_lag,
-        ridge=args.ridge,
-        data_path=args.data_path,
-        data_format=args.data_format,
-        date_col=args.date_col,
-        series_col=args.series_col,
-        value_col=args.value_col,
-        series_depth=None if args.series_depth < 0 else args.series_depth,
-        series_suffix=None if args.series_suffix == "" else args.series_suffix,
-        feature_freq=args.feature_freq,
-        feature_functions=args.feature_functions,
-        feature_source=args.feature_source,
-        feature_path=args.feature_path,
-        forecast_mode=args.forecast_mode,
-        feature_update_policy=args.feature_update_policy,
-        feature_update_interval=args.feature_update_interval,
-        attention_mode=args.attention_mode,
-        attention_top_k=args.attention_top_k,
-        forecast_scenario=args.forecast_scenario,
-        residual_transform=args.residual_transform,
-        ray_num_cpus=args.ray_num_cpus,
-        max_cpus_per_task=args.max_cpus_per_task,
-        ray_debug=args.ray_debug,
-    )
-    summary = pd.read_csv(args.output_dir / "metrics_summary.csv")
+    try:
+        forecast_modes = _parse_forecast_modes(args.forecast_mode)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    run_kwargs = {
+        "data_dir": args.data_dir,
+        "max_series": args.max_series,
+        "horizon": args.horizon,
+        "grid_size": args.grid_size,
+        "y_transform": args.y_transform,
+        "seasonal_lag": args.seasonal_lag,
+        "ridge": args.ridge,
+        "data_path": args.data_path,
+        "data_format": args.data_format,
+        "date_col": args.date_col,
+        "series_col": args.series_col,
+        "value_col": args.value_col,
+        "series_depth": None if args.series_depth < 0 else args.series_depth,
+        "series_suffix": None if args.series_suffix == "" else args.series_suffix,
+        "feature_freq": args.feature_freq,
+        "feature_functions": args.feature_functions,
+        "feature_source": args.feature_source,
+        "feature_path": args.feature_path,
+        "feature_update_policy": args.feature_update_policy,
+        "feature_update_interval": args.feature_update_interval,
+        "attention_mode": args.attention_mode,
+        "attention_top_k": args.attention_top_k,
+        "forecast_scenario": args.forecast_scenario,
+        "residual_transform": args.residual_transform,
+        "ray_num_cpus": args.ray_num_cpus,
+        "max_cpus_per_task": args.max_cpus_per_task,
+        "ray_debug": args.ray_debug,
+    }
+
+    if len(forecast_modes) == 1:
+        run_vara_forecast(
+            output_dir=args.output_dir,
+            forecast_mode=forecast_modes[0],
+            **run_kwargs,
+        )
+        summary = pd.read_csv(args.output_dir / "metrics_summary.csv")
+    else:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        summary_frames = []
+        metrics_frames = []
+        by_series_frames = []
+        by_origin_frames = []
+        for forecast_mode in forecast_modes:
+            mode_output_dir = args.output_dir / forecast_mode
+            _print_progress(f"Running VARA forecast mode={forecast_mode}, output_dir={mode_output_dir}")
+            run_vara_forecast(
+                output_dir=mode_output_dir,
+                forecast_mode=forecast_mode,
+                **run_kwargs,
+            )
+            summary_frames.append(pd.read_csv(mode_output_dir / "metrics_summary.csv"))
+            metrics_frames.append(pd.read_csv(mode_output_dir / "tourism_metrics.csv"))
+            by_series_frames.append(pd.read_csv(mode_output_dir / "metrics_by_series.csv"))
+            by_origin_frames.append(pd.read_csv(mode_output_dir / "metrics_by_origin.csv"))
+
+        summary = pd.concat(summary_frames, ignore_index=True, sort=False)
+        summary.to_csv(args.output_dir / "metrics_summary.csv", index=False)
+        pd.concat(metrics_frames, ignore_index=True, sort=False).to_csv(
+            args.output_dir / "tourism_metrics.csv", index=False
+        )
+        pd.concat(by_series_frames, ignore_index=True, sort=False).to_csv(
+            args.output_dir / "metrics_by_series.csv", index=False
+        )
+        pd.concat(by_origin_frames, ignore_index=True, sort=False).to_csv(
+            args.output_dir / "metrics_by_origin.csv", index=False
+        )
+
     print("VARA forecast summary:")
     print(summary.to_string(index=False))
 
