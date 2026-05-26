@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -56,7 +57,106 @@ FORECAST_MODE_ALIASES = {
     "rolling_origin": "rolling-origin",
     "closed_loop": "closed-loop",
 }
+FEATURE_SOURCES = ("file", "tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive")
+SCORE_FEATURE_SOURCES = {"seasonal-predictive"}
+TOPK_ATTENTION_MODES = {"topk", "score-topk"}
+SCORE_ATTENTION_MODES = {"score", "score-topk"}
+ATTENTION_MODES = ("dense", "topk", "score", "score-topk")
+FEATURE_UPDATE_POLICIES = ("exact", "periodic")
+Y_TRANSFORMS = (
+    "none",
+    "center",
+    "standardize",
+    "diff",
+    "log1p-center",
+    "log1p-standardize",
+    "log1p-diff",
+    "log1p-seasonal-diff",
+)
+FEATURE_SOURCE_TRANSFORM_LABELS = {
+    "file": "prepared_feature_file",
+    "tourism": "raw_tourism_panel",
+    "seasonal-corr": "log1p_seasonal_naive_residuals",
+    "seasonal-predictive": "log1p_seasonal_diff_predictive_scores",
+}
+FEATURE_SOURCE_FUNCTION_LABELS = {
+    "file": "prepared_feature_file",
+    "tourism": TOURISM_FEATURE_FUNCTIONS,
+    "seasonal-corr": SEASONAL_CORR_FEATURE_FUNCTIONS,
+    "seasonal-predictive": SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS,
+}
 META_COLUMNS = ("series_id", "transform", "n_obs", "train_start", "train_end")
+
+
+@dataclass(frozen=True)
+class VARAForecastConfig:
+    data_dir: Path = Path("data/tourism")
+    output_dir: Path = Path("outputs/vara_forecast")
+    data_path: Path | None = None
+    data_format: str = "auto"
+    date_col: str = "date"
+    series_col: str = "series_id"
+    value_col: str = "value"
+    max_series: int = 0
+    series_depth: int | None = DETAILED_CODE_DEPTH
+    series_suffix: str | None = BASE_SUFFIX
+    horizon: int = 12
+    grid_size: int = 7
+    ridge: float = 1e-2
+    forecast_scenario: str = "direct"
+    residual_transform: str = "center"
+    attention_mode: str = "dense"
+    attention_top_k: int | None = None
+    seasonal_lag: int = 12
+    feature_freq: int = 12
+    feature_functions: str | Sequence[str] = DEFAULT_TOURISM_TSFEATURES
+    feature_source: str = "tsfeatures"
+    feature_path: Path | None = None
+    feature_update_policy: str = "exact"
+    feature_update_interval: int = 1
+    forecast_mode: str = "recursive"
+    y_transform: str = "log1p-seasonal-diff"
+    ray_num_cpus: int = 1
+    max_cpus_per_task: int = 1
+    ray_debug: bool = False
+
+    @property
+    def input_path(self) -> Path:
+        return self.data_path if self.data_path is not None else self.data_dir / "tourism.csv"
+
+    def run_kwargs(self) -> dict:
+        return {
+            "data_dir": self.data_dir,
+            "max_series": self.max_series,
+            "horizon": self.horizon,
+            "grid_size": self.grid_size,
+            "y_transform": self.y_transform,
+            "seasonal_lag": self.seasonal_lag,
+            "ridge": self.ridge,
+            "data_path": self.data_path,
+            "data_format": self.data_format,
+            "date_col": self.date_col,
+            "series_col": self.series_col,
+            "value_col": self.value_col,
+            "series_depth": self.series_depth,
+            "series_suffix": self.series_suffix,
+            "feature_freq": self.feature_freq,
+            "feature_functions": self.feature_functions,
+            "feature_source": self.feature_source,
+            "feature_path": self.feature_path,
+            "feature_update_policy": self.feature_update_policy,
+            "feature_update_interval": self.feature_update_interval,
+            "attention_mode": self.attention_mode,
+            "attention_top_k": self.attention_top_k,
+            "forecast_scenario": self.forecast_scenario,
+            "residual_transform": self.residual_transform,
+            "ray_num_cpus": self.ray_num_cpus,
+            "max_cpus_per_task": self.max_cpus_per_task,
+            "ray_debug": self.ray_debug,
+        }
+
+
+DEFAULT_VARA_FORECAST_CONFIG = VARAForecastConfig()
 
 _JNP = None
 _VARAForecaster = None
@@ -224,8 +324,8 @@ def _series_depth(series_id: str, suffix: str = BASE_SUFFIX) -> int:
 
 def _base_series_columns(
     wide: pd.DataFrame,
-    series_depth: int | None = DETAILED_CODE_DEPTH,
-    series_suffix: str | None = BASE_SUFFIX,
+    series_depth: int | None = DEFAULT_VARA_FORECAST_CONFIG.series_depth,
+    series_suffix: str | None = DEFAULT_VARA_FORECAST_CONFIG.series_suffix,
 ) -> list[str]:
     cols = [c for c in wide.columns if c != "date"]
     if series_suffix:
@@ -244,6 +344,21 @@ def _feature_transform_from_y_transform(y_transform: str) -> str:
     if y_transform in {"log1p-center", "log1p-standardize"}:
         return "log1p"
     return y_transform
+
+
+def _finalize_feature_matrix(
+    feature_df: pd.DataFrame,
+    *,
+    label: str,
+    meta_columns: Sequence[str] = META_COLUMNS,
+) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    feature_cols = [col for col in feature_df.columns if col not in set(meta_columns)]
+    if not feature_cols:
+        raise ValueError(f"No {label} feature columns were produced.")
+    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
+    if not np.isfinite(Z).all():
+        raise ValueError(f"{label} feature matrix contains non-finite values.")
+    return Z, feature_df, feature_cols
 
 
 def _tourism_tsfeature_matrix(
@@ -272,14 +387,7 @@ def _tourism_tsfeature_matrix(
         clean=True,
         threads=1,
     )
-    meta_columns = set(META_COLUMNS)
-    feature_cols = [col for col in feature_df.columns if col not in meta_columns]
-    if not feature_cols:
-        raise ValueError("No tourism tsfeature columns were produced.")
-    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
-    if not np.isfinite(Z).all():
-        raise ValueError("Tourism tsfeature matrix contains non-finite values.")
-    return Z, feature_df, feature_cols
+    return _finalize_feature_matrix(feature_df, label="tourism tsfeature")
 
 
 def _cyclic_month(month: int, prefix: str) -> dict[str, float]:
@@ -415,13 +523,7 @@ def _tourism_specific_feature_matrix(
     from vara.series_features import clean_feature_frame
 
     feature_df = clean_feature_frame(feature_df, standardize_output=True, meta_columns=META_COLUMNS)
-    feature_cols = [col for col in feature_df.columns if col not in set(META_COLUMNS)]
-    if not feature_cols:
-        raise ValueError("No tourism-specific feature columns were produced.")
-    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
-    if not np.isfinite(Z).all():
-        raise ValueError("Tourism-specific feature matrix contains non-finite values.")
-    return Z, feature_df, feature_cols
+    return _finalize_feature_matrix(feature_df, label="tourism-specific")
 
 
 def _tourism_seasonal_predictive_score_matrix(
@@ -460,11 +562,7 @@ def _tourism_seasonal_predictive_score_matrix(
         rows.append(row)
 
     feature_df = pd.DataFrame(rows)
-    feature_cols = [col for col in feature_df.columns if col not in set(META_COLUMNS)]
-    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
-    if not np.isfinite(Z).all():
-        raise ValueError("Seasonal-predictive score matrix contains non-finite values.")
-    return Z, feature_df, feature_cols
+    return _finalize_feature_matrix(feature_df, label="seasonal-predictive score")
 
 
 def _tourism_seasonal_corr_feature_matrix(
@@ -532,13 +630,7 @@ def _tourism_seasonal_corr_feature_matrix(
     from vara.series_features import clean_feature_frame
 
     feature_df = clean_feature_frame(feature_df, standardize_output=True, meta_columns=META_COLUMNS)
-    feature_cols = [col for col in feature_df.columns if col not in set(META_COLUMNS)]
-    if not feature_cols:
-        raise ValueError("No seasonal-corr tourism feature columns were produced.")
-    Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
-    if not np.isfinite(Z).all():
-        raise ValueError("Seasonal-corr tourism feature matrix contains non-finite values.")
-    return Z, feature_df, feature_cols
+    return _finalize_feature_matrix(feature_df, label="seasonal-corr tourism")
 
 
 def _tourism_feature_matrix(
@@ -604,12 +696,9 @@ def _tourism_feature_matrix(
         tourism_block = tourism_df.loc[:, tourism_cols].add_prefix("tourism__")
         tsfeature_block = tsfeature_df.loc[:, tsfeature_cols].add_prefix("tsfeatures__")
         feature_df = pd.concat([feature_df, tourism_block, tsfeature_block], axis=1)
-        feature_cols = [*tourism_block.columns.tolist(), *tsfeature_block.columns.tolist()]
-        Z = feature_df.loc[:, feature_cols].to_numpy(dtype=float)
-        if not np.isfinite(Z).all():
-            raise ValueError("Hybrid tourism feature matrix contains non-finite values.")
-        return Z, feature_df, feature_cols
-    raise ValueError("feature_source must be 'file', 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
+        return _finalize_feature_matrix(feature_df, label="hybrid tourism")
+    valid = ", ".join(repr(item) for item in FEATURE_SOURCES)
+    raise ValueError(f"feature_source must be one of {valid}.")
 
 
 def _new_forecaster(
@@ -996,6 +1085,38 @@ def _fit_vara_origins_closed_loop(
     return results
 
 
+def _collect_origin_results(origin_results: list[dict]) -> dict:
+    if not origin_results:
+        raise ValueError("No VARA origin results were produced.")
+    return {
+        "forecast": np.vstack([result["forecast"] for result in origin_results]),
+        "baseline": np.vstack([result["baseline"] for result in origin_results]),
+        "residual": np.vstack([result["residual"] for result in origin_results]),
+        "forecast_transformed": np.vstack([result["forecast_transformed"] for result in origin_results]),
+        "feature_frames": [result["feature_df"] for result in origin_results],
+        "rolling_diagnostics": [result["diag"] for result in origin_results],
+        "exact_feature_origins": [int(result["origin"]) for result in origin_results if result["feature_exact"]],
+        "fit_diagnostics": origin_results[-1]["fit_diagnostics"],
+        "fitted_y_transform": {"model_scale": origin_results[-1]["model_scale"]},
+        "n_train_model_initial": int(origin_results[0]["n_train_model"]),
+        "n_train_model_final": int(origin_results[-1]["n_train_model"]),
+        "n_feature_columns": len(origin_results[-1]["feature_cols"]),
+    }
+
+
+def _write_wide_output(
+    output_dir: Path,
+    filename: str,
+    values: np.ndarray,
+    dates,
+    series_ids: list[str],
+) -> pd.DataFrame:
+    frame = pd.DataFrame(values, columns=series_ids)
+    frame.insert(0, "date", np.asarray(dates))
+    frame.to_csv(output_dir / filename, index=False)
+    return frame
+
+
 def _feature_function_label(feature_functions: str | Sequence[str]) -> str:
     if isinstance(feature_functions, str):
         return feature_functions
@@ -1003,63 +1124,47 @@ def _feature_function_label(feature_functions: str | Sequence[str]) -> str:
 
 
 def _feature_transform_label(feature_source: str, y_transform: str) -> str:
-    if feature_source == "file":
-        return "prepared_feature_file"
-    if feature_source == "tourism":
-        return "raw_tourism_panel"
-    if feature_source == "seasonal-corr":
-        return "log1p_seasonal_naive_residuals"
-    if feature_source == "seasonal-predictive":
-        return "log1p_seasonal_diff_predictive_scores"
     if feature_source == "hybrid":
         return f"raw_tourism_panel+{_feature_transform_from_y_transform(y_transform)}"
-    return _feature_transform_from_y_transform(y_transform)
+    return FEATURE_SOURCE_TRANSFORM_LABELS.get(feature_source, _feature_transform_from_y_transform(y_transform))
 
 
 def _feature_function_metric(feature_source: str, feature_functions: str | Sequence[str]) -> str:
-    if feature_source == "file":
-        return "prepared_feature_file"
-    if feature_source == "tourism":
-        return TOURISM_FEATURE_FUNCTIONS
-    if feature_source == "seasonal-corr":
-        return SEASONAL_CORR_FEATURE_FUNCTIONS
-    if feature_source == "seasonal-predictive":
-        return SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS
     if feature_source == "hybrid":
         return f"{TOURISM_FEATURE_FUNCTIONS},{_feature_function_label(feature_functions)}"
-    return _feature_function_label(feature_functions)
+    return FEATURE_SOURCE_FUNCTION_LABELS.get(feature_source, _feature_function_label(feature_functions))
 
 
 def run_vara_forecast(
-    data_dir: Path,
-    output_dir: Path,
-    max_series: int,
-    horizon: int,
-    grid_size: int,
-    y_transform: str,
-    seasonal_lag: int,
-    ridge: float,
-    data_path: Path | None = None,
-    data_format: str = "auto",
-    date_col: str = "date",
-    series_col: str = "series_id",
-    value_col: str = "value",
-    series_depth: int | None = DETAILED_CODE_DEPTH,
-    series_suffix: str | None = BASE_SUFFIX,
-    feature_freq: int = 12,
-    feature_functions: str | Sequence[str] = TOURISM_TSFEATURES,
-    feature_source: str = "tsfeatures",
-    feature_path: Path | None = None,
-    forecast_mode: str = "recursive",
-    feature_update_policy: str = "exact",
-    feature_update_interval: int = 1,
-    attention_mode: str = "dense",
-    attention_top_k: int | None = None,
-    forecast_scenario: str = "direct",
-    residual_transform: str = "center",
-    ray_num_cpus: int = 1,
-    max_cpus_per_task: int = 1,
-    ray_debug: bool = False,
+    data_dir: Path = DEFAULT_VARA_FORECAST_CONFIG.data_dir,
+    output_dir: Path = DEFAULT_VARA_FORECAST_CONFIG.output_dir,
+    max_series: int = DEFAULT_VARA_FORECAST_CONFIG.max_series,
+    horizon: int = DEFAULT_VARA_FORECAST_CONFIG.horizon,
+    grid_size: int = DEFAULT_VARA_FORECAST_CONFIG.grid_size,
+    y_transform: str = DEFAULT_VARA_FORECAST_CONFIG.y_transform,
+    seasonal_lag: int = DEFAULT_VARA_FORECAST_CONFIG.seasonal_lag,
+    ridge: float = DEFAULT_VARA_FORECAST_CONFIG.ridge,
+    data_path: Path | None = DEFAULT_VARA_FORECAST_CONFIG.data_path,
+    data_format: str = DEFAULT_VARA_FORECAST_CONFIG.data_format,
+    date_col: str = DEFAULT_VARA_FORECAST_CONFIG.date_col,
+    series_col: str = DEFAULT_VARA_FORECAST_CONFIG.series_col,
+    value_col: str = DEFAULT_VARA_FORECAST_CONFIG.value_col,
+    series_depth: int | None = DEFAULT_VARA_FORECAST_CONFIG.series_depth,
+    series_suffix: str | None = DEFAULT_VARA_FORECAST_CONFIG.series_suffix,
+    feature_freq: int = DEFAULT_VARA_FORECAST_CONFIG.feature_freq,
+    feature_functions: str | Sequence[str] = DEFAULT_VARA_FORECAST_CONFIG.feature_functions,
+    feature_source: str = DEFAULT_VARA_FORECAST_CONFIG.feature_source,
+    feature_path: Path | None = DEFAULT_VARA_FORECAST_CONFIG.feature_path,
+    forecast_mode: str = DEFAULT_VARA_FORECAST_CONFIG.forecast_mode,
+    feature_update_policy: str = DEFAULT_VARA_FORECAST_CONFIG.feature_update_policy,
+    feature_update_interval: int = DEFAULT_VARA_FORECAST_CONFIG.feature_update_interval,
+    attention_mode: str = DEFAULT_VARA_FORECAST_CONFIG.attention_mode,
+    attention_top_k: int | None = DEFAULT_VARA_FORECAST_CONFIG.attention_top_k,
+    forecast_scenario: str = DEFAULT_VARA_FORECAST_CONFIG.forecast_scenario,
+    residual_transform: str = DEFAULT_VARA_FORECAST_CONFIG.residual_transform,
+    ray_num_cpus: int = DEFAULT_VARA_FORECAST_CONFIG.ray_num_cpus,
+    max_cpus_per_task: int = DEFAULT_VARA_FORECAST_CONFIG.max_cpus_per_task,
+    ray_debug: bool = DEFAULT_VARA_FORECAST_CONFIG.ray_debug,
 ) -> dict:
     if forecast_scenario not in set(FORECAST_SCENARIOS):
         raise ValueError(f"forecast_scenario must be one of {FORECAST_SCENARIOS}.")
@@ -1072,20 +1177,23 @@ def run_vara_forecast(
             feature_source = "file"
         elif feature_source != "file":
             raise ValueError("feature_path can only be used with feature_source='file' or the default feature_source.")
-    if feature_source not in {"file", "tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"}:
-        raise ValueError("feature_source must be 'file', 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
-    if attention_mode not in {"dense", "topk", "score", "score-topk"}:
-        raise ValueError("attention_mode must be 'dense', 'topk', 'score', or 'score-topk'.")
-    if attention_mode in {"topk", "score-topk"} and attention_top_k is None:
+    if feature_source not in FEATURE_SOURCES:
+        valid = ", ".join(repr(item) for item in FEATURE_SOURCES)
+        raise ValueError(f"feature_source must be one of {valid}.")
+    if attention_mode not in ATTENTION_MODES:
+        valid = ", ".join(repr(item) for item in ATTENTION_MODES)
+        raise ValueError(f"attention_mode must be one of {valid}.")
+    if attention_mode in TOPK_ATTENTION_MODES and attention_top_k is None:
         raise ValueError("attention_top_k must be provided when attention_mode uses top-k.")
     if feature_source == "file" and input_feature_path is None:
         raise ValueError("feature_path must be provided when feature_source='file'.")
-    if feature_source == "seasonal-predictive" and attention_mode not in {"score", "score-topk"}:
+    if feature_source in SCORE_FEATURE_SOURCES and attention_mode not in SCORE_ATTENTION_MODES:
         raise ValueError("feature_source='seasonal-predictive' requires attention_mode='score' or 'score-topk'.")
-    if feature_source != "seasonal-predictive" and attention_mode in {"score", "score-topk"}:
+    if feature_source not in SCORE_FEATURE_SOURCES and attention_mode in SCORE_ATTENTION_MODES:
         raise ValueError("score attention modes require feature_source='seasonal-predictive'.")
-    if feature_update_policy not in {"exact", "periodic"}:
-        raise ValueError("feature_update_policy must be 'exact' or 'periodic'.")
+    if feature_update_policy not in FEATURE_UPDATE_POLICIES:
+        valid = ", ".join(repr(item) for item in FEATURE_UPDATE_POLICIES)
+        raise ValueError(f"feature_update_policy must be one of {valid}.")
     if int(feature_update_interval) < 1:
         raise ValueError("feature_update_interval must be at least 1.")
     feature_update_interval = int(feature_update_interval)
@@ -1099,8 +1207,43 @@ def run_vara_forecast(
         raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus.")
     use_ray = forecast_mode == "rolling-origin" and ray_num_cpus > 1
 
-    input_path = data_path if data_path is not None else data_dir / "tourism.csv"
+    data_dir = Path(data_dir)
+    output_dir = Path(output_dir)
+    data_path = None if data_path is None else Path(data_path)
+    input_feature_path = None if input_feature_path is None else Path(input_feature_path)
     series_suffix = None if series_suffix == "" else series_suffix
+    config = VARAForecastConfig(
+        data_dir=data_dir,
+        output_dir=output_dir,
+        data_path=data_path,
+        data_format=data_format,
+        date_col=date_col,
+        series_col=series_col,
+        value_col=value_col,
+        max_series=max_series,
+        series_depth=series_depth,
+        series_suffix=series_suffix,
+        horizon=horizon,
+        grid_size=grid_size,
+        ridge=ridge,
+        forecast_scenario=forecast_scenario,
+        residual_transform=residual_transform,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
+        seasonal_lag=seasonal_lag,
+        feature_freq=feature_freq,
+        feature_functions=feature_functions,
+        feature_source=feature_source,
+        feature_path=input_feature_path,
+        feature_update_policy=feature_update_policy,
+        feature_update_interval=feature_update_interval,
+        forecast_mode=forecast_mode,
+        y_transform=y_transform,
+        ray_num_cpus=ray_num_cpus,
+        max_cpus_per_task=max_cpus_per_task,
+        ray_debug=ray_debug,
+    )
+    input_path = config.input_path
     wide = load_panel_data(
         input_path,
         data_format=data_format,
@@ -1184,22 +1327,19 @@ def run_vara_forecast(
             forecast_scenario=forecast_scenario,
             residual_transform=residual_transform,
         )
-        forecasts = [result["forecast"] for result in origin_results]
-        baseline_steps = [result["baseline"] for result in origin_results]
-        residual_steps = [result["residual"] for result in origin_results]
-        transformed_forecasts = [result["forecast_transformed"] for result in origin_results]
-        feature_frames.extend(result["feature_df"] for result in origin_results)
-        rolling_diagnostics.extend(result["diag"] for result in origin_results)
-        exact_feature_origins = [int(result["origin"]) for result in origin_results if result["feature_exact"]]
-        forecast = np.vstack(forecasts)
-        baseline_forecasts.append(np.vstack(baseline_steps))
-        residual_forecasts.append(np.vstack(residual_steps))
-        forecast_transformed = np.vstack(transformed_forecasts)
-        fit_diagnostics = origin_results[-1]["fit_diagnostics"]
-        fitted_y_transform = {"model_scale": origin_results[-1]["model_scale"]}
-        n_train_model_initial = int(origin_results[0]["n_train_model"])
-        n_train_model_final = int(origin_results[-1]["n_train_model"])
-        n_feature_columns = len(origin_results[-1]["feature_cols"])
+        collected = _collect_origin_results(origin_results)
+        forecast = collected["forecast"]
+        baseline_forecasts.append(collected["baseline"])
+        residual_forecasts.append(collected["residual"])
+        forecast_transformed = collected["forecast_transformed"]
+        feature_frames.extend(collected["feature_frames"])
+        rolling_diagnostics.extend(collected["rolling_diagnostics"])
+        exact_feature_origins = collected["exact_feature_origins"]
+        fit_diagnostics = collected["fit_diagnostics"]
+        fitted_y_transform = collected["fitted_y_transform"]
+        n_train_model_initial = collected["n_train_model_initial"]
+        n_train_model_final = collected["n_train_model_final"]
+        n_feature_columns = collected["n_feature_columns"]
     else:
         if use_ray:
             ray_module, ray_started_here = _start_ray(ray_num_cpus, max_cpus_per_task)
@@ -1233,37 +1373,26 @@ def run_vara_forecast(
                     ray_module.shutdown()
                     _print_progress("Ray shut down")
 
-            forecasts = [result["forecast"] for result in origin_results]
-            baseline_steps = [result["baseline"] for result in origin_results]
-            residual_steps = [result["residual"] for result in origin_results]
-            transformed_forecasts = [result["forecast_transformed"] for result in origin_results]
-            feature_frames.extend(result["feature_df"] for result in origin_results)
-            rolling_diagnostics.extend(result["diag"] for result in origin_results)
-            exact_feature_origins = [int(result["origin"]) for result in origin_results if result["feature_exact"]]
-            forecast = np.vstack(forecasts)
-            baseline_forecasts.append(np.vstack(baseline_steps))
-            residual_forecasts.append(np.vstack(residual_steps))
-            forecast_transformed = np.vstack(transformed_forecasts)
-            fit_diagnostics = origin_results[-1]["fit_diagnostics"]
-            fitted_y_transform = {"model_scale": origin_results[-1]["model_scale"]}
-            n_train_model_initial = int(origin_results[0]["n_train_model"])
-            n_train_model_final = int(origin_results[-1]["n_train_model"])
-            n_feature_columns = len(origin_results[-1]["feature_cols"])
+            collected = _collect_origin_results(origin_results)
+            forecast = collected["forecast"]
+            baseline_forecasts.append(collected["baseline"])
+            residual_forecasts.append(collected["residual"])
+            forecast_transformed = collected["forecast_transformed"]
+            feature_frames.extend(collected["feature_frames"])
+            rolling_diagnostics.extend(collected["rolling_diagnostics"])
+            exact_feature_origins = collected["exact_feature_origins"]
+            fit_diagnostics = collected["fit_diagnostics"]
+            fitted_y_transform = collected["fitted_y_transform"]
+            n_train_model_initial = collected["n_train_model_initial"]
+            n_train_model_final = collected["n_train_model_final"]
+            n_feature_columns = collected["n_feature_columns"]
         else:
-            forecasts = []
-            baseline_steps = []
-            residual_steps = []
-            transformed_forecasts = []
+            origin_results = []
             cached_Z = None
             cached_feature_df = None
             cached_feature_cols = None
             cached_feature_source_origin = None
             cached_feature_source_train_end = None
-            n_train_model_initial = 0
-            n_train_model_final = 0
-            fit_diagnostics = {}
-            fitted_y_transform = {"model_scale": ""}
-            feature_cols = []
             for step in range(horizon):
                 source_step, feature_exact = _feature_source_step(step, feature_update_policy, feature_update_interval)
                 if feature_exact or cached_Z is None:
@@ -1285,13 +1414,12 @@ def run_vara_forecast(
                     cached_feature_source_origin = source_step + 1
                     fallback_train_end = wide["date"].iloc[len(wide) - feature_horizon - 1]
                     cached_feature_source_train_end = _feature_train_end(feature_df, fallback_train_end)
-                    exact_feature_origins.append(source_step + 1)
                 else:
                     Z = cached_Z
                     feature_df = cached_feature_df.copy()
                     feature_cols = list(cached_feature_cols)
 
-                result = _fit_vara_origin_step(
+                origin_results.append(_fit_vara_origin_step(
                     wide,
                     Y_raw,
                     series_ids,
@@ -1312,24 +1440,21 @@ def run_vara_forecast(
                     feature_exact=feature_exact,
                     feature_source_origin=cached_feature_source_origin,
                     feature_source_train_end=cached_feature_source_train_end,
-                )
-                forecasts.append(result["forecast"])
-                baseline_steps.append(result["baseline"])
-                residual_steps.append(result["residual"])
-                transformed_forecasts.append(result["forecast_transformed"])
-                feature_frames.append(result["feature_df"])
-                rolling_diagnostics.append(result["diag"])
-                fit_diagnostics = result["fit_diagnostics"]
-                fitted_y_transform = {"model_scale": result["model_scale"]}
-                if step == 0:
-                    n_train_model_initial = int(result["n_train_model"])
-                n_train_model_final = int(result["n_train_model"])
+                ))
 
-            forecast = np.vstack(forecasts)
-            baseline_forecasts.append(np.vstack(baseline_steps))
-            residual_forecasts.append(np.vstack(residual_steps))
-            forecast_transformed = np.vstack(transformed_forecasts)
-            n_feature_columns = len(feature_cols)
+            collected = _collect_origin_results(origin_results)
+            forecast = collected["forecast"]
+            baseline_forecasts.append(collected["baseline"])
+            residual_forecasts.append(collected["residual"])
+            forecast_transformed = collected["forecast_transformed"]
+            feature_frames.extend(collected["feature_frames"])
+            rolling_diagnostics.extend(collected["rolling_diagnostics"])
+            exact_feature_origins = collected["exact_feature_origins"]
+            fit_diagnostics = collected["fit_diagnostics"]
+            fitted_y_transform = collected["fitted_y_transform"]
+            n_train_model_initial = collected["n_train_model_initial"]
+            n_train_model_final = collected["n_train_model_final"]
+            n_feature_columns = collected["n_feature_columns"]
 
     baseline_forecast = np.vstack(baseline_forecasts) if baseline_forecasts else np.zeros_like(forecast)
     residual_forecast = np.vstack(residual_forecasts) if residual_forecasts else forecast.copy()
@@ -1344,29 +1469,13 @@ def run_vara_forecast(
     if rolling_diagnostics:
         pd.DataFrame(rolling_diagnostics).to_csv(output_dir / "tourism_rolling_origin_diagnostics.csv", index=False)
 
-    forecast_df = pd.DataFrame(forecast, columns=series_ids)
-    forecast_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
-    forecast_df.to_csv(output_dir / "tourism_forecast.csv", index=False)
-
-    baseline_df = pd.DataFrame(baseline_forecast, columns=series_ids)
-    baseline_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
-    baseline_df.to_csv(output_dir / "tourism_baseline_forecast.csv", index=False)
-
-    residual_forecast_df = pd.DataFrame(residual_forecast, columns=series_ids)
-    residual_forecast_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
-    residual_forecast_df.to_csv(output_dir / "tourism_residual_forecast.csv", index=False)
-
-    forecast_transformed_df = pd.DataFrame(forecast_transformed, columns=series_ids)
-    forecast_transformed_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
-    forecast_transformed_df.to_csv(output_dir / "tourism_forecast_transformed.csv", index=False)
-
-    test_df = pd.DataFrame(test, columns=series_ids)
-    test_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
-    test_df.to_csv(output_dir / "tourism_test.csv", index=False)
-
-    error_df = pd.DataFrame(errors, columns=series_ids)
-    error_df.insert(0, "date", wide["date"].iloc[-horizon:].to_numpy())
-    error_df.to_csv(output_dir / "tourism_errors.csv", index=False)
+    forecast_dates = wide["date"].iloc[-horizon:].to_numpy()
+    _write_wide_output(output_dir, "tourism_forecast.csv", forecast, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "tourism_baseline_forecast.csv", baseline_forecast, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "tourism_residual_forecast.csv", residual_forecast, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "tourism_forecast_transformed.csv", forecast_transformed, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "tourism_test.csv", test, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "tourism_errors.csv", errors, forecast_dates, series_ids)
 
     by_series, by_origin, summary = forecast_metric_tables(
         {"vara": forecast},
@@ -1450,163 +1559,182 @@ def run_vara_forecast(
 run_tourism_forecast = run_vara_forecast
 
 
-def main() -> None:
+def _vara_config_from_args(args: argparse.Namespace) -> VARAForecastConfig:
+    series_depth = None if args.series_depth is None or int(args.series_depth) < 0 else int(args.series_depth)
+    series_suffix = None if args.series_suffix in (None, "") else args.series_suffix
+    return VARAForecastConfig(
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        data_path=args.data_path,
+        data_format=args.data_format,
+        date_col=args.date_col,
+        series_col=args.series_col,
+        value_col=args.value_col,
+        max_series=args.max_series,
+        series_depth=series_depth,
+        series_suffix=series_suffix,
+        horizon=args.horizon,
+        grid_size=args.grid_size,
+        ridge=args.ridge,
+        forecast_scenario=args.forecast_scenario,
+        residual_transform=args.residual_transform,
+        attention_mode=args.attention_mode,
+        attention_top_k=args.attention_top_k,
+        seasonal_lag=args.seasonal_lag,
+        feature_freq=args.feature_freq,
+        feature_functions=args.feature_functions,
+        feature_source=args.feature_source,
+        feature_path=args.feature_path,
+        feature_update_policy=args.feature_update_policy,
+        feature_update_interval=args.feature_update_interval,
+        forecast_mode=args.forecast_mode,
+        y_transform=args.y_transform,
+        ray_num_cpus=args.ray_num_cpus,
+        max_cpus_per_task=args.max_cpus_per_task,
+        ray_debug=args.ray_debug,
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    default_config = DEFAULT_VARA_FORECAST_CONFIG
     parser = argparse.ArgumentParser(description="Run a VARA forecast on panel time-series data.")
-    parser.add_argument("--data-dir", type=Path, default=Path("data/tourism"))
+    parser.add_argument("--data-dir", type=Path, default=default_config.data_dir)
     parser.add_argument(
         "--data-path",
         type=Path,
-        default=None,
+        default=default_config.data_path,
         help="CSV/parquet path in wide or long panel format. Overrides --data-dir/tourism.csv.",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/vara_forecast"))
-    parser.add_argument("--data-format", choices=["auto", "wide", "long"], default="auto")
-    parser.add_argument("--date-col", type=str, default="date")
-    parser.add_argument("--series-col", type=str, default="series_id")
-    parser.add_argument("--value-col", type=str, default="value")
-    parser.add_argument("--max-series", type=int, default=0, help="0 means use all selected series.")
+    parser.add_argument("--output-dir", type=Path, default=default_config.output_dir)
+    parser.add_argument("--data-format", choices=["auto", "wide", "long"], default=default_config.data_format)
+    parser.add_argument("--date-col", type=str, default=default_config.date_col)
+    parser.add_argument("--series-col", type=str, default=default_config.series_col)
+    parser.add_argument("--value-col", type=str, default=default_config.value_col)
+    parser.add_argument("--max-series", type=int, default=default_config.max_series, help="0 means use all selected series.")
     parser.add_argument(
         "--series-depth",
         type=int,
-        default=DETAILED_CODE_DEPTH,
+        default=-1 if default_config.series_depth is None else default_config.series_depth,
         help="Hierarchy code depth to forecast; use -1 for all All-suffix series.",
     )
     parser.add_argument(
         "--series-suffix",
         type=str,
-        default=BASE_SUFFIX,
-        help="Series-column suffix used for selection; pass '' to use all non-date columns.",
+        default="" if default_config.series_suffix is None else default_config.series_suffix,
+        help="Series-column suffix used for selection; pass an empty string to use all non-date columns.",
     )
-    parser.add_argument("--horizon", type=int, default=12)
-    parser.add_argument("--grid-size", type=int, default=7)
-    parser.add_argument("--ridge", type=float, default=1e-2)
+    parser.add_argument("--horizon", type=int, default=default_config.horizon)
+    parser.add_argument("--grid-size", type=int, default=default_config.grid_size)
+    parser.add_argument("--ridge", type=float, default=default_config.ridge)
     parser.add_argument(
         "--forecast-scenario",
         type=str,
-        default="direct",
+        default=default_config.forecast_scenario,
         choices=list(FORECAST_SCENARIOS),
         help="Forecasting scenario: direct VARA or residual correction around a baseline.",
     )
     parser.add_argument(
         "--residual-transform",
         type=str,
-        default="center",
+        default=default_config.residual_transform,
         choices=["center", "standardize"],
         help="Transform used for VARA when fitting residual-correction scenarios.",
     )
     parser.add_argument(
         "--attention-mode",
         type=str,
-        default="dense",
-        choices=["dense", "topk", "score", "score-topk"],
+        default=default_config.attention_mode,
+        choices=list(ATTENTION_MODES),
         help="Attention computation mode for VARA.",
     )
     parser.add_argument(
         "--attention-top-k",
         type=int,
-        default=None,
+        default=default_config.attention_top_k,
         help="Top-k neighbor count when --attention-mode topk.",
     )
-    parser.add_argument("--seasonal-lag", type=int, default=12)
-    parser.add_argument("--feature-freq", type=int, default=12)
-    parser.add_argument("--feature-functions", type=str, default=DEFAULT_TOURISM_TSFEATURES)
+    parser.add_argument("--seasonal-lag", type=int, default=default_config.seasonal_lag)
+    parser.add_argument("--feature-freq", type=int, default=default_config.feature_freq)
+    parser.add_argument("--feature-functions", type=str, default=default_config.feature_functions)
     parser.add_argument(
         "--feature-source",
         type=str,
-        default="tsfeatures",
-        choices=["file", "tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"],
+        default=default_config.feature_source,
+        choices=list(FEATURE_SOURCES),
         help="Feature source for attention construction.",
     )
     parser.add_argument(
         "--feature-path",
         type=Path,
-        default=None,
+        default=default_config.feature_path,
         help="Prepared series-level feature CSV/parquet. Providing this path implies --feature-source file.",
     )
     parser.add_argument(
         "--feature-update-policy",
         type=str,
-        default="exact",
-        choices=["exact", "periodic"],
+        default=default_config.feature_update_policy,
+        choices=list(FEATURE_UPDATE_POLICIES),
         help="Feature update policy for rolling-origin mode.",
     )
     parser.add_argument(
         "--feature-update-interval",
         type=int,
-        default=1,
+        default=default_config.feature_update_interval,
         help="For periodic feature updates, recompute exact features every K rolling origins.",
     )
     parser.add_argument(
         "--forecast-mode",
         type=str,
-        default="recursive",
-        help=(
-            "Forecast mode, or comma-separated modes. Valid modes are "
-            "recursive, rolling-origin, and closed-loop. Underscore aliases such as rolling_origin "
-            "and closed_loop are accepted."
-        ),
+        default=default_config.forecast_mode,
+        help="Forecast mode, or comma-separated modes: recursive, rolling-origin, closed-loop.",
     )
-    parser.add_argument("--ray-num-cpus", type=int, default=1, help="Use Ray for rolling-origin VARA when > 1; closed-loop is sequential.")
-    parser.add_argument("--max-cpus-per-task", type=int, default=1, help="Ray CPU resources per rolling-origin task.")
+    parser.add_argument(
+        "--ray-num-cpus",
+        type=int,
+        default=default_config.ray_num_cpus,
+        help="Use Ray for rolling-origin VARA when > 1; closed-loop is sequential.",
+    )
+    parser.add_argument(
+        "--max-cpus-per-task",
+        type=int,
+        default=default_config.max_cpus_per_task,
+        help="Ray CPU resources per rolling-origin task.",
+    )
     parser.add_argument("--ray-debug", action="store_true", help="Print Ray rolling-origin task start/done logs.")
     parser.add_argument(
         "--y-transform",
         type=str,
-        default="log1p-seasonal-diff",
-        choices=["none", "center", "standardize", "diff", "log1p-center", "log1p-standardize", "log1p-diff", "log1p-seasonal-diff"],
+        default=default_config.y_transform,
+        choices=list(Y_TRANSFORMS),
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def main() -> None:
+    args = _parse_args()
     try:
         forecast_modes = _parse_forecast_modes(args.forecast_mode)
     except ValueError as exc:
-        parser.error(str(exc))
+        raise SystemExit(f"run_vara_forecast.py: error: {exc}") from exc
 
-    run_kwargs = {
-        "data_dir": args.data_dir,
-        "max_series": args.max_series,
-        "horizon": args.horizon,
-        "grid_size": args.grid_size,
-        "y_transform": args.y_transform,
-        "seasonal_lag": args.seasonal_lag,
-        "ridge": args.ridge,
-        "data_path": args.data_path,
-        "data_format": args.data_format,
-        "date_col": args.date_col,
-        "series_col": args.series_col,
-        "value_col": args.value_col,
-        "series_depth": None if args.series_depth < 0 else args.series_depth,
-        "series_suffix": None if args.series_suffix == "" else args.series_suffix,
-        "feature_freq": args.feature_freq,
-        "feature_functions": args.feature_functions,
-        "feature_source": args.feature_source,
-        "feature_path": args.feature_path,
-        "feature_update_policy": args.feature_update_policy,
-        "feature_update_interval": args.feature_update_interval,
-        "attention_mode": args.attention_mode,
-        "attention_top_k": args.attention_top_k,
-        "forecast_scenario": args.forecast_scenario,
-        "residual_transform": args.residual_transform,
-        "ray_num_cpus": args.ray_num_cpus,
-        "max_cpus_per_task": args.max_cpus_per_task,
-        "ray_debug": args.ray_debug,
-    }
+    config = _vara_config_from_args(args)
+    run_kwargs = config.run_kwargs()
 
     if len(forecast_modes) == 1:
         run_vara_forecast(
-            output_dir=args.output_dir,
+            output_dir=config.output_dir,
             forecast_mode=forecast_modes[0],
             **run_kwargs,
         )
-        summary = pd.read_csv(args.output_dir / "metrics_summary.csv")
+        summary = pd.read_csv(config.output_dir / "metrics_summary.csv")
     else:
-        args.output_dir.mkdir(parents=True, exist_ok=True)
+        config.output_dir.mkdir(parents=True, exist_ok=True)
         summary_frames = []
         metrics_frames = []
         by_series_frames = []
         by_origin_frames = []
         for forecast_mode in forecast_modes:
-            mode_output_dir = args.output_dir / forecast_mode
+            mode_output_dir = config.output_dir / forecast_mode
             _print_progress(f"Running VARA forecast mode={forecast_mode}, output_dir={mode_output_dir}")
             run_vara_forecast(
                 output_dir=mode_output_dir,
@@ -1619,15 +1747,15 @@ def main() -> None:
             by_origin_frames.append(pd.read_csv(mode_output_dir / "metrics_by_origin.csv"))
 
         summary = pd.concat(summary_frames, ignore_index=True, sort=False)
-        summary.to_csv(args.output_dir / "metrics_summary.csv", index=False)
+        summary.to_csv(config.output_dir / "metrics_summary.csv", index=False)
         pd.concat(metrics_frames, ignore_index=True, sort=False).to_csv(
-            args.output_dir / "tourism_metrics.csv", index=False
+            config.output_dir / "tourism_metrics.csv", index=False
         )
         pd.concat(by_series_frames, ignore_index=True, sort=False).to_csv(
-            args.output_dir / "metrics_by_series.csv", index=False
+            config.output_dir / "metrics_by_series.csv", index=False
         )
         pd.concat(by_origin_frames, ignore_index=True, sort=False).to_csv(
-            args.output_dir / "metrics_by_origin.csv", index=False
+            config.output_dir / "metrics_by_origin.csv", index=False
         )
 
     print("VARA forecast summary:")
