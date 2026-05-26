@@ -5,20 +5,18 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from pathlib import Path
 from typing import Sequence
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 
-from vara.forecast import VARAForecaster
 from vara.forecast_data import load_panel_data
 from vara.forecast_metrics import forecast_metric_tables
-from vara.series_features import META_COLUMNS, clean_feature_frame, extract_series_tsfeatures, load_series_feature_matrix
 
 BASE_SUFFIX = "All"
 DETAILED_CODE_DEPTH = 3
@@ -53,6 +51,26 @@ SEASONAL_CORR_FEATURE_FUNCTIONS = (
 )
 SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS = "seasonal_diff_predictive_corr_lag1_lag12"
 FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual")
+FORECAST_MODES = ("recursive", "rolling-origin", "closed-loop")
+META_COLUMNS = ("series_id", "transform", "n_obs", "train_start", "train_end")
+
+_JNP = None
+_VARAForecaster = None
+
+
+def _runtime_imports():
+    global _JNP, _VARAForecaster
+    if _JNP is None or _VARAForecaster is None:
+        import jax.numpy as jnp
+        from vara.forecast import VARAForecaster
+
+        _JNP = jnp
+        _VARAForecaster = VARAForecaster
+    return _JNP, _VARAForecaster
+
+
+def _print_progress(message: str) -> None:
+    print(f"[{pd.Timestamp.now():%Y-%m-%d %H:%M:%S}] {message}", flush=True)
 
 
 def _fit_y_transform(train: np.ndarray, method: str, seasonal_lag: int) -> tuple[np.ndarray, dict]:
@@ -212,6 +230,8 @@ def _tourism_tsfeature_matrix(
     feature_freq: int = 12,
     feature_functions: str | Sequence[str] = TOURISM_TSFEATURES,
 ) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    from vara.series_features import extract_series_tsfeatures
+
     feature_df = extract_series_tsfeatures(
         wide.loc[:, ["date", *series_ids]],
         date_col="date",
@@ -366,6 +386,8 @@ def _tourism_specific_feature_matrix(
 
     feature_df = pd.DataFrame(rows)
     feature_df = pd.get_dummies(feature_df, columns=["code_1", "code_2", "code_3"], dtype=float)
+    from vara.series_features import clean_feature_frame
+
     feature_df = clean_feature_frame(feature_df, standardize_output=True, meta_columns=META_COLUMNS)
     feature_cols = [col for col in feature_df.columns if col not in set(META_COLUMNS)]
     if not feature_cols:
@@ -481,6 +503,8 @@ def _tourism_seasonal_corr_feature_matrix(
         rows.append(row)
 
     feature_df = pd.DataFrame(rows)
+    from vara.series_features import clean_feature_frame
+
     feature_df = clean_feature_frame(feature_df, standardize_output=True, meta_columns=META_COLUMNS)
     feature_cols = [col for col in feature_df.columns if col not in set(META_COLUMNS)]
     if not feature_cols:
@@ -506,6 +530,8 @@ def _tourism_feature_matrix(
     if feature_source == "file":
         if feature_path is None:
             raise ValueError("feature_path must be provided when feature_source='file'.")
+        from vara.series_features import load_series_feature_matrix
+
         return load_series_feature_matrix(feature_path, series_ids, standardize_output=True)
     if feature_source == "tsfeatures":
         return _tourism_tsfeature_matrix(
@@ -565,7 +591,8 @@ def _new_forecaster(
     ridge: float,
     attention_mode: str = "dense",
     attention_top_k: int | None = None,
-) -> VARAForecaster:
+):
+    _, VARAForecaster = _runtime_imports()
     return VARAForecaster(
         grid_size=grid_size,
         eta_bounds=(-2.0, 2.0),
@@ -574,6 +601,373 @@ def _new_forecaster(
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
     )
+
+
+
+def _feature_train_end(feature_df: pd.DataFrame, fallback) -> str:
+    if "train_end" in feature_df.columns and len(feature_df) > 0:
+        value = feature_df["train_end"].iloc[0]
+        if pd.notna(value):
+            return str(value)
+    return str(fallback)
+
+
+def _feature_source_step(step: int, feature_update_policy: str, feature_update_interval: int) -> tuple[int, bool]:
+    if feature_update_policy == "exact":
+        return int(step), True
+    source_step = (int(step) // int(feature_update_interval)) * int(feature_update_interval)
+    return source_step, source_step == int(step)
+
+
+def _fit_vara_origin_step(
+    wide: pd.DataFrame,
+    Y_raw: np.ndarray,
+    series_ids: list[str],
+    *,
+    step: int,
+    horizon: int,
+    Z: np.ndarray,
+    feature_df: pd.DataFrame,
+    feature_cols: list[str],
+    y_transform: str,
+    seasonal_lag: int,
+    grid_size: int,
+    ridge: float,
+    attention_mode: str,
+    attention_top_k: int | None,
+    forecast_scenario: str,
+    residual_transform: str,
+    feature_update_policy: str,
+    feature_exact: bool,
+    feature_source_origin: int,
+    feature_source_train_end: str,
+    origin_train: np.ndarray | None = None,
+    train_end_override=None,
+) -> dict:
+    jnp, _ = _runtime_imports()
+    origin = int(step) + 1
+    origin_end = len(wide) - int(horizon) + int(step)
+    if origin_train is None:
+        origin_train = Y_raw[:origin_end]
+    else:
+        origin_train = np.asarray(origin_train, dtype=float)
+    baseline_one = np.zeros((1, len(series_ids)), dtype=float)
+    if forecast_scenario == "direct":
+        model_train = origin_train
+        model_transform = y_transform
+    else:
+        baseline_one = _seasonal_naive_forecast(origin_train, 1, seasonal_lag)
+        model_train = _seasonal_naive_residual_panel(origin_train, seasonal_lag)
+        model_transform = residual_transform
+
+    Y_train, fitted_y_transform = _fit_y_transform(model_train, model_transform, seasonal_lag)
+    forecaster = _new_forecaster(grid_size, ridge, attention_mode, attention_top_k)
+    forecaster.fit(jnp.asarray(Y_train), jnp.asarray(Z))
+    forecast_model_scale = np.asarray(forecaster.predict(h=1))
+    transformed_one = _unscale_y_transform(forecast_model_scale, fitted_y_transform)
+    residual_one = _inverse_y_transform(forecast_model_scale, fitted_y_transform)
+    forecast_one = residual_one if forecast_scenario == "direct" else baseline_one + residual_one
+
+    forecast_date = str(wide["date"].iloc[origin_end])
+    train_end = str(train_end_override if train_end_override is not None else wide["date"].iloc[origin_end - 1])
+    origin_features = feature_df.copy()
+    origin_features.insert(0, "origin", origin)
+    origin_features.insert(1, "forecast_date", forecast_date)
+    origin_features.insert(2, "feature_exact", bool(feature_exact))
+    origin_features.insert(3, "feature_source_origin", int(feature_source_origin))
+    origin_features.insert(4, "feature_source_train_end", str(feature_source_train_end))
+
+    fit_diagnostics = forecaster.diagnostics()
+    diag = dict(fit_diagnostics)
+    diag.update({
+        "origin": origin,
+        "forecast_date": forecast_date,
+        "train_end": train_end,
+        "n_train": int(origin_train.shape[0]),
+        "n_train_model": int(Y_train.shape[0]),
+        "n_attention_feature_columns": len(feature_cols),
+        "feature_update_policy": feature_update_policy,
+        "feature_exact": bool(feature_exact),
+        "feature_source_origin": int(feature_source_origin),
+        "feature_source_train_end": str(feature_source_train_end),
+    })
+    return {
+        "origin": origin,
+        "forecast": forecast_one[0],
+        "baseline": baseline_one[0],
+        "residual": residual_one[0],
+        "forecast_transformed": transformed_one[0],
+        "feature_df": origin_features,
+        "diag": diag,
+        "fit_diagnostics": fit_diagnostics,
+        "n_train_model": int(Y_train.shape[0]),
+        "feature_cols": list(feature_cols),
+        "feature_exact": bool(feature_exact),
+        "model_scale": fitted_y_transform["model_scale"],
+    }
+
+
+def _fit_vara_origin_remote(
+    wide: pd.DataFrame,
+    Y_raw: np.ndarray,
+    series_ids: list[str],
+    *,
+    step: int,
+    horizon: int,
+    y_transform: str,
+    seasonal_lag: int,
+    feature_freq: int,
+    feature_functions: str | Sequence[str],
+    feature_source: str,
+    feature_path: Path | None,
+    feature_update_policy: str,
+    feature_update_interval: int,
+    grid_size: int,
+    ridge: float,
+    attention_mode: str,
+    attention_top_k: int | None,
+    forecast_scenario: str,
+    residual_transform: str,
+    ray_debug: bool,
+) -> dict:
+    start = time.time()
+    origin = int(step) + 1
+    if ray_debug:
+        _print_progress(f"[Ray VARA origin start] origin={origin}, horizon={horizon}")
+    source_step, feature_exact = _feature_source_step(step, feature_update_policy, feature_update_interval)
+    feature_horizon = int(horizon) - int(source_step)
+    Z, feature_df, feature_cols = _tourism_feature_matrix(
+        wide,
+        series_ids,
+        horizon=feature_horizon,
+        feature_source=feature_source,
+        y_transform=y_transform,
+        seasonal_lag=seasonal_lag,
+        feature_freq=feature_freq,
+        feature_functions=feature_functions,
+        feature_path=feature_path,
+    )
+    source_origin = int(source_step) + 1
+    fallback_train_end = wide["date"].iloc[len(wide) - feature_horizon - 1]
+    result = _fit_vara_origin_step(
+        wide,
+        Y_raw,
+        series_ids,
+        step=step,
+        horizon=horizon,
+        Z=Z,
+        feature_df=feature_df,
+        feature_cols=feature_cols,
+        y_transform=y_transform,
+        seasonal_lag=seasonal_lag,
+        grid_size=grid_size,
+        ridge=ridge,
+        attention_mode=attention_mode,
+        attention_top_k=attention_top_k,
+        forecast_scenario=forecast_scenario,
+        residual_transform=residual_transform,
+        feature_update_policy=feature_update_policy,
+        feature_exact=feature_exact,
+        feature_source_origin=source_origin,
+        feature_source_train_end=_feature_train_end(feature_df, fallback_train_end),
+    )
+    if ray_debug:
+        _print_progress(f"[Ray VARA origin done] origin={origin}, elapsed_sec={time.time() - start:.2f}")
+    return result
+
+
+def _start_ray(ray_num_cpus: int, max_cpus_per_task: int):
+    import ray
+
+    ray_started_here = False
+    if not ray.is_initialized():
+        _print_progress(f"Starting Ray: ray_num_cpus={ray_num_cpus}, max_cpus_per_task={max_cpus_per_task}")
+        ray.init(
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            num_cpus=ray_num_cpus,
+            _node_ip_address="127.0.0.1",
+        )
+        ray_started_here = True
+        _print_progress("Ray started")
+    available = ray.available_resources()
+    available_cpus = float(available.get("CPU", 0.0))
+    if available_cpus < float(max_cpus_per_task):
+        raise RuntimeError(
+            f"Ray has no available CPUs after initialization: {available}. "
+            "Stop stale Ray workers with `ray stop --force` or reduce other Ray jobs."
+        )
+    return ray, ray_started_here
+
+
+def _fit_vara_origins_with_ray(
+    ray,
+    wide: pd.DataFrame,
+    Y_raw: np.ndarray,
+    series_ids: list[str],
+    *,
+    horizon: int,
+    max_cpus_per_task: int,
+    y_transform: str,
+    seasonal_lag: int,
+    feature_freq: int,
+    feature_functions: str | Sequence[str],
+    feature_source: str,
+    feature_path: Path | None,
+    feature_update_policy: str,
+    feature_update_interval: int,
+    grid_size: int,
+    ridge: float,
+    attention_mode: str,
+    attention_top_k: int | None,
+    forecast_scenario: str,
+    residual_transform: str,
+    ray_debug: bool,
+) -> list[dict]:
+    remote_origin = ray.remote(num_cpus=max_cpus_per_task)(_fit_vara_origin_remote)
+    wide_ref = ray.put(wide)
+    Y_ref = ray.put(Y_raw)
+    series_ref = ray.put(series_ids)
+    futures = []
+    submit_times = {}
+    for step in range(int(horizon)):
+        ref = remote_origin.remote(
+            wide_ref,
+            Y_ref,
+            series_ref,
+            step=step,
+            horizon=horizon,
+            y_transform=y_transform,
+            seasonal_lag=seasonal_lag,
+            feature_freq=feature_freq,
+            feature_functions=feature_functions,
+            feature_source=feature_source,
+            feature_path=feature_path,
+            feature_update_policy=feature_update_policy,
+            feature_update_interval=feature_update_interval,
+            grid_size=grid_size,
+            ridge=ridge,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
+            forecast_scenario=forecast_scenario,
+            residual_transform=residual_transform,
+            ray_debug=ray_debug,
+        )
+        futures.append(ref)
+        submit_times[ref] = time.time()
+
+    _print_progress(f"Submitted Ray VARA rolling-origin tasks: origins={len(futures)}")
+    pending = list(futures)
+    completed = 0
+    results = []
+    while pending:
+        ready, pending = ray.wait(pending, num_returns=1, timeout=60.0)
+        if not ready:
+            now = time.time()
+            slowest_wait = now - min(submit_times.values()) if submit_times else 0.0
+            _print_progress(
+                "Ray VARA wait: "
+                f"done={completed}/{len(futures)}, pending={len(pending)}, "
+                f"slowest_pending_sec={slowest_wait:.1f}, available={ray.available_resources()}"
+            )
+            continue
+        for ref in ready:
+            result = ray.get(ref)
+            results.append(result)
+            submit_times.pop(ref, None)
+            completed += 1
+            if ray_debug:
+                _print_progress(f"Ray VARA collected: origin={result['origin']}, done={completed}/{len(futures)}")
+    return sorted(results, key=lambda item: int(item["origin"]))
+
+
+def _fit_vara_origins_closed_loop(
+    wide: pd.DataFrame,
+    Y_raw: np.ndarray,
+    series_ids: list[str],
+    *,
+    horizon: int,
+    y_transform: str,
+    seasonal_lag: int,
+    feature_freq: int,
+    feature_functions: str | Sequence[str],
+    feature_source: str,
+    feature_path: Path | None,
+    feature_update_policy: str,
+    feature_update_interval: int,
+    grid_size: int,
+    ridge: float,
+    attention_mode: str,
+    attention_top_k: int | None,
+    forecast_scenario: str,
+    residual_transform: str,
+) -> list[dict]:
+    history_wide = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_ids]].copy().reset_index(drop=True)
+    history_values = history_wide.loc[:, series_ids].to_numpy(dtype=float)
+    cached_Z = None
+    cached_feature_df = None
+    cached_feature_cols = None
+    cached_feature_source_origin = None
+    cached_feature_source_train_end = None
+    results = []
+
+    for step in range(int(horizon)):
+        source_step, feature_exact = _feature_source_step(step, feature_update_policy, feature_update_interval)
+        if feature_exact or cached_Z is None:
+            Z, feature_df, feature_cols = _tourism_feature_matrix(
+                history_wide,
+                series_ids,
+                horizon=0,
+                feature_source=feature_source,
+                y_transform=y_transform,
+                seasonal_lag=seasonal_lag,
+                feature_freq=feature_freq,
+                feature_functions=feature_functions,
+                feature_path=feature_path,
+            )
+            cached_Z = Z
+            cached_feature_df = feature_df.copy()
+            cached_feature_cols = list(feature_cols)
+            cached_feature_source_origin = source_step + 1
+            cached_feature_source_train_end = _feature_train_end(feature_df, history_wide["date"].iloc[-1])
+        else:
+            Z = cached_Z
+            feature_df = cached_feature_df.copy()
+            feature_cols = list(cached_feature_cols)
+
+        result = _fit_vara_origin_step(
+            wide,
+            Y_raw,
+            series_ids,
+            step=step,
+            horizon=horizon,
+            Z=Z,
+            feature_df=feature_df,
+            feature_cols=feature_cols,
+            y_transform=y_transform,
+            seasonal_lag=seasonal_lag,
+            grid_size=grid_size,
+            ridge=ridge,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
+            forecast_scenario=forecast_scenario,
+            residual_transform=residual_transform,
+            feature_update_policy=feature_update_policy,
+            feature_exact=feature_exact,
+            feature_source_origin=cached_feature_source_origin,
+            feature_source_train_end=cached_feature_source_train_end,
+            origin_train=history_values,
+            train_end_override=history_wide["date"].iloc[-1],
+        )
+        results.append(result)
+
+        forecast_date = wide["date"].iloc[len(wide) - horizon + step]
+        next_row = {"date": forecast_date}
+        next_row.update({series_id: float(value) for series_id, value in zip(series_ids, result["forecast"], strict=True)})
+        history_wide = pd.concat([history_wide, pd.DataFrame([next_row])], ignore_index=True)
+        history_values = np.vstack([history_values, result["forecast"]])
+
+    return results
 
 
 def _feature_function_label(feature_functions: str | Sequence[str]) -> str:
@@ -637,11 +1031,14 @@ def run_vara_forecast(
     attention_top_k: int | None = None,
     forecast_scenario: str = "direct",
     residual_transform: str = "center",
+    ray_num_cpus: int = 1,
+    max_cpus_per_task: int = 1,
+    ray_debug: bool = False,
 ) -> dict:
     if forecast_scenario not in set(FORECAST_SCENARIOS):
         raise ValueError(f"forecast_scenario must be one of {FORECAST_SCENARIOS}.")
-    if forecast_mode not in {"recursive", "rolling-origin"}:
-        raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
+    if forecast_mode not in set(FORECAST_MODES):
+        raise ValueError(f"forecast_mode must be one of {FORECAST_MODES}.")
     if residual_transform not in {"center", "standardize"}:
         raise ValueError("residual_transform must be 'center' or 'standardize'.")
     input_feature_path = feature_path
@@ -667,6 +1064,15 @@ def run_vara_forecast(
     if int(feature_update_interval) < 1:
         raise ValueError("feature_update_interval must be at least 1.")
     feature_update_interval = int(feature_update_interval)
+    if int(ray_num_cpus) < 1:
+        raise ValueError("ray_num_cpus must be >= 1.")
+    if int(max_cpus_per_task) < 1:
+        raise ValueError("max_cpus_per_task must be >= 1.")
+    ray_num_cpus = int(ray_num_cpus)
+    max_cpus_per_task = int(max_cpus_per_task)
+    if max_cpus_per_task > ray_num_cpus:
+        raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus.")
+    use_ray = forecast_mode == "rolling-origin" and ray_num_cpus > 1
 
     input_path = data_path if data_path is not None else data_dir / "tourism.csv"
     series_suffix = None if series_suffix == "" else series_suffix
@@ -717,6 +1123,7 @@ def run_vara_forecast(
             feature_path=input_feature_path,
         )
 
+        jnp, _ = _runtime_imports()
         forecaster = _new_forecaster(grid_size, ridge, attention_mode, attention_top_k)
         forecaster.fit(jnp.asarray(Y_train), jnp.asarray(Z))
         forecast_model_scale = np.asarray(forecaster.predict(h=horizon))
@@ -731,107 +1138,173 @@ def run_vara_forecast(
         n_train_model_final = int(Y_train.shape[0])
         n_feature_columns = len(feature_cols)
         exact_feature_origins = [1]
-    else:
-        forecasts = []
-        baseline_steps = []
-        residual_steps = []
-        transformed_forecasts = []
-        forecaster = None
-        fitted_y_transform = None
-        feature_cols = []
-        cached_Z = None
-        cached_feature_df = None
-        cached_feature_cols = None
-        cached_feature_source_origin = None
-        cached_feature_source_train_end = None
-        n_train_model_initial = 0
-        n_train_model_final = 0
-        for step in range(horizon):
-            origin_end = len(wide) - horizon + step
-            origin_train = Y_raw[:origin_end]
-            baseline_one = np.zeros((1, len(series_ids)), dtype=float)
-            if forecast_scenario == "direct":
-                model_train = origin_train
-                model_transform = y_transform
-            else:
-                baseline_one = _seasonal_naive_forecast(origin_train, 1, seasonal_lag)
-                model_train = _seasonal_naive_residual_panel(origin_train, seasonal_lag)
-                model_transform = residual_transform
-            Y_train, fitted_y_transform = _fit_y_transform(model_train, model_transform, seasonal_lag)
-            origin = step + 1
-            use_exact_features = (
-                feature_update_policy == "exact"
-                or cached_Z is None
-                or step % feature_update_interval == 0
-            )
-            if use_exact_features:
-                Z, feature_df, feature_cols = _tourism_feature_matrix(
-                    wide,
-                    series_ids,
-                    horizon=horizon - step,
-                    feature_source=feature_source,
-                    y_transform=y_transform,
-                    seasonal_lag=seasonal_lag,
-                    feature_freq=feature_freq,
-                    feature_functions=feature_functions,
-                    feature_path=input_feature_path,
-                )
-                cached_Z = Z
-                cached_feature_df = feature_df.copy()
-                cached_feature_cols = list(feature_cols)
-                cached_feature_source_origin = origin
-                cached_feature_source_train_end = str(feature_df["train_end"].iloc[0])
-                exact_feature_origins.append(origin)
-            else:
-                Z = cached_Z
-                feature_df = cached_feature_df.copy()
-                feature_cols = list(cached_feature_cols)
-
-            forecaster = _new_forecaster(grid_size, ridge, attention_mode, attention_top_k)
-            forecaster.fit(jnp.asarray(Y_train), jnp.asarray(Z))
-            if step == 0:
-                n_train_model_initial = int(Y_train.shape[0])
-            forecast_model_scale = np.asarray(forecaster.predict(h=1))
-            transformed_one = _unscale_y_transform(forecast_model_scale, fitted_y_transform)
-            residual_one = _inverse_y_transform(forecast_model_scale, fitted_y_transform)
-            forecast_one = residual_one if forecast_scenario == "direct" else baseline_one + residual_one
-            transformed_forecasts.append(transformed_one[0])
-            baseline_steps.append(baseline_one[0])
-            residual_steps.append(residual_one[0])
-            forecasts.append(forecast_one[0])
-
-            forecast_date = str(wide["date"].iloc[origin_end])
-            train_end = str(wide["date"].iloc[origin_end - 1])
-            origin_features = feature_df.copy()
-            origin_features.insert(0, "origin", origin)
-            origin_features.insert(1, "forecast_date", forecast_date)
-            origin_features.insert(2, "feature_exact", bool(use_exact_features))
-            origin_features.insert(3, "feature_source_origin", int(cached_feature_source_origin))
-            origin_features.insert(4, "feature_source_train_end", str(cached_feature_source_train_end))
-            feature_frames.append(origin_features)
-
-            diag = forecaster.diagnostics()
-            diag.update({
-                "origin": origin,
-                "forecast_date": forecast_date,
-                "train_end": train_end,
-                "n_train": int(origin_train.shape[0]),
-                "n_train_model": int(Y_train.shape[0]),
-                "n_attention_feature_columns": len(feature_cols),
-                "feature_update_policy": feature_update_policy,
-                "feature_exact": bool(use_exact_features),
-                "feature_source_origin": int(cached_feature_source_origin),
-                "feature_source_train_end": str(cached_feature_source_train_end),
-            })
-            rolling_diagnostics.append(diag)
-            n_train_model_final = int(Y_train.shape[0])
-
+    elif forecast_mode == "closed-loop":
+        origin_results = _fit_vara_origins_closed_loop(
+            wide,
+            Y_raw,
+            series_ids,
+            horizon=horizon,
+            y_transform=y_transform,
+            seasonal_lag=seasonal_lag,
+            feature_freq=feature_freq,
+            feature_functions=feature_functions,
+            feature_source=feature_source,
+            feature_path=input_feature_path,
+            feature_update_policy=feature_update_policy,
+            feature_update_interval=feature_update_interval,
+            grid_size=grid_size,
+            ridge=ridge,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
+            forecast_scenario=forecast_scenario,
+            residual_transform=residual_transform,
+        )
+        forecasts = [result["forecast"] for result in origin_results]
+        baseline_steps = [result["baseline"] for result in origin_results]
+        residual_steps = [result["residual"] for result in origin_results]
+        transformed_forecasts = [result["forecast_transformed"] for result in origin_results]
+        feature_frames.extend(result["feature_df"] for result in origin_results)
+        rolling_diagnostics.extend(result["diag"] for result in origin_results)
+        exact_feature_origins = [int(result["origin"]) for result in origin_results if result["feature_exact"]]
         forecast = np.vstack(forecasts)
         baseline_forecasts.append(np.vstack(baseline_steps))
         residual_forecasts.append(np.vstack(residual_steps))
         forecast_transformed = np.vstack(transformed_forecasts)
-        fit_diagnostics = forecaster.diagnostics()
-        n_feature_columns = len(feature_cols)
+        fit_diagnostics = origin_results[-1]["fit_diagnostics"]
+        fitted_y_transform = {"model_scale": origin_results[-1]["model_scale"]}
+        n_train_model_initial = int(origin_results[0]["n_train_model"])
+        n_train_model_final = int(origin_results[-1]["n_train_model"])
+        n_feature_columns = len(origin_results[-1]["feature_cols"])
+    else:
+        if use_ray:
+            ray_module, ray_started_here = _start_ray(ray_num_cpus, max_cpus_per_task)
+            try:
+                origin_results = _fit_vara_origins_with_ray(
+                    ray_module,
+                    wide,
+                    Y_raw,
+                    series_ids,
+                    horizon=horizon,
+                    max_cpus_per_task=max_cpus_per_task,
+                    y_transform=y_transform,
+                    seasonal_lag=seasonal_lag,
+                    feature_freq=feature_freq,
+                    feature_functions=feature_functions,
+                    feature_source=feature_source,
+                    feature_path=input_feature_path,
+                    feature_update_policy=feature_update_policy,
+                    feature_update_interval=feature_update_interval,
+                    grid_size=grid_size,
+                    ridge=ridge,
+                    attention_mode=attention_mode,
+                    attention_top_k=attention_top_k,
+                    forecast_scenario=forecast_scenario,
+                    residual_transform=residual_transform,
+                    ray_debug=ray_debug,
+                )
+            finally:
+                if ray_started_here:
+                    _print_progress("Shutting down Ray")
+                    ray_module.shutdown()
+                    _print_progress("Ray shut down")
+
+            forecasts = [result["forecast"] for result in origin_results]
+            baseline_steps = [result["baseline"] for result in origin_results]
+            residual_steps = [result["residual"] for result in origin_results]
+            transformed_forecasts = [result["forecast_transformed"] for result in origin_results]
+            feature_frames.extend(result["feature_df"] for result in origin_results)
+            rolling_diagnostics.extend(result["diag"] for result in origin_results)
+            exact_feature_origins = [int(result["origin"]) for result in origin_results if result["feature_exact"]]
+            forecast = np.vstack(forecasts)
+            baseline_forecasts.append(np.vstack(baseline_steps))
+            residual_forecasts.append(np.vstack(residual_steps))
+            forecast_transformed = np.vstack(transformed_forecasts)
+            fit_diagnostics = origin_results[-1]["fit_diagnostics"]
+            fitted_y_transform = {"model_scale": origin_results[-1]["model_scale"]}
+            n_train_model_initial = int(origin_results[0]["n_train_model"])
+            n_train_model_final = int(origin_results[-1]["n_train_model"])
+            n_feature_columns = len(origin_results[-1]["feature_cols"])
+        else:
+            forecasts = []
+            baseline_steps = []
+            residual_steps = []
+            transformed_forecasts = []
+            cached_Z = None
+            cached_feature_df = None
+            cached_feature_cols = None
+            cached_feature_source_origin = None
+            cached_feature_source_train_end = None
+            n_train_model_initial = 0
+            n_train_model_final = 0
+            fit_diagnostics = {}
+            fitted_y_transform = {"model_scale": ""}
+            feature_cols = []
+            for step in range(horizon):
+                source_step, feature_exact = _feature_source_step(step, feature_update_policy, feature_update_interval)
+                if feature_exact or cached_Z is None:
+                    feature_horizon = horizon - source_step
+                    Z, feature_df, feature_cols = _tourism_feature_matrix(
+                        wide,
+                        series_ids,
+                        horizon=feature_horizon,
+                        feature_source=feature_source,
+                        y_transform=y_transform,
+                        seasonal_lag=seasonal_lag,
+                        feature_freq=feature_freq,
+                        feature_functions=feature_functions,
+                        feature_path=input_feature_path,
+                    )
+                    cached_Z = Z
+                    cached_feature_df = feature_df.copy()
+                    cached_feature_cols = list(feature_cols)
+                    cached_feature_source_origin = source_step + 1
+                    fallback_train_end = wide["date"].iloc[len(wide) - feature_horizon - 1]
+                    cached_feature_source_train_end = _feature_train_end(feature_df, fallback_train_end)
+                    exact_feature_origins.append(source_step + 1)
+                else:
+                    Z = cached_Z
+                    feature_df = cached_feature_df.copy()
+                    feature_cols = list(cached_feature_cols)
+
+                result = _fit_vara_origin_step(
+                    wide,
+                    Y_raw,
+                    series_ids,
+                    step=step,
+                    horizon=horizon,
+                    Z=Z,
+                    feature_df=feature_df,
+                    feature_cols=feature_cols,
+                    y_transform=y_transform,
+                    seasonal_lag=seasonal_lag,
+                    grid_size=grid_size,
+                    ridge=ridge,
+                    attention_mode=attention_mode,
+                    attention_top_k=attention_top_k,
+                    forecast_scenario=forecast_scenario,
+                    residual_transform=residual_transform,
+                    feature_update_policy=feature_update_policy,
+                    feature_exact=feature_exact,
+                    feature_source_origin=cached_feature_source_origin,
+                    feature_source_train_end=cached_feature_source_train_end,
+                )
+                forecasts.append(result["forecast"])
+                baseline_steps.append(result["baseline"])
+                residual_steps.append(result["residual"])
+                transformed_forecasts.append(result["forecast_transformed"])
+                feature_frames.append(result["feature_df"])
+                rolling_diagnostics.append(result["diag"])
+                fit_diagnostics = result["fit_diagnostics"]
+                fitted_y_transform = {"model_scale": result["model_scale"]}
+                if step == 0:
+                    n_train_model_initial = int(result["n_train_model"])
+                n_train_model_final = int(result["n_train_model"])
+
+            forecast = np.vstack(forecasts)
+            baseline_forecasts.append(np.vstack(baseline_steps))
+            residual_forecasts.append(np.vstack(residual_steps))
+            forecast_transformed = np.vstack(transformed_forecasts)
+            n_feature_columns = len(feature_cols)
 
     baseline_forecast = np.vstack(baseline_forecasts) if baseline_forecasts else np.zeros_like(forecast)
     residual_forecast = np.vstack(residual_forecasts) if residual_forecasts else forecast.copy()
@@ -904,12 +1377,15 @@ def run_vara_forecast(
         "series_depth": -1 if series_depth is None else int(series_depth),
         "n_series": len(series_ids),
         "n_train": int(train.shape[0]),
-        "n_train_final": int(Y_raw.shape[0] - 1 if forecast_mode == "rolling-origin" else train.shape[0]),
+        "n_train_final": int(Y_raw.shape[0] - 1 if forecast_mode in {"rolling-origin", "closed-loop"} else train.shape[0]),
         "n_train_model": n_train_model_initial,
         "n_train_model_final": n_train_model_final,
         "n_test": int(test.shape[0]),
         "horizon": int(horizon),
         "forecast_type": forecast_mode,
+        "ray_used": bool(use_ray),
+        "ray_num_cpus": int(ray_num_cpus),
+        "max_cpus_per_task": int(max_cpus_per_task),
         "forecast_scenario": forecast_scenario,
         "residual_baseline": "seasonal_naive" if forecast_scenario == "seasonal-naive-residual" else "",
         "residual_transform": residual_transform if forecast_scenario == "seasonal-naive-residual" else "",
@@ -1039,9 +1515,12 @@ def main() -> None:
         "--forecast-mode",
         type=str,
         default="recursive",
-        choices=["recursive", "rolling-origin"],
-        help="recursive fits once; rolling-origin refits one-step models through the test window.",
+        choices=list(FORECAST_MODES),
+        help="recursive fits once; rolling-origin uses actual test updates; closed-loop feeds forecasts back as pseudo-observations.",
     )
+    parser.add_argument("--ray-num-cpus", type=int, default=1, help="Use Ray for rolling-origin VARA when > 1; closed-loop is sequential.")
+    parser.add_argument("--max-cpus-per-task", type=int, default=1, help="Ray CPU resources per rolling-origin task.")
+    parser.add_argument("--ray-debug", action="store_true", help="Print Ray rolling-origin task start/done logs.")
     parser.add_argument(
         "--y-transform",
         type=str,
@@ -1077,6 +1556,9 @@ def main() -> None:
         attention_top_k=args.attention_top_k,
         forecast_scenario=args.forecast_scenario,
         residual_transform=args.residual_transform,
+        ray_num_cpus=args.ray_num_cpus,
+        max_cpus_per_task=args.max_cpus_per_task,
+        ray_debug=args.ray_debug,
     )
     summary = pd.read_csv(args.output_dir / "metrics_summary.csv")
     print("VARA forecast summary:")

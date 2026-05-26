@@ -38,6 +38,7 @@ PANEL_MODELS = {"var1", "var1_snaive", "deepar", "nbeats"}
 ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS | NEURALFORECAST_MODELS
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1"
 STATSFORECAST_N_JOBS = 1
+FORECAST_MODES = {"recursive", "rolling-origin", "closed-loop"}
 TASK_MODEL_COL = "_task_model"
 TASK_SERIES_COL = "_task_series"
 TASK_FORECAST_COL = "_forecast"
@@ -716,6 +717,122 @@ def _forecast_rolling_origin(
     return pd.concat(rows, ignore_index=True)
 
 
+
+def _append_forecast_to_history(
+    history: pd.DataFrame,
+    forecast: pd.DataFrame,
+    *,
+    model_name: str,
+    series_cols: list[str],
+    forecast_date,
+) -> pd.DataFrame:
+    if model_name not in forecast.columns:
+        raise ValueError(f"Closed-loop forecast frame is missing model column {model_name!r}.")
+    values = forecast.set_index("series_id")[model_name].reindex(series_cols)
+    if values.isna().any():
+        missing = values.index[values.isna()].tolist()
+        raise RuntimeError(f"Closed-loop forecast missing series values for {model_name!r}: {missing[:5]}")
+    next_row = {"date": pd.to_datetime(forecast_date)}
+    next_row.update({series_id: float(values.loc[series_id]) for series_id in series_cols})
+    return pd.concat([history, pd.DataFrame([next_row])], ignore_index=True)
+
+
+def _forecast_closed_loop_single_model(
+    wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    horizon: int,
+    model_name: str,
+    season_length: int,
+    freq: str,
+    n_jobs: int,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
+) -> pd.DataFrame:
+    history = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_cols]].copy().reset_index(drop=True)
+    rows = []
+    for step in range(horizon):
+        origin_end = len(wide) - horizon + step
+        forecast_date = wide["date"].iloc[origin_end]
+        train_end = history["date"].iloc[-1]
+        out = _forecast_once(
+            history,
+            series_cols,
+            model_names=[model_name],
+            season_length=season_length,
+            freq=freq,
+            h=1,
+            n_jobs=n_jobs,
+            forecast_dates=[forecast_date],
+            deepar_input_size=deepar_input_size,
+            deepar_max_steps=deepar_max_steps,
+            deepar_hidden_size=deepar_hidden_size,
+            deepar_lstm_layers=deepar_lstm_layers,
+            deepar_batch_size=deepar_batch_size,
+            deepar_learning_rate=deepar_learning_rate,
+            deepar_scaler_type=deepar_scaler_type,
+            deepar_random_seed=deepar_random_seed,
+        )
+        out.insert(0, "origin", step + 1)
+        out.insert(1, "train_end", train_end)
+        rows.append(out)
+        history = _append_forecast_to_history(
+            history,
+            out,
+            model_name=model_name,
+            series_cols=series_cols,
+            forecast_date=forecast_date,
+        )
+    return pd.concat(rows, ignore_index=True)
+
+
+def _forecast_closed_loop(
+    wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    horizon: int,
+    model_names: list[str],
+    season_length: int,
+    freq: str,
+    n_jobs: int,
+    deepar_input_size: int,
+    deepar_max_steps: int,
+    deepar_hidden_size: int,
+    deepar_lstm_layers: int,
+    deepar_batch_size: int,
+    deepar_learning_rate: float,
+    deepar_scaler_type: str,
+    deepar_random_seed: int,
+) -> pd.DataFrame:
+    frames = [
+        _forecast_closed_loop_single_model(
+            wide,
+            series_cols,
+            horizon=horizon,
+            model_name=model_name,
+            season_length=season_length,
+            freq=freq,
+            n_jobs=n_jobs,
+            deepar_input_size=deepar_input_size,
+            deepar_max_steps=deepar_max_steps,
+            deepar_hidden_size=deepar_hidden_size,
+            deepar_lstm_layers=deepar_lstm_layers,
+            deepar_batch_size=deepar_batch_size,
+            deepar_learning_rate=deepar_learning_rate,
+            deepar_scaler_type=deepar_scaler_type,
+            deepar_random_seed=deepar_random_seed,
+        )
+        for model_name in model_names
+    ]
+    return _merge_forecast_frames(frames)
+
+
 def _merge_forecast_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     if not frames:
         raise ValueError("No forecast frames to merge.")
@@ -754,6 +871,24 @@ def _forecast_single_model(
             series_cols,
             horizon=horizon,
             model_names=[model_name],
+            season_length=season_length,
+            freq=freq,
+            n_jobs=n_jobs,
+            deepar_input_size=deepar_input_size,
+            deepar_max_steps=deepar_max_steps,
+            deepar_hidden_size=deepar_hidden_size,
+            deepar_lstm_layers=deepar_lstm_layers,
+            deepar_batch_size=deepar_batch_size,
+            deepar_learning_rate=deepar_learning_rate,
+            deepar_scaler_type=deepar_scaler_type,
+            deepar_random_seed=deepar_random_seed,
+        )
+    if forecast_mode == "closed-loop":
+        return _forecast_closed_loop_single_model(
+            wide,
+            series_cols,
+            horizon=horizon,
+            model_name=model_name,
             season_length=season_length,
             freq=freq,
             n_jobs=n_jobs,
@@ -1109,8 +1244,8 @@ def run_tourism_benchmark(
     deepar_scaler_type: str = "robust",
     deepar_random_seed: int = 2026,
 ) -> pd.DataFrame:
-    if forecast_mode not in {"recursive", "rolling-origin"}:
-        raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
+    if forecast_mode not in FORECAST_MODES:
+        raise ValueError("forecast_mode must be one of: recursive, rolling-origin, closed-loop.")
     if ray_num_cpus < 1:
         raise ValueError("ray_num_cpus must be >= 1.")
     if max_cpus_per_task < 1:
@@ -1189,6 +1324,24 @@ def run_tourism_benchmark(
             )
         elif forecast_mode == "recursive":
             long_forecasts = _forecast_recursive(
+                wide,
+                series_cols,
+                horizon=horizon,
+                model_names=model_names,
+                season_length=season_length,
+                freq=freq,
+                n_jobs=STATSFORECAST_N_JOBS,
+                deepar_input_size=deepar_input_size,
+                deepar_max_steps=deepar_max_steps,
+                deepar_hidden_size=deepar_hidden_size,
+                deepar_lstm_layers=deepar_lstm_layers,
+                deepar_batch_size=deepar_batch_size,
+                deepar_learning_rate=deepar_learning_rate,
+                deepar_scaler_type=deepar_scaler_type,
+                deepar_random_seed=deepar_random_seed,
+            )
+        elif forecast_mode == "closed-loop":
+            long_forecasts = _forecast_closed_loop(
                 wide,
                 series_cols,
                 horizon=horizon,
@@ -1356,7 +1509,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--series-col", type=str, default="series_id")
     parser.add_argument("--value-col", type=str, default="value")
     parser.add_argument("--models", type=str, default=DEFAULT_MODELS)
-    parser.add_argument("--forecast-mode", choices=["recursive", "rolling-origin"], default="rolling-origin")
+    parser.add_argument("--forecast-mode", choices=["recursive", "rolling-origin", "closed-loop"], default="rolling-origin")
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--season-length", type=int, default=12)
     parser.add_argument("--freq", type=str, default="MS")

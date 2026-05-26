@@ -298,6 +298,57 @@ class ScriptHelperTests(unittest.TestCase):
             self.assertEqual(set(metrics_by_series["series_id"]), {"AAAAll", "AABAll"})
             self.assertEqual(list(metrics_by_origin["date"]), ["2021-11-01", "2021-12-01"])
 
+    def test_tourism_closed_loop_feeds_forecasts_back_as_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            output_dir = root / "out"
+            data_dir.mkdir()
+            dates = pd.date_range("2020-01-01", periods=24, freq="MS")
+            pd.DataFrame({
+                "date": dates,
+                "AAAAll": np.linspace(10.0, 20.0, 24),
+                "AABAll": np.linspace(30.0, 50.0, 24),
+            }).to_csv(data_dir / "tourism.csv", index=False)
+
+            metrics = run_vara_forecast(
+                data_dir=data_dir,
+                output_dir=output_dir,
+                max_series=0,
+                horizon=2,
+                grid_size=3,
+                y_transform="center",
+                seasonal_lag=12,
+                ridge=1e-2,
+                series_depth=3,
+                feature_functions=("series_length",),
+                forecast_mode="closed-loop",
+                feature_update_policy="periodic",
+                feature_update_interval=2,
+                attention_mode="topk",
+                attention_top_k=1,
+            )
+
+            self.assertEqual(metrics["forecast_type"], "closed-loop")
+            self.assertEqual(metrics["ray_used"], False)
+            self.assertEqual(metrics["attention_feature_update_policy"], "periodic")
+            self.assertEqual(metrics["attention_feature_exact_origins"], "1")
+            self.assertEqual(metrics["n_train"], 22)
+            self.assertEqual(metrics["n_train_final"], 23)
+            self.assertEqual(metrics["n_train_model_final"], 23)
+
+            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
+            diagnostics = pd.read_csv(output_dir / "tourism_rolling_origin_diagnostics.csv")
+            features = pd.read_csv(output_dir / "tourism_attention_features.csv")
+            metrics_summary = pd.read_csv(output_dir / "metrics_summary.csv")
+
+            self.assertEqual(len(forecast), 2)
+            self.assertEqual(list(diagnostics["origin"]), [1, 2])
+            self.assertEqual(list(diagnostics["n_train"]), [22, 23])
+            self.assertEqual(list(diagnostics["feature_exact"]), [True, False])
+            self.assertEqual(sorted(features["feature_source_origin"].unique().tolist()), [1])
+            self.assertEqual(metrics_summary["forecast_mode"].iloc[0], "closed-loop")
+
     def test_vara_forecast_accepts_generic_wide_csv_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

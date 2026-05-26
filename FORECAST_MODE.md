@@ -9,7 +9,7 @@ This note describes the `--forecast-mode` option used by
 | --- | --- | --- | --- | --- | --- |
 | `recursive` | Fit once on the training sample before the test window. | Full horizon, for example 12 or 28 steps. | No. The model forecasts the entire test window without seeing earlier test observations. | Measures true multi-step forecasting behavior from one origin. | Later horizons compound model error, especially for AR(1), VAR(1), and VARA(1). |
 | `rolling-origin` | Refit or rerun at each test origin using an expanding window. | One step ahead at each origin. | Yes. After each test point is observed, it is included in the next training window. | Measures sequential one-step-ahead forecasting with data updates. | Usually easier than recursive multi-step forecasting, so it should not be compared as the same experiment. |
-| `closed-loop forecasting` | Forecast the next value, append the forecast as a pseudo-observation, then refit or update before forecasting the following value. | One step ahead repeated with generated history. | No. The protocol uses previous forecasts, not actual test observations. | Conceptual protocol for closed-loop simulation; not currently implemented as a CLI mode. | Forecast errors can accumulate and contaminate later refits because the model trains on its own generated values. |
+| `closed-loop forecasting` | Forecast the next value, append the forecast as a pseudo-observation, then refit or update before forecasting the following value. | One step ahead repeated with generated history. | No. The protocol uses previous forecasts, not actual test observations. | Implemented in `scripts/run_benchmarks.py` and `scripts/run_vara_forecast.py` as `--forecast-mode closed-loop`. | Forecast errors can accumulate and contaminate later refits because the model trains on its own generated values. |
 
 ## Example
 
@@ -31,7 +31,7 @@ With `--forecast-mode rolling-origin`:
 | ... | ... | ... |
 | 12 | Training sample plus actual test observations 1-11 | Test observation 12 |
 
-With the conceptual `closed-loop forecasting` protocol:
+With `--forecast-mode closed-loop`:
 
 | Step | Training or update sample | Forecast target |
 | --- | --- | --- |
@@ -56,11 +56,12 @@ In `scripts/run_vara_forecast.py`, the same distinction is used. Recursive mode
 fits VARA once and calls `predict(h=horizon)`. Rolling-origin mode loops over
 the test window, refits VARA at each origin, and calls `predict(h=1)`.
 
-The `closed-loop forecasting` protocol is not currently implemented in
-`scripts/run_benchmarks.py` or `scripts/run_vara_forecast.py`. It would forecast
-`y_{t+1}`, append `\hat y_{t+1}` as if it were observed, refit or update the
-model, then forecast `y_{t+2}`. This differs from `rolling-origin`, which uses
-the actual observed `y_{t+1}` at the next origin.
+The `closed-loop forecasting` protocol is implemented in
+`scripts/run_benchmarks.py` and `scripts/run_vara_forecast.py` as
+`--forecast-mode closed-loop`. It forecasts `y_{t+1}`, appends
+`\hat y_{t+1}` as if it were observed, refits or updates the model, then
+forecasts `y_{t+2}`. This differs from `rolling-origin`, which uses the actual
+observed `y_{t+1}` at the next origin.
 
 In econometrics and forecasting software, closely related terminology is
 `dynamic forecast`: lagged values inside the forecast horizon are replaced by
