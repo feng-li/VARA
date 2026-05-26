@@ -9,6 +9,7 @@ This note describes the `--forecast-mode` option used by
 | --- | --- | --- | --- | --- | --- |
 | `recursive` | Fit once on the training sample before the test window. | Full horizon, for example 12 or 28 steps. | No. The model forecasts the entire test window without seeing earlier test observations. | Measures true multi-step forecasting behavior from one origin. | Later horizons compound model error, especially for AR(1), VAR(1), and VARA(1). |
 | `rolling-origin` | Refit or rerun at each test origin using an expanding window. | One step ahead at each origin. | Yes. After each test point is observed, it is included in the next training window. | Measures sequential one-step-ahead forecasting with data updates. | Usually easier than recursive multi-step forecasting, so it should not be compared as the same experiment. |
+| `closed-loop forecasting` | Forecast the next value, append the forecast as a pseudo-observation, then refit or update before forecasting the following value. | One step ahead repeated with generated history. | No. The protocol uses previous forecasts, not actual test observations. | Conceptual protocol for closed-loop simulation; not currently implemented as a CLI mode. | Forecast errors can accumulate and contaminate later refits because the model trains on its own generated values. |
 
 ## Example
 
@@ -30,6 +31,16 @@ With `--forecast-mode rolling-origin`:
 | ... | ... | ... |
 | 12 | Training sample plus actual test observations 1-11 | Test observation 12 |
 
+With the conceptual `closed-loop forecasting` protocol:
+
+| Step | Training or update sample | Forecast target |
+| --- | --- | --- |
+| 1 | All observations before the test window | Test observation 1 |
+| 2 | Training sample plus forecast from step 1 | Test observation 2 |
+| 3 | Training sample plus forecasts from steps 1-2 | Test observation 3 |
+| ... | ... | ... |
+| 12 | Training sample plus forecasts from steps 1-11 | Test observation 12 |
+
 ## Implementation Notes
 
 In `scripts/run_benchmarks.py`, `recursive` calls `_forecast_recursive`.
@@ -44,6 +55,38 @@ and calls `_forecast_once(..., h=1)` for the next test date.
 In `scripts/run_vara_forecast.py`, the same distinction is used. Recursive mode
 fits VARA once and calls `predict(h=horizon)`. Rolling-origin mode loops over
 the test window, refits VARA at each origin, and calls `predict(h=1)`.
+
+The `closed-loop forecasting` protocol is not currently implemented in
+`scripts/run_benchmarks.py` or `scripts/run_vara_forecast.py`. It would forecast
+`y_{t+1}`, append `\hat y_{t+1}` as if it were observed, refit or update the
+model, then forecast `y_{t+2}`. This differs from `rolling-origin`, which uses
+the actual observed `y_{t+1}` at the next origin.
+
+In econometrics and forecasting software, closely related terminology is
+`dynamic forecast`: lagged values inside the forecast horizon are replaced by
+previous forecasts rather than by actual observations. In this note,
+`closed-loop forecasting` is used to emphasize the forecast-feedback mechanism,
+especially when the model is refit or updated after appending pseudo-observed
+forecasts.
+
+## Remark On AR(1)
+
+For a fitted AR(1) model
+
+```text
+y_t = c + phi y_{t-1} + e_t,
+```
+
+the recursive forecast is
+
+```text
+E[y_{t+h} | y_t] = mu + phi^h (y_t - mu),    mu = c / (1 - phi).
+```
+
+If `|phi| < 1`, the recursive forecast eventually converges to the stationary
+mean `mu`. If `phi` is close to one, the convergence is slow. If `phi = 1`, the
+process does not revert to a finite stationary mean; if `|phi| > 1`, recursive
+forecasts can diverge or oscillate.
 
 ## Ray Parallelism In Benchmarks
 
