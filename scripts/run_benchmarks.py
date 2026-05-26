@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,131 @@ FORECAST_MODE_ALIASES = {
 TASK_MODEL_COL = "_task_model"
 TASK_SERIES_COL = "_task_series"
 TASK_FORECAST_COL = "_forecast"
+
+
+@dataclass(frozen=True)
+class NeuralModelConfig:
+    input_size: int = 0
+    max_steps: int = 200
+    hidden_size: int = 64
+    num_layers: int = 2
+    batch_size: int = 32
+    learning_rate: float = 1e-3
+    scaler_type: str = "robust"
+    random_seed: int = 2026
+
+    def legacy_config(self) -> dict[str, Any]:
+        return {
+            "deepar_input_size": int(self.input_size),
+            "deepar_max_steps": int(self.max_steps),
+            "deepar_hidden_size": int(self.hidden_size),
+            "deepar_lstm_layers": int(self.num_layers),
+            "deepar_batch_size": int(self.batch_size),
+            "deepar_learning_rate": float(self.learning_rate),
+            "deepar_scaler_type": str(self.scaler_type),
+            "deepar_random_seed": int(self.random_seed),
+            "nbeats_input_size": int(self.input_size),
+            "nbeats_max_steps": int(self.max_steps),
+            "nbeats_hidden_size": int(self.hidden_size),
+            "nbeats_num_layers": int(self.num_layers),
+            "nbeats_batch_size": int(self.batch_size),
+            "nbeats_learning_rate": float(self.learning_rate),
+            "nbeats_scaler_type": str(self.scaler_type),
+            "nbeats_random_seed": int(self.random_seed),
+        }
+
+
+@dataclass(frozen=True)
+class BenchmarkConfig:
+    data_dir: Path = Path("data/tourism")
+    output_dir: Path = Path("outputs/tourism_benchmark_statsforecast")
+    data_path: Path | None = None
+    data_format: str = "auto"
+    date_col: str = "date"
+    series_col: str = "series_id"
+    value_col: str = "value"
+    models: str | list[str] = DEFAULT_MODELS
+    forecast_mode: str = "rolling-origin"
+    horizon: int = 12
+    season_length: int = 12
+    freq: str = "MS"
+    series_depth: int | None = DETAILED_CODE_DEPTH
+    series_suffix: str | None = BASE_SUFFIX
+    max_series: int = 0
+    clip_nonnegative: bool = False
+    ray_num_cpus: int = 1
+    max_cpus_per_task: int = 1
+    ray_debug: bool = False
+    resume: bool = True
+    resume_csv: Path | None = None
+    neural_config: NeuralModelConfig = field(default_factory=NeuralModelConfig)
+
+    @property
+    def input_path(self) -> Path:
+        return self.data_path if self.data_path is not None else self.data_dir / "tourism.csv"
+
+    @property
+    def use_ray(self) -> bool:
+        return int(self.ray_num_cpus) > 1
+
+    def run_kwargs(self) -> dict[str, Any]:
+        return {
+            "data_dir": self.data_dir,
+            "data_path": self.data_path,
+            "data_format": self.data_format,
+            "date_col": self.date_col,
+            "series_col": self.series_col,
+            "value_col": self.value_col,
+            "models": self.models,
+            "horizon": self.horizon,
+            "season_length": self.season_length,
+            "freq": self.freq,
+            "series_depth": self.series_depth,
+            "series_suffix": self.series_suffix,
+            "max_series": self.max_series,
+            "clip_nonnegative": self.clip_nonnegative,
+            "ray_num_cpus": self.ray_num_cpus,
+            "max_cpus_per_task": self.max_cpus_per_task,
+            "ray_debug": self.ray_debug,
+            "resume": self.resume,
+            "deepar_input_size": self.neural_config.input_size,
+            "deepar_max_steps": self.neural_config.max_steps,
+            "deepar_hidden_size": self.neural_config.hidden_size,
+            "deepar_lstm_layers": self.neural_config.num_layers,
+            "deepar_batch_size": self.neural_config.batch_size,
+            "deepar_learning_rate": self.neural_config.learning_rate,
+            "deepar_scaler_type": self.neural_config.scaler_type,
+            "deepar_random_seed": self.neural_config.random_seed,
+        }
+
+    def output_config(self, *, model_names: list[str], checkpoint_csv: Path | None) -> dict[str, Any]:
+        return {
+            "data_dir": str(self.data_dir),
+            "data_path": None if self.data_path is None else str(self.data_path),
+            "data_format": str(self.data_format),
+            "date_col": str(self.date_col),
+            "series_col": str(self.series_col),
+            "value_col": str(self.value_col),
+            "output_dir": str(self.output_dir),
+            "models": model_names,
+            "forecast_mode": self.forecast_mode,
+            "horizon": int(self.horizon),
+            "season_length": int(self.season_length),
+            "freq": self.freq,
+            "series_depth": -1 if self.series_depth is None else int(self.series_depth),
+            "series_suffix": self.series_suffix,
+            "max_series": int(self.max_series),
+            "clip_nonnegative": bool(self.clip_nonnegative),
+            "ray_num_cpus": int(self.ray_num_cpus),
+            "max_cpus_per_task": int(self.max_cpus_per_task),
+            "ray_debug": bool(self.ray_debug),
+            "resume": bool(self.resume),
+            "resume_csv": None if checkpoint_csv is None else str(checkpoint_csv),
+            **self.neural_config.legacy_config(),
+        }
+
+
+DEFAULT_BENCHMARK_CONFIG = BenchmarkConfig()
 
 
 def _task_expected_rows(task_series: str, *, horizon: int, n_series: int) -> int:
@@ -133,8 +259,8 @@ def _series_depth(series_id: str, suffix: str = BASE_SUFFIX) -> int:
 
 def _base_series_columns(
     wide: pd.DataFrame,
-    series_depth: int | None = DETAILED_CODE_DEPTH,
-    series_suffix: str | None = BASE_SUFFIX,
+    series_depth: int | None = DEFAULT_BENCHMARK_CONFIG.series_depth,
+    series_suffix: str | None = DEFAULT_BENCHMARK_CONFIG.series_suffix,
 ) -> list[str]:
     cols = [c for c in wide.columns if c != "date"]
     if series_suffix:
@@ -260,10 +386,68 @@ def _load_nbeats():
     return NeuralForecast, NBEATS
 
 
-def _deepar_input_size(h: int, season_length: int, requested: int) -> int:
+def _neural_input_size(h: int, season_length: int, requested: int) -> int:
     if requested > 0:
         return int(requested)
     return int(max(3 * h, 2 * season_length, 1))
+
+
+def _neural_common_model_kwargs(
+    *,
+    h: int,
+    season_length: int,
+    neural_config: NeuralModelConfig,
+    alias: str,
+) -> dict[str, Any]:
+    return {
+        "h": int(h),
+        "input_size": _neural_input_size(h, season_length, neural_config.input_size),
+        "max_steps": int(neural_config.max_steps),
+        "learning_rate": float(neural_config.learning_rate),
+        "batch_size": int(neural_config.batch_size),
+        "scaler_type": str(neural_config.scaler_type),
+        "random_seed": int(neural_config.random_seed),
+        "alias": alias,
+        "accelerator": "cpu",
+        "devices": 1,
+        "enable_progress_bar": False,
+        "enable_checkpointing": False,
+        "enable_model_summary": False,
+        "logger": False,
+    }
+
+
+def _forecast_neural_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    freq: str,
+    neural_forecast_cls: Any,
+    model: Any,
+    model_name: str,
+    model_label: str,
+) -> pd.DataFrame:
+    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+    nf = neural_forecast_cls(models=[model], freq=freq)
+    train_long = _wide_to_statsforecast_long(train_wide, series_cols)
+    nf.fit(df=train_long, verbose=False)
+    out = nf.predict(verbose=False).rename(columns={"unique_id": "series_id", "ds": "date"})
+
+    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
+    expected = pd.MultiIndex.from_product(
+        [series_cols, dates], names=["series_id", "date"]
+    ).to_frame(index=False)
+    out = expected.merge(out.loc[:, ["series_id", "date", model_name]], on=["series_id", "date"], how="left")
+    if out[model_name].isna().any():
+        raise RuntimeError(f"{model_label} did not return forecasts for all requested series/date pairs.")
+    return out
 
 
 def _forecast_deepar_once(
@@ -274,56 +458,30 @@ def _forecast_deepar_once(
     h: int,
     season_length: int,
     freq: str,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
 ) -> pd.DataFrame:
     NeuralForecast, DeepAR = _load_deepar()
-    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
-    try:
-        import torch
-        torch.set_num_threads(1)
-    except Exception:
-        pass
-
-    input_size = _deepar_input_size(h, season_length, deepar_input_size)
     model = DeepAR(
-        h=h,
-        input_size=input_size,
-        lstm_n_layers=int(deepar_lstm_layers),
-        lstm_hidden_size=int(deepar_hidden_size),
+        **_neural_common_model_kwargs(
+            h=h,
+            season_length=season_length,
+            neural_config=neural_config,
+            alias="deepar",
+        ),
+        lstm_n_layers=int(neural_config.num_layers),
+        lstm_hidden_size=int(neural_config.hidden_size),
         lstm_dropout=0.0,
-        max_steps=int(deepar_max_steps),
-        learning_rate=float(deepar_learning_rate),
-        batch_size=int(deepar_batch_size),
-        scaler_type=str(deepar_scaler_type),
-        random_seed=int(deepar_random_seed),
-        alias="deepar",
-        accelerator="cpu",
-        devices=1,
-        enable_progress_bar=False,
-        enable_checkpointing=False,
-        enable_model_summary=False,
-        logger=False,
     )
-    nf = NeuralForecast(models=[model], freq=freq)
-    train_long = _wide_to_statsforecast_long(train_wide, series_cols)
-    nf.fit(df=train_long, verbose=False)
-    out = nf.predict(verbose=False).rename(columns={"unique_id": "series_id", "ds": "date"})
-
-    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
-    expected = pd.MultiIndex.from_product(
-        [series_cols, dates], names=["series_id", "date"]
-    ).to_frame(index=False)
-    out = expected.merge(out.loc[:, ["series_id", "date", "deepar"]], on=["series_id", "date"], how="left")
-    if out["deepar"].isna().any():
-        raise RuntimeError("DeepAR did not return forecasts for all requested series/date pairs.")
-    return out
+    return _forecast_neural_once(
+        train_wide,
+        series_cols,
+        forecast_dates=forecast_dates,
+        freq=freq,
+        neural_forecast_cls=NeuralForecast,
+        model=model,
+        model_name="deepar",
+        model_label="DeepAR",
+    )
 
 
 def _nbeats_stack_config(
@@ -349,57 +507,31 @@ def _forecast_nbeats_once(
     h: int,
     season_length: int,
     freq: str,
-    nbeats_input_size: int,
-    nbeats_max_steps: int,
-    nbeats_hidden_size: int,
-    nbeats_num_layers: int,
-    nbeats_batch_size: int,
-    nbeats_learning_rate: float,
-    nbeats_scaler_type: str,
-    nbeats_random_seed: int,
+    neural_config: NeuralModelConfig,
 ) -> pd.DataFrame:
     NeuralForecast, NBEATS = _load_nbeats()
-    logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
-    try:
-        import torch
-        torch.set_num_threads(1)
-    except Exception:
-        pass
-
-    input_size = _deepar_input_size(h, season_length, nbeats_input_size)
-    stack_types, n_blocks, mlp_units = _nbeats_stack_config(h, nbeats_hidden_size, nbeats_num_layers)
+    stack_types, n_blocks, mlp_units = _nbeats_stack_config(h, neural_config.hidden_size, neural_config.num_layers)
     model = NBEATS(
-        h=h,
-        input_size=input_size,
+        **_neural_common_model_kwargs(
+            h=h,
+            season_length=season_length,
+            neural_config=neural_config,
+            alias="nbeats",
+        ),
         stack_types=stack_types,
         n_blocks=n_blocks,
         mlp_units=mlp_units,
-        max_steps=int(nbeats_max_steps),
-        learning_rate=float(nbeats_learning_rate),
-        batch_size=int(nbeats_batch_size),
-        scaler_type=str(nbeats_scaler_type),
-        random_seed=int(nbeats_random_seed),
-        alias="nbeats",
-        accelerator="cpu",
-        devices=1,
-        enable_progress_bar=False,
-        enable_checkpointing=False,
-        enable_model_summary=False,
-        logger=False,
     )
-    nf = NeuralForecast(models=[model], freq=freq)
-    train_long = _wide_to_statsforecast_long(train_wide, series_cols)
-    nf.fit(df=train_long, verbose=False)
-    out = nf.predict(verbose=False).rename(columns={"unique_id": "series_id", "ds": "date"})
-
-    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
-    expected = pd.MultiIndex.from_product(
-        [series_cols, dates], names=["series_id", "date"]
-    ).to_frame(index=False)
-    out = expected.merge(out.loc[:, ["series_id", "date", "nbeats"]], on=["series_id", "date"], how="left")
-    if out["nbeats"].isna().any():
-        raise RuntimeError("NBEATS did not return forecasts for all requested series/date pairs.")
-    return out
+    return _forecast_neural_once(
+        train_wide,
+        series_cols,
+        forecast_dates=forecast_dates,
+        freq=freq,
+        neural_forecast_cls=NeuralForecast,
+        model=model,
+        model_name="nbeats",
+        model_label="NBEATS",
+    )
 
 
 def _forecast_statsforecast_once(
@@ -439,6 +571,78 @@ def _seasonal_residual_array(values: np.ndarray, season_length: int) -> np.ndarr
     return values[season_length:] - values[:-season_length]
 
 
+def _validate_forecast_dates(
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+    model_label: str,
+) -> pd.Series:
+    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
+    if len(dates) != h:
+        raise RuntimeError(f"{model_label} forecast_dates length does not match h.")
+    return dates
+
+
+def _forecast_array_to_long(
+    forecast: np.ndarray,
+    dates: pd.Series,
+    series_cols: list[str],
+    model_name: str,
+) -> pd.DataFrame:
+    values = np.asarray(forecast, dtype=float)
+    if values.ndim == 1:
+        values = values[:, None]
+    expected_shape = (len(dates), len(series_cols))
+    if values.shape != expected_shape:
+        raise RuntimeError(f"{model_name} forecast has shape {values.shape}; expected {expected_shape}.")
+    wide = pd.DataFrame(values, columns=series_cols)
+    wide.insert(0, "date", pd.to_datetime(dates).to_numpy())
+    return wide.melt(id_vars="date", var_name="series_id", value_name=model_name).loc[
+        :, ["series_id", "date", model_name]
+    ]
+
+
+def _forecast_ar1_values(
+    values: np.ndarray,
+    h: int,
+    *,
+    fallback: str,
+    model_label: str,
+) -> np.ndarray:
+    y = np.asarray(values, dtype=float)
+    if y.shape[0] <= 1:
+        if fallback == "zero":
+            return np.zeros(h, dtype=float)
+        raise ValueError(f"{model_label} requires at least two training observations.")
+    try:
+        return np.asarray(AutoReg(y, lags=1, trend="c", old_names=False).fit().forecast(steps=h), dtype=float)
+    except Exception:
+        if fallback == "zero":
+            return np.zeros(h, dtype=float)
+        return np.repeat(y[-1], h).astype(float)
+
+
+def _forecast_var1_values(
+    values: np.ndarray,
+    series_cols: list[str],
+    h: int,
+    *,
+    fallback_zero: bool,
+    model_label: str,
+) -> np.ndarray:
+    y = np.asarray(values, dtype=float)
+    if y.shape[0] <= 1:
+        if fallback_zero:
+            return np.zeros((h, len(series_cols)), dtype=float)
+        raise ValueError(f"{model_label} requires at least two training observations.")
+    try:
+        fit = VAR(pd.DataFrame(y, columns=series_cols)).fit(maxlags=1, trend="c")
+        return np.asarray(fit.forecast(y[-fit.k_ar:], steps=h), dtype=float)
+    except Exception:
+        if fallback_zero:
+            return np.zeros((h, len(series_cols)), dtype=float)
+        raise
+
+
 def _forecast_ar1_once(
     train_wide: pd.DataFrame,
     series_cols: list[str],
@@ -446,23 +650,17 @@ def _forecast_ar1_once(
     forecast_dates: pd.Series | list[pd.Timestamp],
     h: int,
 ) -> pd.DataFrame:
-    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
-    if len(dates) != h:
-        raise RuntimeError("AR(1) forecast_dates length does not match h.")
-
-    rows = []
-    for series_id in series_cols:
-        y = train_wide.loc[:, series_id].to_numpy(dtype=float)
-        if y.shape[0] <= 1:
-            raise ValueError("AR(1) requires at least two training observations.")
-        try:
-            forecast = AutoReg(y, lags=1, trend="c", old_names=False).fit().forecast(steps=h)
-        except Exception:
-            forecast = np.repeat(y[-1], h)
-        for i, date in enumerate(dates):
-            rows.append({"series_id": series_id, "date": date, "ar1": float(forecast[i])})
-    return pd.DataFrame(rows)
-
+    dates = _validate_forecast_dates(forecast_dates, h, "AR(1)")
+    forecasts = [
+        _forecast_ar1_values(
+            train_wide.loc[:, series_id].to_numpy(dtype=float),
+            h,
+            fallback="last",
+            model_label="AR(1)",
+        )
+        for series_id in series_cols
+    ]
+    return _forecast_array_to_long(np.column_stack(forecasts), dates, series_cols, "ar1")
 
 
 def _forecast_ar1_snaive_once(
@@ -473,26 +671,20 @@ def _forecast_ar1_snaive_once(
     h: int,
     season_length: int,
 ) -> pd.DataFrame:
-    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
-    if len(dates) != h:
-        raise RuntimeError("AR(1) seasonal-naive forecast_dates length does not match h.")
-
-    rows = []
+    dates = _validate_forecast_dates(forecast_dates, h, "AR(1) seasonal-naive")
+    forecasts = []
     for series_id in series_cols:
         y = train_wide.loc[:, series_id].to_numpy(dtype=float)
         baseline = _seasonal_naive_array(y[:, None], h, season_length)[:, 0]
         residual = _seasonal_residual_array(y[:, None], season_length)[:, 0]
-        if residual.shape[0] <= 1:
-            residual_forecast = np.zeros(h, dtype=float)
-        else:
-            try:
-                residual_forecast = AutoReg(residual, lags=1, trend="c", old_names=False).fit().forecast(steps=h)
-            except Exception:
-                residual_forecast = np.zeros(h, dtype=float)
-        forecast = baseline + np.asarray(residual_forecast, dtype=float)
-        for i, date in enumerate(dates):
-            rows.append({"series_id": series_id, "date": date, "ar1_snaive": float(forecast[i])})
-    return pd.DataFrame(rows)
+        residual_forecast = _forecast_ar1_values(
+            residual,
+            h,
+            fallback="zero",
+            model_label="AR(1) seasonal-naive residual",
+        )
+        forecasts.append(baseline + residual_forecast)
+    return _forecast_array_to_long(np.column_stack(forecasts), dates, series_cols, "ar1_snaive")
 
 
 def _forecast_var1_once(
@@ -502,22 +694,15 @@ def _forecast_var1_once(
     forecast_dates: pd.Series | list[pd.Timestamp],
     h: int,
 ) -> pd.DataFrame:
-    Y = train_wide.loc[:, series_cols].to_numpy(dtype=float)
-    if Y.shape[0] <= 1:
-        raise ValueError("VAR(1) requires at least two training observations.")
-
-    fit = VAR(pd.DataFrame(Y, columns=series_cols)).fit(maxlags=1, trend="c")
-    forecast = fit.forecast(Y[-fit.k_ar:], steps=h)
-    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
-    if len(dates) != h:
-        raise RuntimeError("VAR(1) forecast_dates length does not match h.")
-
-    rows = []
-    for j, series_id in enumerate(series_cols):
-        for i, date in enumerate(dates):
-            rows.append({"series_id": series_id, "date": date, "var1": float(forecast[i, j])})
-    return pd.DataFrame(rows)
-
+    dates = _validate_forecast_dates(forecast_dates, h, "VAR(1)")
+    forecast = _forecast_var1_values(
+        train_wide.loc[:, series_cols].to_numpy(dtype=float),
+        series_cols,
+        h,
+        fallback_zero=False,
+        model_label="VAR(1)",
+    )
+    return _forecast_array_to_long(forecast, dates, series_cols, "var1")
 
 
 def _forecast_var1_snaive_once(
@@ -528,28 +713,18 @@ def _forecast_var1_snaive_once(
     h: int,
     season_length: int,
 ) -> pd.DataFrame:
-    Y = train_wide.loc[:, series_cols].to_numpy(dtype=float)
-    baseline = _seasonal_naive_array(Y, h, season_length)
-    residual = _seasonal_residual_array(Y, season_length)
-    if residual.shape[0] <= 1:
-        residual_forecast = np.zeros((h, len(series_cols)), dtype=float)
-    else:
-        try:
-            fit = VAR(pd.DataFrame(residual, columns=series_cols)).fit(maxlags=1, trend="c")
-            residual_forecast = fit.forecast(residual[-fit.k_ar:], steps=h)
-        except Exception:
-            residual_forecast = np.zeros((h, len(series_cols)), dtype=float)
-    forecast = baseline + np.asarray(residual_forecast, dtype=float)
-
-    dates = pd.to_datetime(pd.Series(forecast_dates)).reset_index(drop=True)
-    if len(dates) != h:
-        raise RuntimeError("VAR(1) seasonal-naive forecast_dates length does not match h.")
-
-    rows = []
-    for j, series_id in enumerate(series_cols):
-        for i, date in enumerate(dates):
-            rows.append({"series_id": series_id, "date": date, "var1_snaive": float(forecast[i, j])})
-    return pd.DataFrame(rows)
+    dates = _validate_forecast_dates(forecast_dates, h, "VAR(1) seasonal-naive")
+    y = train_wide.loc[:, series_cols].to_numpy(dtype=float)
+    baseline = _seasonal_naive_array(y, h, season_length)
+    residual = _seasonal_residual_array(y, season_length)
+    residual_forecast = _forecast_var1_values(
+        residual,
+        series_cols,
+        h,
+        fallback_zero=True,
+        model_label="VAR(1) seasonal-naive residual",
+    )
+    return _forecast_array_to_long(baseline + residual_forecast, dates, series_cols, "var1_snaive")
 
 
 def _forecast_once(
@@ -562,14 +737,7 @@ def _forecast_once(
     h: int,
     n_jobs: int,
     forecast_dates: pd.Series | list[pd.Timestamp],
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
 ) -> pd.DataFrame:
     frames = []
     statsforecast_names = [name for name in model_names if name in STATSFORECAST_MODELS]
@@ -618,14 +786,7 @@ def _forecast_once(
                 h=h,
                 season_length=season_length,
                 freq=freq,
-                deepar_input_size=deepar_input_size,
-                deepar_max_steps=deepar_max_steps,
-                deepar_hidden_size=deepar_hidden_size,
-                deepar_lstm_layers=deepar_lstm_layers,
-                deepar_batch_size=deepar_batch_size,
-                deepar_learning_rate=deepar_learning_rate,
-                deepar_scaler_type=deepar_scaler_type,
-                deepar_random_seed=deepar_random_seed,
+                neural_config=neural_config,
             )
         )
     if "nbeats" in model_names:
@@ -637,14 +798,7 @@ def _forecast_once(
                 h=h,
                 season_length=season_length,
                 freq=freq,
-                nbeats_input_size=deepar_input_size,
-                nbeats_max_steps=deepar_max_steps,
-                nbeats_hidden_size=deepar_hidden_size,
-                nbeats_num_layers=deepar_lstm_layers,
-                nbeats_batch_size=deepar_batch_size,
-                nbeats_learning_rate=deepar_learning_rate,
-                nbeats_scaler_type=deepar_scaler_type,
-                nbeats_random_seed=deepar_random_seed,
+                neural_config=neural_config,
             )
         )
 
@@ -666,14 +820,7 @@ def _forecast_recursive(
     season_length: int,
     freq: str,
     n_jobs: int,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
 ) -> pd.DataFrame:
     train = wide.iloc[: len(wide) - horizon]
     out = _forecast_once(
@@ -685,14 +832,7 @@ def _forecast_recursive(
         h=horizon,
         n_jobs=n_jobs,
         forecast_dates=wide["date"].iloc[-horizon:],
-        deepar_input_size=deepar_input_size,
-        deepar_max_steps=deepar_max_steps,
-        deepar_hidden_size=deepar_hidden_size,
-        deepar_lstm_layers=deepar_lstm_layers,
-        deepar_batch_size=deepar_batch_size,
-        deepar_learning_rate=deepar_learning_rate,
-        deepar_scaler_type=deepar_scaler_type,
-        deepar_random_seed=deepar_random_seed,
+        neural_config=neural_config,
     )
     return out
 
@@ -706,14 +846,7 @@ def _forecast_rolling_origin(
     season_length: int,
     freq: str,
     n_jobs: int,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
 ) -> pd.DataFrame:
     rows = []
     for step in range(horizon):
@@ -728,14 +861,7 @@ def _forecast_rolling_origin(
             h=1,
             n_jobs=n_jobs,
             forecast_dates=[wide["date"].iloc[origin_end]],
-            deepar_input_size=deepar_input_size,
-            deepar_max_steps=deepar_max_steps,
-            deepar_hidden_size=deepar_hidden_size,
-            deepar_lstm_layers=deepar_lstm_layers,
-            deepar_batch_size=deepar_batch_size,
-            deepar_learning_rate=deepar_learning_rate,
-            deepar_scaler_type=deepar_scaler_type,
-            deepar_random_seed=deepar_random_seed,
+            neural_config=neural_config,
         )
         out.insert(0, "origin", step + 1)
         out.insert(1, "train_end", wide["date"].iloc[origin_end - 1])
@@ -772,14 +898,7 @@ def _forecast_closed_loop_single_model(
     season_length: int,
     freq: str,
     n_jobs: int,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
 ) -> pd.DataFrame:
     history = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_cols]].copy().reset_index(drop=True)
     rows = []
@@ -796,14 +915,7 @@ def _forecast_closed_loop_single_model(
             h=1,
             n_jobs=n_jobs,
             forecast_dates=[forecast_date],
-            deepar_input_size=deepar_input_size,
-            deepar_max_steps=deepar_max_steps,
-            deepar_hidden_size=deepar_hidden_size,
-            deepar_lstm_layers=deepar_lstm_layers,
-            deepar_batch_size=deepar_batch_size,
-            deepar_learning_rate=deepar_learning_rate,
-            deepar_scaler_type=deepar_scaler_type,
-            deepar_random_seed=deepar_random_seed,
+            neural_config=neural_config,
         )
         out.insert(0, "origin", step + 1)
         out.insert(1, "train_end", train_end)
@@ -827,14 +939,7 @@ def _forecast_closed_loop(
     season_length: int,
     freq: str,
     n_jobs: int,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
 ) -> pd.DataFrame:
     frames = [
         _forecast_closed_loop_single_model(
@@ -845,14 +950,7 @@ def _forecast_closed_loop(
             season_length=season_length,
             freq=freq,
             n_jobs=n_jobs,
-            deepar_input_size=deepar_input_size,
-            deepar_max_steps=deepar_max_steps,
-            deepar_hidden_size=deepar_hidden_size,
-            deepar_lstm_layers=deepar_lstm_layers,
-            deepar_batch_size=deepar_batch_size,
-            deepar_learning_rate=deepar_learning_rate,
-            deepar_scaler_type=deepar_scaler_type,
-            deepar_random_seed=deepar_random_seed,
+            neural_config=neural_config,
         )
         for model_name in model_names
     ]
@@ -872,6 +970,64 @@ def _merge_forecast_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return out
 
 
+def _forecast_by_mode(
+    wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    model_names: list[str],
+    forecast_mode: str,
+    horizon: int,
+    season_length: int,
+    freq: str,
+    n_jobs: int,
+    neural_config: NeuralModelConfig,
+) -> pd.DataFrame:
+    forecast_mode = _normalize_forecast_mode(forecast_mode)
+    if forecast_mode == "recursive":
+        return _forecast_recursive(
+            wide,
+            series_cols,
+            horizon=horizon,
+            model_names=model_names,
+            season_length=season_length,
+            freq=freq,
+            n_jobs=n_jobs,
+            neural_config=neural_config,
+        )
+    if forecast_mode == "closed-loop":
+        if len(model_names) == 1:
+            return _forecast_closed_loop_single_model(
+                wide,
+                series_cols,
+                horizon=horizon,
+                model_name=model_names[0],
+                season_length=season_length,
+                freq=freq,
+                n_jobs=n_jobs,
+                neural_config=neural_config,
+            )
+        return _forecast_closed_loop(
+            wide,
+            series_cols,
+            horizon=horizon,
+            model_names=model_names,
+            season_length=season_length,
+            freq=freq,
+            n_jobs=n_jobs,
+            neural_config=neural_config,
+        )
+    return _forecast_rolling_origin(
+        wide,
+        series_cols,
+        horizon=horizon,
+        model_names=model_names,
+        season_length=season_length,
+        freq=freq,
+        n_jobs=n_jobs,
+        neural_config=neural_config,
+    )
+
+
 def _forecast_single_model(
     wide: pd.DataFrame,
     series_cols: list[str],
@@ -882,163 +1038,56 @@ def _forecast_single_model(
     season_length: int,
     freq: str,
     n_jobs: int,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
 ) -> pd.DataFrame:
-    if forecast_mode == "recursive":
-        return _forecast_recursive(
-            wide,
-            series_cols,
-            horizon=horizon,
-            model_names=[model_name],
-            season_length=season_length,
-            freq=freq,
-            n_jobs=n_jobs,
-            deepar_input_size=deepar_input_size,
-            deepar_max_steps=deepar_max_steps,
-            deepar_hidden_size=deepar_hidden_size,
-            deepar_lstm_layers=deepar_lstm_layers,
-            deepar_batch_size=deepar_batch_size,
-            deepar_learning_rate=deepar_learning_rate,
-            deepar_scaler_type=deepar_scaler_type,
-            deepar_random_seed=deepar_random_seed,
-        )
-    if forecast_mode == "closed-loop":
-        return _forecast_closed_loop_single_model(
-            wide,
-            series_cols,
-            horizon=horizon,
-            model_name=model_name,
-            season_length=season_length,
-            freq=freq,
-            n_jobs=n_jobs,
-            deepar_input_size=deepar_input_size,
-            deepar_max_steps=deepar_max_steps,
-            deepar_hidden_size=deepar_hidden_size,
-            deepar_lstm_layers=deepar_lstm_layers,
-            deepar_batch_size=deepar_batch_size,
-            deepar_learning_rate=deepar_learning_rate,
-            deepar_scaler_type=deepar_scaler_type,
-            deepar_random_seed=deepar_random_seed,
-        )
-    return _forecast_rolling_origin(
+    return _forecast_by_mode(
         wide,
         series_cols,
-        horizon=horizon,
         model_names=[model_name],
-        season_length=season_length,
-        freq=freq,
-        n_jobs=n_jobs,
-        deepar_input_size=deepar_input_size,
-        deepar_max_steps=deepar_max_steps,
-        deepar_hidden_size=deepar_hidden_size,
-        deepar_lstm_layers=deepar_lstm_layers,
-        deepar_batch_size=deepar_batch_size,
-        deepar_learning_rate=deepar_learning_rate,
-        deepar_scaler_type=deepar_scaler_type,
-        deepar_random_seed=deepar_random_seed,
-    )
-
-
-def _forecast_single_model_remote(
-    wide: pd.DataFrame,
-    series_cols: list[str],
-    *,
-    model_name: str,
-    forecast_mode: str,
-    horizon: int,
-    season_length: int,
-    freq: str,
-    n_jobs: int,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
-    ray_debug: bool,
-) -> tuple[str, pd.DataFrame]:
-    if ray_debug:
-        _print_progress(f"[Ray benchmark start] model={model_name}")
-    start = time.time()
-    frame = _forecast_single_model(
-        wide,
-        series_cols,
-        model_name=model_name,
         forecast_mode=forecast_mode,
         horizon=horizon,
         season_length=season_length,
         freq=freq,
         n_jobs=n_jobs,
-        deepar_input_size=deepar_input_size,
-        deepar_max_steps=deepar_max_steps,
-        deepar_hidden_size=deepar_hidden_size,
-        deepar_lstm_layers=deepar_lstm_layers,
-        deepar_batch_size=deepar_batch_size,
-        deepar_learning_rate=deepar_learning_rate,
-        deepar_scaler_type=deepar_scaler_type,
-        deepar_random_seed=deepar_random_seed,
+        neural_config=neural_config,
     )
-    if ray_debug:
-        _print_progress(f"[Ray benchmark done] model={model_name}, elapsed_sec={time.time() - start:.2f}")
-    return model_name, frame
 
 
-def _forecast_univariate_series_remote(
+def _forecast_model_task_remote(
     wide: pd.DataFrame,
-    series_id: str,
+    task_series_cols: list[str],
     *,
     model_name: str,
+    task_series: str,
     forecast_mode: str,
     horizon: int,
     season_length: int,
     freq: str,
     n_jobs: int,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
     ray_debug: bool,
 ) -> tuple[str, str, pd.DataFrame]:
+    task_label = "panel" if task_series == "panel" else f"series={task_series}"
     if ray_debug:
-        _print_progress(f"[Ray benchmark start] model={model_name}, series={series_id}")
+        _print_progress(f"[Ray benchmark start] model={model_name}, {task_label}")
     start = time.time()
     frame = _forecast_single_model(
         wide,
-        [series_id],
+        task_series_cols,
         model_name=model_name,
         forecast_mode=forecast_mode,
         horizon=horizon,
         season_length=season_length,
         freq=freq,
         n_jobs=n_jobs,
-        deepar_input_size=deepar_input_size,
-        deepar_max_steps=deepar_max_steps,
-        deepar_hidden_size=deepar_hidden_size,
-        deepar_lstm_layers=deepar_lstm_layers,
-        deepar_batch_size=deepar_batch_size,
-        deepar_learning_rate=deepar_learning_rate,
-        deepar_scaler_type=deepar_scaler_type,
-        deepar_random_seed=deepar_random_seed,
+        neural_config=neural_config,
     )
     if ray_debug:
         _print_progress(
-            f"[Ray benchmark done] model={model_name}, series={series_id}, "
+            f"[Ray benchmark done] model={model_name}, {task_label}, "
             f"elapsed_sec={time.time() - start:.2f}"
         )
-    return model_name, series_id, frame
+    return model_name, task_series, frame
 
 
 def _forecast_models_with_ray(
@@ -1052,21 +1101,13 @@ def _forecast_models_with_ray(
     freq: str,
     n_jobs: int,
     max_cpus_per_task: int,
-    deepar_input_size: int,
-    deepar_max_steps: int,
-    deepar_hidden_size: int,
-    deepar_lstm_layers: int,
-    deepar_batch_size: int,
-    deepar_learning_rate: float,
-    deepar_scaler_type: str,
-    deepar_random_seed: int,
+    neural_config: NeuralModelConfig,
     ray_debug: bool,
     checkpoint_csv: Path | None = None,
 ) -> pd.DataFrame:
     univariate_models = [model_name for model_name in model_names if model_name not in PANEL_MODELS]
     panel_models = [model_name for model_name in model_names if model_name in PANEL_MODELS]
-    remote_univariate_task = ray.remote(num_cpus=max_cpus_per_task)(_forecast_univariate_series_remote)
-    remote_panel_task = ray.remote(num_cpus=max_cpus_per_task)(_forecast_single_model_remote)
+    remote_task = ray.remote(num_cpus=max_cpus_per_task)(_forecast_model_task_remote)
     wide_arg = ray.put(wide)
 
     checkpoint_csv = Path(checkpoint_csv) if checkpoint_csv is not None else None
@@ -1085,23 +1126,17 @@ def _forecast_models_with_ray(
             if task_key in completed_keys:
                 skipped += 1
                 continue
-            ref = remote_univariate_task.remote(
+            ref = remote_task.remote(
                 wide_arg,
-                series_id,
+                [series_id],
                 model_name=model_name,
+                task_series=str(series_id),
                 forecast_mode=forecast_mode,
                 horizon=horizon,
                 season_length=season_length,
                 freq=freq,
                 n_jobs=n_jobs,
-                deepar_input_size=deepar_input_size,
-                deepar_max_steps=deepar_max_steps,
-                deepar_hidden_size=deepar_hidden_size,
-                deepar_lstm_layers=deepar_lstm_layers,
-                deepar_batch_size=deepar_batch_size,
-                deepar_learning_rate=deepar_learning_rate,
-                deepar_scaler_type=deepar_scaler_type,
-                deepar_random_seed=deepar_random_seed,
+                neural_config=neural_config,
                 ray_debug=ray_debug,
             )
             futures.append(ref)
@@ -1112,23 +1147,17 @@ def _forecast_models_with_ray(
         if task_key in completed_keys:
             skipped += 1
             continue
-        ref = remote_panel_task.remote(
+        ref = remote_task.remote(
             wide_arg,
             series_cols,
             model_name=model_name,
+            task_series="panel",
             forecast_mode=forecast_mode,
             horizon=horizon,
             season_length=season_length,
             freq=freq,
             n_jobs=n_jobs,
-            deepar_input_size=deepar_input_size,
-            deepar_max_steps=deepar_max_steps,
-            deepar_hidden_size=deepar_hidden_size,
-            deepar_lstm_layers=deepar_lstm_layers,
-            deepar_batch_size=deepar_batch_size,
-            deepar_learning_rate=deepar_learning_rate,
-            deepar_scaler_type=deepar_scaler_type,
-            deepar_random_seed=deepar_random_seed,
+            neural_config=neural_config,
             ray_debug=ray_debug,
         )
         futures.append(ref)
@@ -1160,13 +1189,7 @@ def _forecast_models_with_ray(
             continue
 
         for ref in ready:
-            result = ray.get(ref)
-            if len(result) == 3:
-                model_name, series_id, frame = result
-                task_series = str(series_id)
-            else:
-                model_name, frame = result
-                task_series = "panel"
+            model_name, task_series, frame = ray.get(ref)
             if checkpoint_csv is not None:
                 _append_task_checkpoint(checkpoint_csv, model_name, task_series, frame)
             else:
@@ -1238,50 +1261,132 @@ def _save_config(output_dir: Path, config: dict[str, Any]) -> Path:
     return path
 
 
+def _save_benchmark_outputs(
+    output_dir: Path = DEFAULT_BENCHMARK_CONFIG.output_dir,
+    *,
+    long_forecasts: pd.DataFrame,
+    test_wide: pd.DataFrame,
+    by_series: pd.DataFrame,
+    by_origin: pd.DataFrame,
+    summary: pd.DataFrame,
+    series_cols: list[str],
+    model_names: list[str],
+    config: dict[str, Any],
+    checkpoint_csv: Path | None = None,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    forecast_long_csv = output_dir / "tourism_benchmark_forecasts_long.csv"
+    long_forecasts.to_csv(forecast_long_csv, index=False)
+    if checkpoint_csv is not None:
+        _archive_checkpoint_outputs(checkpoint_csv, forecast_long_csv)
+    test_wide.to_csv(output_dir / "tourism_test.csv", index=False)
+
+    test_values = test_wide.loc[:, series_cols].to_numpy(dtype=float)
+    for model in model_names:
+        forecast_wide_raw = _wide_model_frame(long_forecasts, model, series_cols)
+        forecast_wide = pd.concat(
+            [
+                forecast_wide_raw.loc[:, ["date"]].reset_index(drop=True),
+                pd.DataFrame(
+                    forecast_wide_raw.loc[:, series_cols].to_numpy(dtype=float),
+                    columns=series_cols,
+                ),
+            ],
+            axis=1,
+        )
+        forecast_wide.to_csv(output_dir / f"tourism_forecast_{model}.csv", index=False)
+        error_wide = forecast_wide.copy()
+        error_wide.loc[:, series_cols] = forecast_wide.loc[:, series_cols].to_numpy(dtype=float) - test_values
+        error_wide.to_csv(output_dir / f"tourism_errors_{model}.csv", index=False)
+
+    by_series.to_csv(output_dir / "metrics_by_series.csv", index=False)
+    by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
+    summary.to_csv(output_dir / "metrics_summary.csv", index=False)
+    _save_config(output_dir, config)
+
+
 def run_tourism_benchmark(
     *,
-    data_dir: Path,
+    data_dir: Path = DEFAULT_BENCHMARK_CONFIG.data_dir,
     output_dir: Path,
     data_path: Path | None = None,
-    data_format: str = "auto",
-    date_col: str = "date",
-    series_col: str = "series_id",
-    value_col: str = "value",
-    models: str | list[str] = DEFAULT_MODELS,
-    forecast_mode: str = "rolling-origin",
-    horizon: int = 12,
-    season_length: int = 12,
-    freq: str = "MS",
-    series_depth: int | None = DETAILED_CODE_DEPTH,
-    series_suffix: str | None = BASE_SUFFIX,
-    max_series: int = 0,
-    clip_nonnegative: bool = False,
-    ray_num_cpus: int = 1,
-    max_cpus_per_task: int = 1,
-    ray_debug: bool = False,
-    resume: bool = True,
+    data_format: str = DEFAULT_BENCHMARK_CONFIG.data_format,
+    date_col: str = DEFAULT_BENCHMARK_CONFIG.date_col,
+    series_col: str = DEFAULT_BENCHMARK_CONFIG.series_col,
+    value_col: str = DEFAULT_BENCHMARK_CONFIG.value_col,
+    models: str | list[str] = DEFAULT_BENCHMARK_CONFIG.models,
+    forecast_mode: str = DEFAULT_BENCHMARK_CONFIG.forecast_mode,
+    horizon: int = DEFAULT_BENCHMARK_CONFIG.horizon,
+    season_length: int = DEFAULT_BENCHMARK_CONFIG.season_length,
+    freq: str = DEFAULT_BENCHMARK_CONFIG.freq,
+    series_depth: int | None = DEFAULT_BENCHMARK_CONFIG.series_depth,
+    series_suffix: str | None = DEFAULT_BENCHMARK_CONFIG.series_suffix,
+    max_series: int = DEFAULT_BENCHMARK_CONFIG.max_series,
+    clip_nonnegative: bool = DEFAULT_BENCHMARK_CONFIG.clip_nonnegative,
+    ray_num_cpus: int = DEFAULT_BENCHMARK_CONFIG.ray_num_cpus,
+    max_cpus_per_task: int = DEFAULT_BENCHMARK_CONFIG.max_cpus_per_task,
+    ray_debug: bool = DEFAULT_BENCHMARK_CONFIG.ray_debug,
+    resume: bool = DEFAULT_BENCHMARK_CONFIG.resume,
     resume_csv: Path | None = None,
-    deepar_input_size: int = 0,
-    deepar_max_steps: int = 200,
-    deepar_hidden_size: int = 64,
-    deepar_lstm_layers: int = 2,
-    deepar_batch_size: int = 32,
-    deepar_learning_rate: float = 1e-3,
-    deepar_scaler_type: str = "robust",
-    deepar_random_seed: int = 2026,
+    deepar_input_size: int = DEFAULT_BENCHMARK_CONFIG.neural_config.input_size,
+    deepar_max_steps: int = DEFAULT_BENCHMARK_CONFIG.neural_config.max_steps,
+    deepar_hidden_size: int = DEFAULT_BENCHMARK_CONFIG.neural_config.hidden_size,
+    deepar_lstm_layers: int = DEFAULT_BENCHMARK_CONFIG.neural_config.num_layers,
+    deepar_batch_size: int = DEFAULT_BENCHMARK_CONFIG.neural_config.batch_size,
+    deepar_learning_rate: float = DEFAULT_BENCHMARK_CONFIG.neural_config.learning_rate,
+    deepar_scaler_type: str = DEFAULT_BENCHMARK_CONFIG.neural_config.scaler_type,
+    deepar_random_seed: int = DEFAULT_BENCHMARK_CONFIG.neural_config.random_seed,
 ) -> pd.DataFrame:
     forecast_mode = _normalize_forecast_mode(forecast_mode)
+    data_dir = Path(data_dir)
+    output_dir = Path(output_dir)
+    data_path = None if data_path is None else Path(data_path)
+    resume_csv = None if resume_csv is None else Path(resume_csv)
+    series_suffix = None if series_suffix == "" else series_suffix
+    neural_config = NeuralModelConfig(
+        input_size=int(deepar_input_size),
+        max_steps=int(deepar_max_steps),
+        hidden_size=int(deepar_hidden_size),
+        num_layers=int(deepar_lstm_layers),
+        batch_size=int(deepar_batch_size),
+        learning_rate=float(deepar_learning_rate),
+        scaler_type=str(deepar_scaler_type),
+        random_seed=int(deepar_random_seed),
+    )
+    benchmark_config = BenchmarkConfig(
+        data_dir=data_dir,
+        output_dir=output_dir,
+        data_path=data_path,
+        data_format=data_format,
+        date_col=date_col,
+        series_col=series_col,
+        value_col=value_col,
+        models=models,
+        forecast_mode=forecast_mode,
+        horizon=horizon,
+        season_length=season_length,
+        freq=freq,
+        series_depth=series_depth,
+        series_suffix=series_suffix,
+        max_series=max_series,
+        clip_nonnegative=clip_nonnegative,
+        ray_num_cpus=ray_num_cpus,
+        max_cpus_per_task=max_cpus_per_task,
+        ray_debug=ray_debug,
+        resume=resume,
+        resume_csv=resume_csv,
+        neural_config=neural_config,
+    )
     if ray_num_cpus < 1:
         raise ValueError("ray_num_cpus must be >= 1.")
     if max_cpus_per_task < 1:
         raise ValueError("max_cpus_per_task must be >= 1.")
-    use_ray = ray_num_cpus > 1
+    use_ray = benchmark_config.use_ray
     if use_ray and ray is None:
         raise RuntimeError(f"Ray could not be imported: {RAY_IMPORT_ERROR!r}")
     if use_ray and max_cpus_per_task > ray_num_cpus:
         raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
-    input_path = data_path if data_path is not None else data_dir / "tourism.csv"
-    series_suffix = None if series_suffix == "" else series_suffix
+    input_path = benchmark_config.input_path
 
     wide = load_panel_data(
         input_path,
@@ -1336,70 +1441,21 @@ def run_tourism_benchmark(
                 freq=freq,
                 n_jobs=STATSFORECAST_N_JOBS,
                 max_cpus_per_task=max_cpus_per_task,
-                deepar_input_size=deepar_input_size,
-                deepar_max_steps=deepar_max_steps,
-                deepar_hidden_size=deepar_hidden_size,
-                deepar_lstm_layers=deepar_lstm_layers,
-                deepar_batch_size=deepar_batch_size,
-                deepar_learning_rate=deepar_learning_rate,
-                deepar_scaler_type=deepar_scaler_type,
-                deepar_random_seed=deepar_random_seed,
+                neural_config=neural_config,
                 ray_debug=ray_debug,
                 checkpoint_csv=checkpoint_csv,
             )
-        elif forecast_mode == "recursive":
-            long_forecasts = _forecast_recursive(
-                wide,
-                series_cols,
-                horizon=horizon,
-                model_names=model_names,
-                season_length=season_length,
-                freq=freq,
-                n_jobs=STATSFORECAST_N_JOBS,
-                deepar_input_size=deepar_input_size,
-                deepar_max_steps=deepar_max_steps,
-                deepar_hidden_size=deepar_hidden_size,
-                deepar_lstm_layers=deepar_lstm_layers,
-                deepar_batch_size=deepar_batch_size,
-                deepar_learning_rate=deepar_learning_rate,
-                deepar_scaler_type=deepar_scaler_type,
-                deepar_random_seed=deepar_random_seed,
-            )
-        elif forecast_mode == "closed-loop":
-            long_forecasts = _forecast_closed_loop(
-                wide,
-                series_cols,
-                horizon=horizon,
-                model_names=model_names,
-                season_length=season_length,
-                freq=freq,
-                n_jobs=STATSFORECAST_N_JOBS,
-                deepar_input_size=deepar_input_size,
-                deepar_max_steps=deepar_max_steps,
-                deepar_hidden_size=deepar_hidden_size,
-                deepar_lstm_layers=deepar_lstm_layers,
-                deepar_batch_size=deepar_batch_size,
-                deepar_learning_rate=deepar_learning_rate,
-                deepar_scaler_type=deepar_scaler_type,
-                deepar_random_seed=deepar_random_seed,
-            )
         else:
-            long_forecasts = _forecast_rolling_origin(
+            long_forecasts = _forecast_by_mode(
                 wide,
                 series_cols,
-                horizon=horizon,
                 model_names=model_names,
+                forecast_mode=forecast_mode,
+                horizon=horizon,
                 season_length=season_length,
                 freq=freq,
                 n_jobs=STATSFORECAST_N_JOBS,
-                deepar_input_size=deepar_input_size,
-                deepar_max_steps=deepar_max_steps,
-                deepar_hidden_size=deepar_hidden_size,
-                deepar_lstm_layers=deepar_lstm_layers,
-                deepar_batch_size=deepar_batch_size,
-                deepar_learning_rate=deepar_learning_rate,
-                deepar_scaler_type=deepar_scaler_type,
-                deepar_random_seed=deepar_random_seed,
+                neural_config=neural_config,
             )
 
         if clip_nonnegative:
@@ -1428,71 +1484,19 @@ def run_tourism_benchmark(
             },
         )
 
-        output_dir.mkdir(parents=True, exist_ok=True)
-        forecast_long_csv = output_dir / "tourism_benchmark_forecasts_long.csv"
-        long_forecasts.to_csv(forecast_long_csv, index=False)
-        if checkpoint_csv is not None:
-            _archive_checkpoint_outputs(checkpoint_csv, forecast_long_csv)
-        test_wide.to_csv(output_dir / "tourism_test.csv", index=False)
-        for model in model_names:
-            forecast_wide_raw = _wide_model_frame(long_forecasts, model, series_cols)
-            forecast_wide = pd.concat(
-                [
-                    forecast_wide_raw.loc[:, ["date"]].reset_index(drop=True),
-                    pd.DataFrame(
-                        forecast_wide_raw.loc[:, series_cols].to_numpy(dtype=float),
-                        columns=series_cols,
-                    ),
-                ],
-                axis=1,
-            )
-            forecast_wide.to_csv(output_dir / f"tourism_forecast_{model}.csv", index=False)
-            error_wide = forecast_wide.copy()
-            error_wide.loc[:, series_cols] = forecast_wide.loc[:, series_cols].to_numpy(dtype=float) - test_wide.loc[:, series_cols].to_numpy(dtype=float)
-            error_wide.to_csv(output_dir / f"tourism_errors_{model}.csv", index=False)
+        _save_benchmark_outputs(
+            output_dir,
+            long_forecasts=long_forecasts,
+            test_wide=test_wide,
+            by_series=by_series,
+            by_origin=by_origin,
+            summary=summary,
+            series_cols=series_cols,
+            model_names=model_names,
+            checkpoint_csv=checkpoint_csv,
+            config=benchmark_config.output_config(model_names=model_names, checkpoint_csv=checkpoint_csv),
+        )
 
-        by_series.to_csv(output_dir / "metrics_by_series.csv", index=False)
-        by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
-        summary.to_csv(output_dir / "metrics_summary.csv", index=False)
-        _save_config(output_dir, {
-            "data_dir": str(data_dir),
-            "data_path": None if data_path is None else str(data_path),
-            "data_format": str(data_format),
-            "date_col": str(date_col),
-            "series_col": str(series_col),
-            "value_col": str(value_col),
-            "output_dir": str(output_dir),
-            "models": model_names,
-            "forecast_mode": forecast_mode,
-            "horizon": int(horizon),
-            "season_length": int(season_length),
-            "freq": freq,
-            "series_depth": -1 if series_depth is None else int(series_depth),
-            "series_suffix": series_suffix,
-            "max_series": int(max_series),
-            "clip_nonnegative": bool(clip_nonnegative),
-            "ray_num_cpus": int(ray_num_cpus),
-            "max_cpus_per_task": int(max_cpus_per_task),
-            "ray_debug": bool(ray_debug),
-            "resume": bool(resume),
-            "resume_csv": None if checkpoint_csv is None else str(checkpoint_csv),
-            "deepar_input_size": int(deepar_input_size),
-            "deepar_max_steps": int(deepar_max_steps),
-            "deepar_hidden_size": int(deepar_hidden_size),
-            "deepar_lstm_layers": int(deepar_lstm_layers),
-            "deepar_batch_size": int(deepar_batch_size),
-            "deepar_learning_rate": float(deepar_learning_rate),
-            "deepar_scaler_type": str(deepar_scaler_type),
-            "deepar_random_seed": int(deepar_random_seed),
-            "nbeats_input_size": int(deepar_input_size),
-            "nbeats_max_steps": int(deepar_max_steps),
-            "nbeats_hidden_size": int(deepar_hidden_size),
-            "nbeats_num_layers": int(deepar_lstm_layers),
-            "nbeats_batch_size": int(deepar_batch_size),
-            "nbeats_learning_rate": float(deepar_learning_rate),
-            "nbeats_scaler_type": str(deepar_scaler_type),
-            "nbeats_random_seed": int(deepar_random_seed),
-        })
         return summary
     finally:
         if ray_started_here:
@@ -1514,62 +1518,102 @@ def _load_config_defaults(path: Path | None) -> dict[str, Any]:
     return config
 
 
+def _benchmark_config_from_args(args: argparse.Namespace) -> BenchmarkConfig:
+    series_depth = None if args.series_depth is None or int(args.series_depth) < 0 else int(args.series_depth)
+    series_suffix = None if args.series_suffix in (None, "") else args.series_suffix
+    return BenchmarkConfig(
+        data_dir=args.data_dir,
+        output_dir=args.output_dir,
+        data_path=args.data_path,
+        data_format=args.data_format,
+        date_col=args.date_col,
+        series_col=args.series_col,
+        value_col=args.value_col,
+        models=args.models,
+        forecast_mode=args.forecast_mode,
+        horizon=args.horizon,
+        season_length=args.season_length,
+        freq=args.freq,
+        series_depth=series_depth,
+        series_suffix=series_suffix,
+        max_series=args.max_series,
+        clip_nonnegative=args.clip_nonnegative,
+        ray_num_cpus=args.ray_num_cpus,
+        max_cpus_per_task=args.max_cpus_per_task,
+        ray_debug=args.ray_debug,
+        resume=args.resume,
+        resume_csv=args.resume_csv,
+        neural_config=NeuralModelConfig(
+            input_size=args.deepar_input_size,
+            max_steps=args.deepar_max_steps,
+            hidden_size=args.deepar_hidden_size,
+            num_layers=args.deepar_lstm_layers,
+            batch_size=args.deepar_batch_size,
+            learning_rate=args.deepar_learning_rate,
+            scaler_type=args.deepar_scaler_type,
+            random_seed=args.deepar_random_seed,
+        ),
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config-json", type=Path, default=None)
     known, _ = pre.parse_known_args()
     defaults = _load_config_defaults(known.config_json)
+    default_config = DEFAULT_BENCHMARK_CONFIG
+    default_neural = default_config.neural_config
 
     parser = argparse.ArgumentParser(description="Run forecasting benchmarks on panel time-series data.", parents=[pre])
-    parser.add_argument("--data-dir", type=Path, default=Path("data/tourism"))
+    parser.add_argument("--data-dir", type=Path, default=default_config.data_dir)
     parser.add_argument(
         "--data-path",
         type=Path,
-        default=None,
+        default=default_config.data_path,
         help="CSV/parquet path in wide or long panel format. Overrides --data-dir/tourism.csv.",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/tourism_benchmark_statsforecast"))
-    parser.add_argument("--data-format", choices=["auto", "wide", "long"], default="auto")
-    parser.add_argument("--date-col", type=str, default="date")
-    parser.add_argument("--series-col", type=str, default="series_id")
-    parser.add_argument("--value-col", type=str, default="value")
-    parser.add_argument("--models", type=str, default=DEFAULT_MODELS)
+    parser.add_argument("--output-dir", type=Path, default=default_config.output_dir)
+    parser.add_argument("--data-format", choices=["auto", "wide", "long"], default=default_config.data_format)
+    parser.add_argument("--date-col", type=str, default=default_config.date_col)
+    parser.add_argument("--series-col", type=str, default=default_config.series_col)
+    parser.add_argument("--value-col", type=str, default=default_config.value_col)
+    parser.add_argument("--models", type=str, default=default_config.models)
     parser.add_argument(
         "--forecast-mode",
         type=str,
-        default="rolling-origin",
+        default=default_config.forecast_mode,
         help="Forecast mode, or comma-separated modes: recursive, rolling-origin, closed-loop.",
     )
-    parser.add_argument("--horizon", type=int, default=12)
-    parser.add_argument("--season-length", type=int, default=12)
-    parser.add_argument("--freq", type=str, default="MS")
-    parser.add_argument("--series-depth", type=int, default=DETAILED_CODE_DEPTH)
+    parser.add_argument("--horizon", type=int, default=default_config.horizon)
+    parser.add_argument("--season-length", type=int, default=default_config.season_length)
+    parser.add_argument("--freq", type=str, default=default_config.freq)
+    parser.add_argument("--series-depth", type=int, default=-1 if default_config.series_depth is None else default_config.series_depth)
     parser.add_argument(
         "--series-suffix",
         type=str,
-        default=BASE_SUFFIX,
+        default="" if default_config.series_suffix is None else default_config.series_suffix,
         help="Series-column suffix used for selection; pass '' to use all non-date columns.",
     )
-    parser.add_argument("--max-series", type=int, default=0)
-    parser.add_argument("--clip-nonnegative", action="store_true")
-    parser.add_argument("--ray-num-cpus", type=int, default=1)
-    parser.add_argument("--max-cpus-per-task", type=int, default=1)
+    parser.add_argument("--max-series", type=int, default=default_config.max_series)
+    parser.add_argument("--clip-nonnegative", action="store_true", default=default_config.clip_nonnegative)
+    parser.add_argument("--ray-num-cpus", type=int, default=default_config.ray_num_cpus)
+    parser.add_argument("--max-cpus-per-task", type=int, default=default_config.max_cpus_per_task)
     parser.add_argument("--no-resume", dest="resume", action="store_false", help="Disable Ray task checkpoint resume.")
-    parser.set_defaults(resume=True)
-    parser.add_argument("--resume-csv", type=Path, default=None, help="Checkpoint CSV path; defaults to OUTPUT_DIR/benchmark_task_results.csv.")
+    parser.set_defaults(resume=default_config.resume)
+    parser.add_argument("--resume-csv", type=Path, default=default_config.resume_csv, help="Checkpoint CSV path; defaults to OUTPUT_DIR/benchmark_task_results.csv.")
     parser.add_argument(
         "--deepar-input-size",
         type=int,
-        default=0,
+        default=default_neural.input_size,
         help="DeepAR context length; 0 uses max(3*h, 2*season_length).",
     )
-    parser.add_argument("--deepar-max-steps", type=int, default=200)
-    parser.add_argument("--deepar-hidden-size", type=int, default=64)
-    parser.add_argument("--deepar-lstm-layers", type=int, default=2)
-    parser.add_argument("--deepar-batch-size", type=int, default=32)
-    parser.add_argument("--deepar-learning-rate", type=float, default=1e-3)
-    parser.add_argument("--deepar-scaler-type", type=str, default="robust")
-    parser.add_argument("--deepar-random-seed", type=int, default=2026)
+    parser.add_argument("--deepar-max-steps", type=int, default=default_neural.max_steps)
+    parser.add_argument("--deepar-hidden-size", type=int, default=default_neural.hidden_size)
+    parser.add_argument("--deepar-lstm-layers", type=int, default=default_neural.num_layers)
+    parser.add_argument("--deepar-batch-size", type=int, default=default_neural.batch_size)
+    parser.add_argument("--deepar-learning-rate", type=float, default=default_neural.learning_rate)
+    parser.add_argument("--deepar-scaler-type", type=str, default=default_neural.scaler_type)
+    parser.add_argument("--deepar-random-seed", type=int, default=default_neural.random_seed)
     parser.add_argument(
         "--nbeats-input-size",
         dest="deepar_input_size",
@@ -1600,53 +1644,29 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(f"run_benchmarks.py: error: {exc}") from exc
 
-    run_kwargs = {
-        "data_dir": args.data_dir,
-        "data_path": args.data_path,
-        "data_format": args.data_format,
-        "date_col": args.date_col,
-        "series_col": args.series_col,
-        "value_col": args.value_col,
-        "models": args.models,
-        "horizon": args.horizon,
-        "season_length": args.season_length,
-        "freq": args.freq,
-        "series_depth": None if args.series_depth < 0 else args.series_depth,
-        "series_suffix": None if args.series_suffix == "" else args.series_suffix,
-        "max_series": args.max_series,
-        "clip_nonnegative": args.clip_nonnegative,
-        "ray_num_cpus": args.ray_num_cpus,
-        "max_cpus_per_task": args.max_cpus_per_task,
-        "ray_debug": args.ray_debug,
-        "resume": args.resume,
-        "deepar_input_size": args.deepar_input_size,
-        "deepar_max_steps": args.deepar_max_steps,
-        "deepar_hidden_size": args.deepar_hidden_size,
-        "deepar_lstm_layers": args.deepar_lstm_layers,
-        "deepar_batch_size": args.deepar_batch_size,
-        "deepar_learning_rate": args.deepar_learning_rate,
-        "deepar_scaler_type": args.deepar_scaler_type,
-        "deepar_random_seed": args.deepar_random_seed,
-    }
+    benchmark_config = _benchmark_config_from_args(args)
+    run_kwargs = benchmark_config.run_kwargs()
 
     if len(forecast_modes) == 1:
         summary = run_tourism_benchmark(
-            output_dir=args.output_dir,
+            output_dir=benchmark_config.output_dir,
             forecast_mode=forecast_modes[0],
-            resume_csv=args.resume_csv,
+            resume_csv=benchmark_config.resume_csv,
             **run_kwargs,
         )
     else:
-        args.output_dir.mkdir(parents=True, exist_ok=True)
+        benchmark_config.output_dir.mkdir(parents=True, exist_ok=True)
         summary_frames = []
         by_series_frames = []
         by_origin_frames = []
         forecast_frames = []
         for forecast_mode in forecast_modes:
-            mode_output_dir = args.output_dir / forecast_mode
+            mode_output_dir = benchmark_config.output_dir / forecast_mode
             mode_resume_csv = None
-            if args.resume_csv is not None:
-                mode_resume_csv = args.resume_csv.with_name(f"{args.resume_csv.stem}_{forecast_mode}{args.resume_csv.suffix}")
+            if benchmark_config.resume_csv is not None:
+                mode_resume_csv = benchmark_config.resume_csv.with_name(
+                    f"{benchmark_config.resume_csv.stem}_{forecast_mode}{benchmark_config.resume_csv.suffix}"
+                )
             _print_progress(f"Running benchmark forecast_mode={forecast_mode}, output_dir={mode_output_dir}")
             summary_frames.append(run_tourism_benchmark(
                 output_dir=mode_output_dir,
@@ -1661,15 +1681,15 @@ def main() -> None:
             forecast_frames.append(forecasts)
 
         summary = pd.concat(summary_frames, ignore_index=True, sort=False)
-        summary.to_csv(args.output_dir / "metrics_summary.csv", index=False)
+        summary.to_csv(benchmark_config.output_dir / "metrics_summary.csv", index=False)
         pd.concat(by_series_frames, ignore_index=True, sort=False).to_csv(
-            args.output_dir / "metrics_by_series.csv", index=False
+            benchmark_config.output_dir / "metrics_by_series.csv", index=False
         )
         pd.concat(by_origin_frames, ignore_index=True, sort=False).to_csv(
-            args.output_dir / "metrics_by_origin.csv", index=False
+            benchmark_config.output_dir / "metrics_by_origin.csv", index=False
         )
         pd.concat(forecast_frames, ignore_index=True, sort=False).to_csv(
-            args.output_dir / "tourism_benchmark_forecasts_long.csv", index=False
+            benchmark_config.output_dir / "tourism_benchmark_forecasts_long.csv", index=False
         )
 
     print("Benchmark summary:")
