@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from tqdm import trange
 
 from vara.m5_features import (
     M5_ATTENTION_META_COLUMNS,
@@ -164,25 +165,30 @@ def _make_features_with_ray(
     pending = list(futures)
     completed = 0
     frames = []
-    while pending:
-        ready, pending = ray_module.wait(pending, num_returns=1, timeout=60.0)
-        if not ready:
-            now = time.time()
-            slowest_wait = now - min(submit_times.values()) if submit_times else 0.0
-            _print_progress(
-                "Ray M5 feature wait: "
-                f"done={completed}/{len(futures)}, pending={len(pending)}, "
-                f"slowest_pending_sec={slowest_wait:.1f}, available={ray_module.available_resources()}"
-            )
-            continue
+    progress = trange(len(futures), desc="M5 store feature tasks", ncols=100)
+    try:
+        while pending:
+            ready, pending = ray_module.wait(pending, num_returns=1, timeout=60.0)
+            if not ready:
+                now = time.time()
+                slowest_wait = now - min(submit_times.values()) if submit_times else 0.0
+                _print_progress(
+                    "Ray M5 feature wait: "
+                    f"done={completed}/{len(futures)}, pending={len(pending)}, "
+                    f"slowest_pending_sec={slowest_wait:.1f}, available={ray_module.available_resources()}"
+                )
+                continue
 
-        for ref in ready:
-            sid, frame = ray_module.get(ref)
-            frames.append(frame)
-            submit_times.pop(ref, None)
-            completed += 1
-            if ray_debug:
-                _print_progress(f"Ray M5 feature collected: store_id={sid}, done={completed}/{len(futures)}")
+            for ref in ready:
+                sid, frame = ray_module.get(ref)
+                frames.append(frame)
+                submit_times.pop(ref, None)
+                completed += 1
+                progress.update(1)
+                if ray_debug:
+                    _print_progress(f"Ray M5 feature collected: store_id={sid}, done={completed}/{len(futures)}")
+    finally:
+        progress.close()
 
     features = pd.concat(frames, ignore_index=True, sort=False)
     dummy_prefixes = tuple(f"{name}_" for name in M5_CATEGORICAL_FEATURES)
