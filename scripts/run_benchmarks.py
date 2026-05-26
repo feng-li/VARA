@@ -38,6 +38,78 @@ PANEL_MODELS = {"var1", "var1_snaive", "deepar", "nbeats"}
 ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS | NEURALFORECAST_MODELS
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1"
 STATSFORECAST_N_JOBS = 1
+TASK_MODEL_COL = "_task_model"
+TASK_SERIES_COL = "_task_series"
+TASK_FORECAST_COL = "_forecast"
+
+
+def _task_expected_rows(task_series: str, *, horizon: int, n_series: int) -> int:
+    return int(horizon) * (int(n_series) if task_series == "panel" else 1)
+
+
+def _load_completed_task_keys(checkpoint_csv: Path, *, horizon: int, n_series: int) -> set[tuple[str, str]]:
+    if not checkpoint_csv.exists() or checkpoint_csv.stat().st_size == 0:
+        return set()
+    try:
+        tasks = pd.read_csv(checkpoint_csv, usecols=[TASK_MODEL_COL, TASK_SERIES_COL])
+    except ValueError:
+        return set()
+    if tasks.empty:
+        return set()
+    completed = set()
+    counts = tasks.groupby([TASK_MODEL_COL, TASK_SERIES_COL], dropna=False).size()
+    for (model_name, task_series), n_rows in counts.items():
+        task_series = str(task_series)
+        if int(n_rows) >= _task_expected_rows(task_series, horizon=horizon, n_series=n_series):
+            completed.add((str(model_name), task_series))
+    return completed
+
+
+def _append_task_checkpoint(checkpoint_csv: Path, model_name: str, task_series: str, frame: pd.DataFrame) -> None:
+    checkpoint_csv.parent.mkdir(parents=True, exist_ok=True)
+    if model_name not in frame.columns:
+        raise ValueError(f"Task frame for model {model_name!r} is missing its forecast column.")
+    key_cols = [col for col in ("origin", "train_end", "series_id", "date") if col in frame.columns]
+    out = frame.loc[:, [*key_cols, model_name]].rename(columns={model_name: TASK_FORECAST_COL})
+    out.insert(0, TASK_SERIES_COL, str(task_series))
+    out.insert(0, TASK_MODEL_COL, str(model_name))
+    write_header = not checkpoint_csv.exists() or checkpoint_csv.stat().st_size == 0
+    out.to_csv(checkpoint_csv, mode="a", header=write_header, index=False)
+
+
+def _load_task_checkpoint_forecasts(checkpoint_csv: Path, model_names: list[str]) -> pd.DataFrame:
+    if not checkpoint_csv.exists() or checkpoint_csv.stat().st_size == 0:
+        raise ValueError(f"No checkpoint forecasts found at {checkpoint_csv}.")
+    raw = pd.read_csv(checkpoint_csv)
+    if raw.empty:
+        raise ValueError(f"Checkpoint forecasts are empty: {checkpoint_csv}.")
+    if "date" in raw.columns:
+        raw["date"] = pd.to_datetime(raw["date"])
+    if "train_end" in raw.columns:
+        raw["train_end"] = pd.to_datetime(raw["train_end"])
+
+    key_cols = ["series_id", "date"]
+    if "origin" in raw.columns:
+        key_cols = ["origin", "train_end", *key_cols]
+    raw = raw.drop_duplicates([TASK_MODEL_COL, *key_cols], keep="last")
+
+    frames = []
+    for model_name in model_names:
+        frame = raw.loc[raw[TASK_MODEL_COL].astype(str) == model_name].copy()
+        if frame.empty:
+            raise ValueError(f"Checkpoint is missing completed forecasts for model {model_name!r}.")
+        if TASK_FORECAST_COL not in frame.columns:
+            raise ValueError(f"Checkpoint rows for model {model_name!r} do not contain {TASK_FORECAST_COL!r}.")
+        frame = frame.loc[:, [*key_cols, TASK_FORECAST_COL]].rename(columns={TASK_FORECAST_COL: model_name})
+        frames.append(frame.reset_index(drop=True))
+    return _merge_forecast_frames(frames)
+
+
+def _archive_checkpoint_outputs(checkpoint_csv: Path, forecast_long_csv: Path) -> None:
+    if checkpoint_csv.exists() and checkpoint_csv.stat().st_size > 0:
+        pd.read_csv(checkpoint_csv).to_parquet(checkpoint_csv.with_suffix(".parquet"), index=False)
+    if forecast_long_csv.exists() and forecast_long_csv.stat().st_size > 0:
+        pd.read_csv(forecast_long_csv).to_parquet(forecast_long_csv.with_suffix(".parquet"), index=False)
 
 
 def _print_progress(message: str) -> None:
@@ -828,6 +900,7 @@ def _forecast_models_with_ray(
     deepar_scaler_type: str,
     deepar_random_seed: int,
     ray_debug: bool,
+    checkpoint_csv: Path | None = None,
 ) -> pd.DataFrame:
     univariate_models = [model_name for model_name in model_names if model_name not in PANEL_MODELS]
     panel_models = [model_name for model_name in model_names if model_name in PANEL_MODELS]
@@ -835,10 +908,22 @@ def _forecast_models_with_ray(
     remote_panel_task = ray.remote(num_cpus=max_cpus_per_task)(_forecast_single_model_remote)
     wide_arg = ray.put(wide)
 
+    checkpoint_csv = Path(checkpoint_csv) if checkpoint_csv is not None else None
+    completed_keys = (
+        _load_completed_task_keys(checkpoint_csv, horizon=horizon, n_series=len(series_cols))
+        if checkpoint_csv is not None
+        else set()
+    )
+
     futures = []
     submit_times = {}
+    skipped = 0
     for model_name in univariate_models:
         for series_id in series_cols:
+            task_key = (model_name, str(series_id))
+            if task_key in completed_keys:
+                skipped += 1
+                continue
             ref = remote_univariate_task.remote(
                 wide_arg,
                 series_id,
@@ -862,6 +947,10 @@ def _forecast_models_with_ray(
             submit_times[ref] = time.time()
 
     for model_name in panel_models:
+        task_key = (model_name, "panel")
+        if task_key in completed_keys:
+            skipped += 1
+            continue
         ref = remote_panel_task.remote(
             wide_arg,
             series_cols,
@@ -887,8 +976,13 @@ def _forecast_models_with_ray(
     _print_progress(
         "Submitted Ray benchmark tasks: "
         f"univariate_tasks={len(univariate_models) * len(series_cols)}, "
-        f"panel_tasks={len(panel_models)}, total={len(futures)}"
+        f"panel_tasks={len(panel_models)}, total={len(futures)}, skipped={skipped}"
     )
+    if not futures:
+        if checkpoint_csv is not None:
+            return _load_task_checkpoint_forecasts(checkpoint_csv, model_names)
+        raise ValueError("No benchmark tasks were submitted.")
+
     pending = list(futures)
     completed = 0
     frames_by_model = {model_name: [] for model_name in model_names}
@@ -908,17 +1002,24 @@ def _forecast_models_with_ray(
             result = ray.get(ref)
             if len(result) == 3:
                 model_name, series_id, frame = result
+                task_series = str(series_id)
             else:
                 model_name, frame = result
-                series_id = "panel"
-            frames_by_model[model_name].append(frame)
+                task_series = "panel"
+            if checkpoint_csv is not None:
+                _append_task_checkpoint(checkpoint_csv, model_name, task_series, frame)
+            else:
+                frames_by_model[model_name].append(frame)
             submit_times.pop(ref, None)
             completed += 1
             if ray_debug:
                 _print_progress(
-                    f"Ray benchmark collected: model={model_name}, series={series_id}, "
+                    f"Ray benchmark collected: model={model_name}, series={task_series}, "
                     f"done={completed}/{len(futures)}"
                 )
+
+    if checkpoint_csv is not None:
+        return _load_task_checkpoint_forecasts(checkpoint_csv, model_names)
 
     model_frames = []
     for model_name in model_names:
@@ -997,6 +1098,8 @@ def run_tourism_benchmark(
     ray_num_cpus: int = 1,
     max_cpus_per_task: int = 1,
     ray_debug: bool = False,
+    resume: bool = True,
+    resume_csv: Path | None = None,
     deepar_input_size: int = 0,
     deepar_max_steps: int = 200,
     deepar_hidden_size: int = 64,
@@ -1017,7 +1120,6 @@ def run_tourism_benchmark(
         raise RuntimeError(f"Ray could not be imported: {RAY_IMPORT_ERROR!r}")
     if use_ray and max_cpus_per_task > ray_num_cpus:
         raise ValueError("max_cpus_per_task cannot exceed ray_num_cpus in Ray mode.")
-
     input_path = data_path if data_path is not None else data_dir / "tourism.csv"
     series_suffix = None if series_suffix == "" else series_suffix
 
@@ -1036,6 +1138,12 @@ def run_tourism_benchmark(
         raise ValueError("No series selected.")
 
     model_names = _parse_model_names(models)
+    checkpoint_csv = None
+    if resume and use_ray:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_csv = Path(resume_csv) if resume_csv is not None else output_dir / "benchmark_task_results.csv"
+        _print_progress(f"Benchmark resume checkpoint: {checkpoint_csv}")
+
     ray_started_here = False
     if use_ray and not ray.is_initialized():
         _print_progress(f"Starting Ray: ray_num_cpus={ray_num_cpus}, max_cpus_per_task={max_cpus_per_task}")
@@ -1077,6 +1185,7 @@ def run_tourism_benchmark(
                 deepar_scaler_type=deepar_scaler_type,
                 deepar_random_seed=deepar_random_seed,
                 ray_debug=ray_debug,
+                checkpoint_csv=checkpoint_csv,
             )
         elif forecast_mode == "recursive":
             long_forecasts = _forecast_recursive(
@@ -1142,7 +1251,10 @@ def run_tourism_benchmark(
         )
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        long_forecasts.to_csv(output_dir / "tourism_benchmark_forecasts_long.csv", index=False)
+        forecast_long_csv = output_dir / "tourism_benchmark_forecasts_long.csv"
+        long_forecasts.to_csv(forecast_long_csv, index=False)
+        if checkpoint_csv is not None:
+            _archive_checkpoint_outputs(checkpoint_csv, forecast_long_csv)
         test_wide.to_csv(output_dir / "tourism_test.csv", index=False)
         for model in model_names:
             forecast_wide_raw = _wide_model_frame(long_forecasts, model, series_cols)
@@ -1184,6 +1296,8 @@ def run_tourism_benchmark(
             "ray_num_cpus": int(ray_num_cpus),
             "max_cpus_per_task": int(max_cpus_per_task),
             "ray_debug": bool(ray_debug),
+            "resume": bool(resume),
+            "resume_csv": None if checkpoint_csv is None else str(checkpoint_csv),
             "deepar_input_size": int(deepar_input_size),
             "deepar_max_steps": int(deepar_max_steps),
             "deepar_hidden_size": int(deepar_hidden_size),
@@ -1257,6 +1371,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-nonnegative", action="store_true")
     parser.add_argument("--ray-num-cpus", type=int, default=1)
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
+    parser.add_argument("--no-resume", dest="resume", action="store_false", help="Disable Ray task checkpoint resume.")
+    parser.set_defaults(resume=True)
+    parser.add_argument("--resume-csv", type=Path, default=None, help="Checkpoint CSV path; defaults to OUTPUT_DIR/benchmark_task_results.csv.")
     parser.add_argument(
         "--deepar-input-size",
         type=int,
@@ -1315,6 +1432,8 @@ def main() -> None:
         ray_num_cpus=args.ray_num_cpus,
         max_cpus_per_task=args.max_cpus_per_task,
         ray_debug=args.ray_debug,
+        resume=args.resume,
+        resume_csv=args.resume_csv,
         deepar_input_size=args.deepar_input_size,
         deepar_max_steps=args.deepar_max_steps,
         deepar_hidden_size=args.deepar_hidden_size,

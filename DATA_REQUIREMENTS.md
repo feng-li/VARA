@@ -94,7 +94,6 @@ VARA can use a precomputed series-level feature table for attention construction
 
 ```bash
 python scripts/run_vara_forecast.py \
-  --feature-source file \
   --feature-path path/to/features.parquet
 ```
 

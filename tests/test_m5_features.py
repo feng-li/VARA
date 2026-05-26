@@ -116,7 +116,6 @@ class M5FeatureTests(unittest.TestCase):
                 ridge=1e-2,
                 series_depth=None,
                 series_suffix=None,
-                feature_source="file",
                 feature_path=feature_path,
                 attention_mode="topk",
                 attention_top_k=2,

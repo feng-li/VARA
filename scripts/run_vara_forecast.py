@@ -644,13 +644,18 @@ def run_vara_forecast(
         raise ValueError("forecast_mode must be 'recursive' or 'rolling-origin'.")
     if residual_transform not in {"center", "standardize"}:
         raise ValueError("residual_transform must be 'center' or 'standardize'.")
+    input_feature_path = feature_path
+    if input_feature_path is not None:
+        if feature_source == "tsfeatures":
+            feature_source = "file"
+        elif feature_source != "file":
+            raise ValueError("feature_path can only be used with feature_source='file' or the default feature_source.")
     if feature_source not in {"file", "tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"}:
         raise ValueError("feature_source must be 'file', 'tsfeatures', 'tourism', 'hybrid', 'seasonal-corr', or 'seasonal-predictive'.")
     if attention_mode not in {"dense", "topk", "score", "score-topk"}:
         raise ValueError("attention_mode must be 'dense', 'topk', 'score', or 'score-topk'.")
     if attention_mode in {"topk", "score-topk"} and attention_top_k is None:
         raise ValueError("attention_top_k must be provided when attention_mode uses top-k.")
-    input_feature_path = feature_path
     if feature_source == "file" and input_feature_path is None:
         raise ValueError("feature_path must be provided when feature_source='file'.")
     if feature_source == "seasonal-predictive" and attention_mode not in {"score", "score-topk"}:
@@ -1015,7 +1020,7 @@ def main() -> None:
         "--feature-path",
         type=Path,
         default=None,
-        help="Prepared series-level feature CSV/parquet used when --feature-source file.",
+        help="Prepared series-level feature CSV/parquet. Providing this path implies --feature-source file.",
     )
     parser.add_argument(
         "--feature-update-policy",
