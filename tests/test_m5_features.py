@@ -124,7 +124,7 @@ class M5FeatureTests(unittest.TestCase):
             self.assertEqual(metrics["attention_feature_source"], "file")
             self.assertEqual(metrics["attention_feature_input_file"], str(feature_path))
             self.assertGreater(metrics["n_attention_feature_columns"], 1)
-            saved_features = pd.read_csv(output_dir / "tourism_attention_features.csv")
+            saved_features = pd.read_csv(output_dir / "attention_features.csv")
             self.assertIn("group_a", saved_features.columns)
             self.assertEqual(list(saved_features["series_id"]), ["Y1", "Y2", "Y3"])
 

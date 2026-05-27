@@ -1464,18 +1464,18 @@ def run_vara_forecast(
     mae = float(np.mean(np.abs(errors)))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    attention_feature_output_path = output_dir / "tourism_attention_features.csv"
+    attention_feature_output_path = output_dir / "attention_features.csv"
     pd.concat(feature_frames, ignore_index=True, sort=False).to_csv(attention_feature_output_path, index=False)
     if rolling_diagnostics:
-        pd.DataFrame(rolling_diagnostics).to_csv(output_dir / "tourism_rolling_origin_diagnostics.csv", index=False)
+        pd.DataFrame(rolling_diagnostics).to_csv(output_dir / "rolling_origin_diagnostics.csv", index=False)
 
     forecast_dates = wide["date"].iloc[-horizon:].to_numpy()
-    _write_wide_output(output_dir, "tourism_forecast.csv", forecast, forecast_dates, series_ids)
-    _write_wide_output(output_dir, "tourism_baseline_forecast.csv", baseline_forecast, forecast_dates, series_ids)
-    _write_wide_output(output_dir, "tourism_residual_forecast.csv", residual_forecast, forecast_dates, series_ids)
-    _write_wide_output(output_dir, "tourism_forecast_transformed.csv", forecast_transformed, forecast_dates, series_ids)
-    _write_wide_output(output_dir, "tourism_test.csv", test, forecast_dates, series_ids)
-    _write_wide_output(output_dir, "tourism_errors.csv", errors, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "forecast.csv", forecast, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "baseline_forecast.csv", baseline_forecast, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "residual_forecast.csv", residual_forecast, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "forecast_transformed.csv", forecast_transformed, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "test.csv", test, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "errors.csv", errors, forecast_dates, series_ids)
 
     by_series, by_origin, summary = forecast_metric_tables(
         {"vara": forecast},
@@ -1552,7 +1552,7 @@ def run_vara_forecast(
         "bias": float(summary["bias"].iloc[0]),
         **fit_diagnostics,
     }
-    pd.DataFrame([metrics]).to_csv(output_dir / "tourism_metrics.csv", index=False)
+    pd.DataFrame([metrics]).to_csv(output_dir / "metrics.csv", index=False)
     return metrics
 
 
@@ -1742,14 +1742,14 @@ def main() -> None:
                 **run_kwargs,
             )
             summary_frames.append(pd.read_csv(mode_output_dir / "metrics_summary.csv"))
-            metrics_frames.append(pd.read_csv(mode_output_dir / "tourism_metrics.csv"))
+            metrics_frames.append(pd.read_csv(mode_output_dir / "metrics.csv"))
             by_series_frames.append(pd.read_csv(mode_output_dir / "metrics_by_series.csv"))
             by_origin_frames.append(pd.read_csv(mode_output_dir / "metrics_by_origin.csv"))
 
         summary = pd.concat(summary_frames, ignore_index=True, sort=False)
         summary.to_csv(config.output_dir / "metrics_summary.csv", index=False)
         pd.concat(metrics_frames, ignore_index=True, sort=False).to_csv(
-            config.output_dir / "tourism_metrics.csv", index=False
+            config.output_dir / "metrics.csv", index=False
         )
         pd.concat(by_series_frames, ignore_index=True, sort=False).to_csv(
             config.output_dir / "metrics_by_series.csv", index=False

@@ -285,9 +285,9 @@ class ScriptHelperTests(unittest.TestCase):
             self.assertEqual(metrics["n_train"], 22)
             self.assertEqual(metrics["n_train_final"], 23)
             self.assertEqual(metrics["n_train_model_final"], 23)
-            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
-            diagnostics = pd.read_csv(output_dir / "tourism_rolling_origin_diagnostics.csv")
-            features = pd.read_csv(output_dir / "tourism_attention_features.csv")
+            forecast = pd.read_csv(output_dir / "forecast.csv")
+            diagnostics = pd.read_csv(output_dir / "rolling_origin_diagnostics.csv")
+            features = pd.read_csv(output_dir / "attention_features.csv")
             metrics_summary = pd.read_csv(output_dir / "metrics_summary.csv")
             metrics_by_series = pd.read_csv(output_dir / "metrics_by_series.csv")
             metrics_by_origin = pd.read_csv(output_dir / "metrics_by_origin.csv")
@@ -344,9 +344,9 @@ class ScriptHelperTests(unittest.TestCase):
             self.assertEqual(metrics["n_train_final"], 23)
             self.assertEqual(metrics["n_train_model_final"], 23)
 
-            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
-            diagnostics = pd.read_csv(output_dir / "tourism_rolling_origin_diagnostics.csv")
-            features = pd.read_csv(output_dir / "tourism_attention_features.csv")
+            forecast = pd.read_csv(output_dir / "forecast.csv")
+            diagnostics = pd.read_csv(output_dir / "rolling_origin_diagnostics.csv")
+            features = pd.read_csv(output_dir / "attention_features.csv")
             metrics_summary = pd.read_csv(output_dir / "metrics_summary.csv")
 
             self.assertEqual(len(forecast), 2)
@@ -391,7 +391,7 @@ class ScriptHelperTests(unittest.TestCase):
             self.assertEqual(metrics["series_suffix"], "")
             self.assertEqual(metrics["series_depth"], -1)
             self.assertEqual(metrics["n_series"], 3)
-            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
+            forecast = pd.read_csv(output_dir / "forecast.csv")
             self.assertEqual(set(forecast.columns), {"date", "Y1", "Y2", "Y3"})
 
     def test_vara_forecast_accepts_generic_long_csv_path(self):
@@ -430,7 +430,7 @@ class ScriptHelperTests(unittest.TestCase):
             self.assertEqual(metrics["source"], str(data_path))
             self.assertEqual(metrics["data_format"], "long")
             self.assertEqual(metrics["n_series"], 3)
-            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
+            forecast = pd.read_csv(output_dir / "forecast.csv")
             self.assertEqual(set(forecast.columns), {"date", "Y1", "Y2", "Y3"})
 
     def test_tourism_seasonal_naive_residual_scenario_outputs_components(self):
@@ -463,9 +463,9 @@ class ScriptHelperTests(unittest.TestCase):
                 residual_transform="center",
             )
 
-            forecast = pd.read_csv(output_dir / "tourism_forecast.csv")
-            baseline = pd.read_csv(output_dir / "tourism_baseline_forecast.csv")
-            residual = pd.read_csv(output_dir / "tourism_residual_forecast.csv")
+            forecast = pd.read_csv(output_dir / "forecast.csv")
+            baseline = pd.read_csv(output_dir / "baseline_forecast.csv")
+            residual = pd.read_csv(output_dir / "residual_forecast.csv")
             summary = pd.read_csv(output_dir / "metrics_summary.csv")
 
             self.assertEqual(metrics["forecast_scenario"], "seasonal-naive-residual")

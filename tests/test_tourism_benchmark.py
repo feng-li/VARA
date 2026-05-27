@@ -39,19 +39,19 @@ class TourismBenchmarkTests(unittest.TestCase):
             )
 
             self.assertEqual(set(summary["model"]), {"naive", "seasonal_naive", "drift", "ar1", "ar1_snaive", "var1", "var1_snaive"})
-            self.assertTrue((output_dir / "tourism_benchmark_forecasts_long.csv").exists())
-            self.assertTrue((output_dir / "tourism_forecast_naive.csv").exists())
-            self.assertTrue((output_dir / "tourism_forecast_ar1.csv").exists())
-            self.assertTrue((output_dir / "tourism_forecast_ar1_snaive.csv").exists())
-            self.assertTrue((output_dir / "tourism_forecast_var1.csv").exists())
-            self.assertTrue((output_dir / "tourism_forecast_var1_snaive.csv").exists())
-            self.assertTrue((output_dir / "tourism_errors_seasonal_naive.csv").exists())
+            self.assertTrue((output_dir / "benchmark_forecasts_long.csv").exists())
+            self.assertTrue((output_dir / "forecast_naive.csv").exists())
+            self.assertTrue((output_dir / "forecast_ar1.csv").exists())
+            self.assertTrue((output_dir / "forecast_ar1_snaive.csv").exists())
+            self.assertTrue((output_dir / "forecast_var1.csv").exists())
+            self.assertTrue((output_dir / "forecast_var1_snaive.csv").exists())
+            self.assertTrue((output_dir / "errors_seasonal_naive.csv").exists())
             self.assertTrue((output_dir / "metrics_by_series.csv").exists())
             self.assertTrue((output_dir / "metrics_by_origin.csv").exists())
             self.assertTrue((output_dir / "metrics_summary.csv").exists())
-            self.assertTrue((output_dir / "config_tourism_benchmark.json").exists())
+            self.assertTrue((output_dir / "config_benchmark.json").exists())
 
-            long_forecasts = pd.read_csv(output_dir / "tourism_benchmark_forecasts_long.csv")
+            long_forecasts = pd.read_csv(output_dir / "benchmark_forecasts_long.csv")
             self.assertEqual(long_forecasts.shape[0], 4)
             self.assertEqual(set(long_forecasts["origin"]), {1, 2})
             self.assertEqual(set(long_forecasts["series_id"]), {"AAAAll", "AABAll"})
@@ -61,7 +61,7 @@ class TourismBenchmarkTests(unittest.TestCase):
             self.assertIn("var1", long_forecasts.columns)
             self.assertIn("var1_snaive", long_forecasts.columns)
 
-            seasonal_wide = pd.read_csv(output_dir / "tourism_forecast_seasonal_naive.csv")
+            seasonal_wide = pd.read_csv(output_dir / "forecast_seasonal_naive.csv")
             self.assertEqual(list(seasonal_wide["AAAAll"]), [20.0, 21.0])
             self.assertEqual(list(seasonal_wide["AABAll"]), [50.0, 52.0])
 
@@ -91,7 +91,7 @@ class TourismBenchmarkTests(unittest.TestCase):
             )
 
             self.assertEqual(set(summary["forecast_mode"]), {"closed-loop"})
-            forecast = pd.read_csv(output_dir / "tourism_forecast_naive.csv")
+            forecast = pd.read_csv(output_dir / "forecast_naive.csv")
             self.assertEqual(list(forecast["Y1"]), [14.0, 14.0])
             self.assertEqual(list(forecast["Y2"]), [25.0, 25.0])
 
@@ -122,9 +122,9 @@ class TourismBenchmarkTests(unittest.TestCase):
 
             self.assertEqual(set(summary["model"]), {"naive", "drift", "ar1"})
             self.assertEqual(set(summary["data"]), {str(data_path)})
-            long_forecasts = pd.read_csv(output_dir / "tourism_benchmark_forecasts_long.csv")
+            long_forecasts = pd.read_csv(output_dir / "benchmark_forecasts_long.csv")
             self.assertEqual(set(long_forecasts["series_id"]), {"Y1", "Y2"})
-            self.assertTrue((output_dir / "config_tourism_benchmark.json").exists())
+            self.assertTrue((output_dir / "config_benchmark.json").exists())
 
     def test_generic_long_csv_path_uses_series_id_value_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,9 +155,9 @@ class TourismBenchmarkTests(unittest.TestCase):
 
             self.assertEqual(set(summary["model"]), {"naive", "drift", "ar1"})
             self.assertEqual(set(summary["data"]), {str(data_path)})
-            long_forecasts = pd.read_csv(output_dir / "tourism_benchmark_forecasts_long.csv")
+            long_forecasts = pd.read_csv(output_dir / "benchmark_forecasts_long.csv")
             self.assertEqual(set(long_forecasts["series_id"]), {"Y1", "Y2"})
-            config = pd.read_json(output_dir / "config_tourism_benchmark.json", typ="series")
+            config = pd.read_json(output_dir / "config_benchmark.json", typ="series")
             self.assertEqual(config["data_format"], "long")
 
 

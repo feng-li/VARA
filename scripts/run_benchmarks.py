@@ -1254,7 +1254,7 @@ def _compute_metrics(
 
 
 def _save_config(output_dir: Path, config: dict[str, Any]) -> Path:
-    path = output_dir / "config_tourism_benchmark.json"
+    path = output_dir / "config_benchmark.json"
     with path.open("w", encoding="utf-8") as fh:
         json.dump(config, fh, indent=2, sort_keys=True)
         fh.write("\n")
@@ -1275,11 +1275,11 @@ def _save_benchmark_outputs(
     checkpoint_csv: Path | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    forecast_long_csv = output_dir / "tourism_benchmark_forecasts_long.csv"
+    forecast_long_csv = output_dir / "benchmark_forecasts_long.csv"
     long_forecasts.to_csv(forecast_long_csv, index=False)
     if checkpoint_csv is not None:
         _archive_checkpoint_outputs(checkpoint_csv, forecast_long_csv)
-    test_wide.to_csv(output_dir / "tourism_test.csv", index=False)
+    test_wide.to_csv(output_dir / "test.csv", index=False)
 
     test_values = test_wide.loc[:, series_cols].to_numpy(dtype=float)
     for model in model_names:
@@ -1294,10 +1294,10 @@ def _save_benchmark_outputs(
             ],
             axis=1,
         )
-        forecast_wide.to_csv(output_dir / f"tourism_forecast_{model}.csv", index=False)
+        forecast_wide.to_csv(output_dir / f"forecast_{model}.csv", index=False)
         error_wide = forecast_wide.copy()
         error_wide.loc[:, series_cols] = forecast_wide.loc[:, series_cols].to_numpy(dtype=float) - test_values
-        error_wide.to_csv(output_dir / f"tourism_errors_{model}.csv", index=False)
+        error_wide.to_csv(output_dir / f"errors_{model}.csv", index=False)
 
     by_series.to_csv(output_dir / "metrics_by_series.csv", index=False)
     by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
@@ -1676,7 +1676,7 @@ def main() -> None:
             ))
             by_series_frames.append(pd.read_csv(mode_output_dir / "metrics_by_series.csv"))
             by_origin_frames.append(pd.read_csv(mode_output_dir / "metrics_by_origin.csv"))
-            forecasts = pd.read_csv(mode_output_dir / "tourism_benchmark_forecasts_long.csv")
+            forecasts = pd.read_csv(mode_output_dir / "benchmark_forecasts_long.csv")
             forecasts.insert(0, "forecast_mode", forecast_mode)
             forecast_frames.append(forecasts)
 
@@ -1689,7 +1689,7 @@ def main() -> None:
             benchmark_config.output_dir / "metrics_by_origin.csv", index=False
         )
         pd.concat(forecast_frames, ignore_index=True, sort=False).to_csv(
-            benchmark_config.output_dir / "tourism_benchmark_forecasts_long.csv", index=False
+            benchmark_config.output_dir / "benchmark_forecasts_long.csv", index=False
         )
 
     print("Benchmark summary:")
