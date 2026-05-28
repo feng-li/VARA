@@ -47,6 +47,7 @@ FORECAST_MODE_ALIASES = {
 TASK_MODEL_COL = "_task_model"
 TASK_SERIES_COL = "_task_series"
 TASK_FORECAST_COL = "_forecast"
+SUCCESS_MARKER = "_SUCCESS"
 
 
 @dataclass(frozen=True)
@@ -1303,9 +1304,10 @@ def _save_benchmark_outputs(
     by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
     summary.to_csv(output_dir / "metrics_summary.csv", index=False)
     _save_config(output_dir, config)
+    (output_dir / SUCCESS_MARKER).touch()
 
 
-def run_tourism_benchmark(
+def run_forecast_benchmark(
     *,
     data_dir: Path = DEFAULT_BENCHMARK_CONFIG.data_dir,
     output_dir: Path,
@@ -1377,6 +1379,12 @@ def run_tourism_benchmark(
         resume_csv=resume_csv,
         neural_config=neural_config,
     )
+    success_path = output_dir / SUCCESS_MARKER
+    summary_path = output_dir / "metrics_summary.csv"
+    if resume and success_path.exists() and summary_path.exists():
+        _print_progress(f"Benchmark output already complete: {success_path}; skipping run")
+        return pd.read_csv(summary_path)
+
     if ray_num_cpus < 1:
         raise ValueError("ray_num_cpus must be >= 1.")
     if max_cpus_per_task < 1:
@@ -1648,7 +1656,7 @@ def main() -> None:
     run_kwargs = benchmark_config.run_kwargs()
 
     if len(forecast_modes) == 1:
-        summary = run_tourism_benchmark(
+        summary = run_forecast_benchmark(
             output_dir=benchmark_config.output_dir,
             forecast_mode=forecast_modes[0],
             resume_csv=benchmark_config.resume_csv,
@@ -1668,7 +1676,7 @@ def main() -> None:
                     f"{benchmark_config.resume_csv.stem}_{forecast_mode}{benchmark_config.resume_csv.suffix}"
                 )
             _print_progress(f"Running benchmark forecast_mode={forecast_mode}, output_dir={mode_output_dir}")
-            summary_frames.append(run_tourism_benchmark(
+            summary_frames.append(run_forecast_benchmark(
                 output_dir=mode_output_dir,
                 forecast_mode=forecast_mode,
                 resume_csv=mode_resume_csv,

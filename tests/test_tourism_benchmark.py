@@ -1,11 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
-from scripts.run_benchmarks import _parse_forecast_modes, run_tourism_benchmark
+from scripts.run_benchmarks import _parse_forecast_modes, run_forecast_benchmark
 
 
 class TourismBenchmarkTests(unittest.TestCase):
@@ -28,7 +29,7 @@ class TourismBenchmarkTests(unittest.TestCase):
                 "AABAll": 2.0 * np.arange(24, dtype=float) + 30.0,
             }).to_csv(data_dir / "tourism.csv", index=False)
 
-            summary = run_tourism_benchmark(
+            summary = run_forecast_benchmark(
                 data_dir=data_dir,
                 output_dir=output_dir,
                 models="naive,seasonal_naive,drift,ar1,ar1_snaive,var1,var1_snaive",
@@ -50,6 +51,7 @@ class TourismBenchmarkTests(unittest.TestCase):
             self.assertTrue((output_dir / "metrics_by_origin.csv").exists())
             self.assertTrue((output_dir / "metrics_summary.csv").exists())
             self.assertTrue((output_dir / "config_benchmark.json").exists())
+            self.assertTrue((output_dir / "_SUCCESS").exists())
 
             long_forecasts = pd.read_csv(output_dir / "benchmark_forecasts_long.csv")
             self.assertEqual(long_forecasts.shape[0], 4)
@@ -65,6 +67,43 @@ class TourismBenchmarkTests(unittest.TestCase):
             self.assertEqual(list(seasonal_wide["AAAAll"]), [20.0, 21.0])
             self.assertEqual(list(seasonal_wide["AABAll"]), [50.0, 52.0])
 
+    def test_success_marker_skips_completed_resume_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            output_dir = root / "out"
+            data_dir.mkdir()
+            dates = pd.date_range("2020-01-01", periods=24, freq="MS")
+            pd.DataFrame({
+                "date": dates,
+                "AAAAll": np.arange(24, dtype=float) + 10.0,
+                "AABAll": 2.0 * np.arange(24, dtype=float) + 30.0,
+            }).to_csv(data_dir / "tourism.csv", index=False)
+
+            first = run_forecast_benchmark(
+                data_dir=data_dir,
+                output_dir=output_dir,
+                models="naive",
+                forecast_mode="recursive",
+                horizon=2,
+                season_length=12,
+                series_depth=3,
+            )
+
+            self.assertTrue((output_dir / "_SUCCESS").exists())
+            with patch("scripts.run_benchmarks._forecast_by_mode", side_effect=AssertionError("should skip")):
+                second = run_forecast_benchmark(
+                    data_dir=data_dir,
+                    output_dir=output_dir,
+                    models="naive",
+                    forecast_mode="recursive",
+                    horizon=2,
+                    season_length=12,
+                    series_depth=3,
+                )
+
+            pd.testing.assert_frame_equal(first.reset_index(drop=True), second.reset_index(drop=True))
+
     def test_closed_loop_uses_forecasts_as_pseudo_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -77,7 +116,7 @@ class TourismBenchmarkTests(unittest.TestCase):
                 "Y2": 2.0 * np.arange(12, dtype=float) + 7.0,
             }).to_csv(data_path, index=False)
 
-            summary = run_tourism_benchmark(
+            summary = run_forecast_benchmark(
                 data_dir=root,
                 data_path=data_path,
                 output_dir=output_dir,
@@ -107,7 +146,7 @@ class TourismBenchmarkTests(unittest.TestCase):
                 "Y2": 2.0 * np.arange(12, dtype=float) + 7.0,
             }).to_csv(data_path, index=False)
 
-            summary = run_tourism_benchmark(
+            summary = run_forecast_benchmark(
                 data_dir=root,
                 data_path=data_path,
                 output_dir=output_dir,
@@ -139,7 +178,7 @@ class TourismBenchmarkTests(unittest.TestCase):
             })
             wide.melt(id_vars="date", var_name="series_id", value_name="value").to_csv(data_path, index=False)
 
-            summary = run_tourism_benchmark(
+            summary = run_forecast_benchmark(
                 data_dir=root,
                 data_path=data_path,
                 data_format="long",
