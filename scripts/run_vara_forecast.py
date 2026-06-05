@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -16,6 +18,7 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import numpy as np
 import pandas as pd
 
+from vara.forecast_baselines import auto_ets_baseline_panel, auto_ets_config
 from vara.forecast_data import load_panel_data
 from vara.forecast_metrics import forecast_metric_tables
 
@@ -313,43 +316,69 @@ def _seasonal_naive_residual_panel(history: np.ndarray, seasonal_lag: int) -> np
     return values[seasonal_lag:] - values[:-seasonal_lag]
 
 
-def _statsforecast_long_from_panel(history: np.ndarray, series_ids: list[str]) -> pd.DataFrame:
-    values = np.asarray(history, dtype=float)
-    frame = pd.DataFrame(values, columns=series_ids)
-    frame.insert(0, "ds", np.arange(values.shape[0]))
-    return frame.melt(id_vars="ds", var_name="unique_id", value_name="y")
+def _baseline_config_for_scenario(forecast_scenario: str, seasonal_lag: int) -> dict:
+    if forecast_scenario == "auto_ets":
+        return auto_ets_config(seasonal_lag)
+    if forecast_scenario == "seasonal-naive-residual":
+        return {"model": "SeasonalNaive", "season_length": int(seasonal_lag)}
+    return {}
 
 
-def _statsforecast_wide(frame: pd.DataFrame, series_ids: list[str], value_col: str) -> np.ndarray:
-    wide = frame.pivot(index="ds", columns="unique_id", values=value_col).sort_index()
-    return wide.loc[:, series_ids].to_numpy(dtype=float)
+def _feature_metadata_path(feature_path: Path) -> Path:
+    return Path(feature_path).with_suffix(Path(feature_path).suffix + ".metadata.json")
 
 
-def _auto_ets_forecast_and_residual_panel(
-    history: np.ndarray,
-    horizon: int,
+def _validate_baseline_feature_metadata(
+    *,
+    feature_path: Path | None,
+    forecast_scenario: str,
     seasonal_lag: int,
-    series_ids: list[str],
-) -> tuple[np.ndarray, np.ndarray]:
-    from statsforecast import StatsForecast
-    from statsforecast.models import AutoETS, SeasonalNaive
+) -> dict:
+    if forecast_scenario != "auto_ets" or feature_path is None:
+        return {"checked": False, "metadata_path": ""}
 
-    values = np.asarray(history, dtype=float)
-    if values.shape[0] < 2:
-        raise ValueError("History must have at least two rows for auto_ets residual correction.")
-    season_length = max(1, int(seasonal_lag))
-    long = _statsforecast_long_from_panel(values, series_ids)
-    sf = StatsForecast(
-        models=[AutoETS(season_length=season_length, alias="auto_ets")],
-        freq=1,
-        n_jobs=1,
-        fallback_model=SeasonalNaive(season_length=season_length),
-    )
-    forecast_long = sf.forecast(h=int(horizon), df=long, fitted=True)
-    fitted_long = sf.forecast_fitted_values()
-    baseline = _statsforecast_wide(forecast_long, series_ids, "auto_ets")
-    fitted = _statsforecast_wide(fitted_long, series_ids, "auto_ets")
-    return baseline, values - fitted
+    metadata_path = _feature_metadata_path(feature_path)
+    out = {"checked": False, "metadata_path": str(metadata_path)}
+    if not metadata_path.exists():
+        warnings.warn(
+            "AutoETS forecast recovery cannot verify the feature file baseline because "
+            f"metadata is missing: {metadata_path}",
+            RuntimeWarning,
+        )
+        return out
+
+    metadata = json.loads(metadata_path.read_text())
+    out.update({
+        "checked": True,
+        "filter_method": str(metadata.get("filter_method", "")),
+        "seasonal_lag": metadata.get("seasonal_lag", ""),
+    })
+    if str(metadata.get("filter_method", "")) != "auto_ets":
+        raise ValueError(
+            "--forecast-scenario auto_ets requires an auto_ets-filtered feature file. "
+            f"Got filter_method={metadata.get('filter_method')!r} in {metadata_path}."
+        )
+    if int(metadata.get("seasonal_lag", -1)) != int(seasonal_lag):
+        raise ValueError(
+            "AutoETS feature metadata seasonal_lag does not match forecast seasonal_lag: "
+            f"{metadata.get('seasonal_lag')} != {seasonal_lag}."
+        )
+
+    expected_config = auto_ets_config(seasonal_lag)
+    actual_config = metadata.get("baseline_config", {}) or {}
+    for key in ("model", "alias", "season_length", "freq"):
+        if key in actual_config and actual_config[key] != expected_config[key]:
+            raise ValueError(
+                "AutoETS feature metadata baseline_config does not match forecast config: "
+                f"{key}={actual_config[key]!r} != {expected_config[key]!r}."
+            )
+    fallback = actual_config.get("fallback", "")
+    if fallback not in ("", None):
+        raise ValueError(
+            "AutoETS feature metadata should not specify a fallback model; "
+            "use filter_method=seasonal_naive as a separate filter instead."
+        )
+    return out
 
 
 def _residual_baseline_name(forecast_scenario: str) -> str:
@@ -373,7 +402,8 @@ def _baseline_forecast_and_residual_panel(
             _seasonal_naive_residual_panel(history, seasonal_lag),
         )
     if forecast_scenario == "auto_ets":
-        return _auto_ets_forecast_and_residual_panel(history, horizon, seasonal_lag, series_ids)
+        baseline = auto_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
+        return baseline["forecast"], baseline["residuals"]
     raise ValueError(f"Unknown residual forecast_scenario: {forecast_scenario!r}.")
 
 
@@ -1280,6 +1310,12 @@ def run_vara_forecast(
     output_dir = Path(output_dir)
     data_path = None if data_path is None else Path(data_path)
     input_feature_path = None if input_feature_path is None else Path(input_feature_path)
+    baseline_feature_metadata = _validate_baseline_feature_metadata(
+        feature_path=input_feature_path,
+        forecast_scenario=forecast_scenario,
+        seasonal_lag=seasonal_lag,
+    )
+    baseline_config = _baseline_config_for_scenario(forecast_scenario, seasonal_lag)
     series_suffix = None if series_suffix == "" else series_suffix
     config = VARAForecastConfig(
         data_dir=data_dir,
@@ -1597,6 +1633,14 @@ def run_vara_forecast(
         "forecast_scenario": forecast_scenario,
         "residual_baseline": _residual_baseline_name(forecast_scenario),
         "residual_transform": residual_transform if forecast_scenario != "direct" else "",
+        "baseline_config_model": baseline_config.get("model", ""),
+        "baseline_config_alias": baseline_config.get("alias", ""),
+        "baseline_config_season_length": baseline_config.get("season_length", ""),
+        "baseline_config_freq": baseline_config.get("freq", ""),
+        "baseline_feature_metadata_checked": bool(baseline_feature_metadata.get("checked", False)),
+        "baseline_feature_metadata_path": baseline_feature_metadata.get("metadata_path", ""),
+        "baseline_feature_filter_method": baseline_feature_metadata.get("filter_method", ""),
+        "baseline_feature_seasonal_lag": baseline_feature_metadata.get("seasonal_lag", ""),
         "train_start": str(wide["date"].iloc[0]),
         "train_end": str(wide["date"].iloc[-horizon - 1]),
         "test_start": str(wide["date"].iloc[-horizon]),

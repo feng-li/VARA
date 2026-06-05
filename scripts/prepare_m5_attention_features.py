@@ -13,7 +13,8 @@ from typing import Any
 import pandas as pd
 from tqdm import trange
 
-from vara.m5_features import (
+from vara.forecast_baselines import auto_ets_config
+from vara.hierarchical_features import (
     M5_ATTENTION_META_COLUMNS,
     M5_CATEGORICAL_FEATURES,
     make_m5_attention_features,
@@ -47,6 +48,8 @@ def _store_feature_task(
     calendar: pd.DataFrame,
     *,
     holdout: int,
+    filter_method: str,
+    seasonal_lag: int,
     ray_debug: bool,
 ) -> tuple[str, pd.DataFrame]:
     if ray_debug:
@@ -58,6 +61,8 @@ def _store_feature_task(
         store_id=None,
         holdout=holdout,
         max_series=0,
+        filter_method=filter_method,
+        seasonal_lag=seasonal_lag,
         standardize_output=False,
     )
     if ray_debug:
@@ -75,6 +80,8 @@ def _write_features_and_metadata(
     store_id: str | None,
     holdout: int,
     max_series: int,
+    filter_method: str,
+    seasonal_lag: int,
     standardize_output: bool,
     ray_parallel: bool,
     ray_num_cpus: int,
@@ -96,6 +103,9 @@ def _write_features_and_metadata(
         "store_id": "" if store_id is None else str(store_id),
         "holdout": int(holdout),
         "max_series": int(max_series),
+        "filter_method": str(filter_method),
+        "seasonal_lag": int(seasonal_lag),
+        "baseline_config": auto_ets_config(seasonal_lag) if str(filter_method) == "auto_ets" else {},
         "standardize_output": bool(standardize_output),
         "n_series": int(len(features)),
         "n_columns": int(len(features.columns)),
@@ -121,6 +131,8 @@ def _make_features_with_ray(
     store_id: str | None,
     holdout: int,
     max_series: int,
+    filter_method: str,
+    seasonal_lag: int,
     standardize_output: bool,
     overwrite: bool,
     ray_num_cpus: int,
@@ -156,6 +168,8 @@ def _make_features_with_ray(
             prices_chunk,
             calendar_arg,
             holdout=holdout,
+            filter_method=filter_method,
+            seasonal_lag=seasonal_lag,
             ray_debug=ray_debug,
         )
         futures.append(ref)
@@ -213,6 +227,8 @@ def _make_features_with_ray(
         store_id=store_id,
         holdout=holdout,
         max_series=max_series,
+        filter_method=filter_method,
+        seasonal_lag=seasonal_lag,
         standardize_output=standardize_output,
         ray_parallel=True,
         ray_num_cpus=ray_num_cpus,
@@ -230,6 +246,8 @@ def _prepare_features(
     store_id: str | None,
     holdout: int,
     max_series: int,
+    filter_method: str,
+    seasonal_lag: int,
     standardize_output: bool,
     overwrite: bool,
     ray_num_cpus: int,
@@ -279,6 +297,8 @@ def _prepare_features(
                 store_id=store_id,
                 holdout=holdout,
                 max_series=max_series,
+                filter_method=filter_method,
+                seasonal_lag=seasonal_lag,
                 standardize_output=standardize_output,
                 overwrite=overwrite,
                 ray_num_cpus=ray_num_cpus,
@@ -293,6 +313,8 @@ def _prepare_features(
             store_id=store_id,
             holdout=holdout,
             max_series=max_series,
+            filter_method=filter_method,
+            seasonal_lag=seasonal_lag,
             standardize_output=standardize_output,
             overwrite=overwrite,
         )
@@ -312,6 +334,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--store-id", default=None, help="Optional store id filter; omit to prepare all stores.")
     parser.add_argument("--holdout", type=int, default=28, help="Last H sales days excluded from feature computation.")
+    parser.add_argument("--filter-method", choices=["direct", "seasonal_naive", "auto_ets"], default="direct")
+    parser.add_argument("--seasonal-lag", type=int, default=7, help="Seasonal lag used by residual filters.")
     parser.add_argument("--max-series", type=int, default=0, help="0 keeps all filtered series; positive values are useful for smoke tests.")
     parser.add_argument("--standardize-output", action="store_true", help="Standardize numeric features before saving.")
     parser.add_argument("--overwrite", action="store_true")
@@ -328,6 +352,8 @@ def main() -> None:
         store_id=args.store_id or None,
         holdout=args.holdout,
         max_series=args.max_series,
+        filter_method=args.filter_method,
+        seasonal_lag=args.seasonal_lag,
         standardize_output=args.standardize_output,
         overwrite=args.overwrite,
         ray_num_cpus=args.ray_num_cpus,
@@ -340,6 +366,8 @@ def main() -> None:
     print(f"  n_series: {metadata['n_series']}")
     print(f"  n_columns: {metadata['n_columns']}")
     print(f"  holdout: {metadata['holdout']}")
+    print(f"  filter_method: {metadata['filter_method']}")
+    print(f"  seasonal_lag: {metadata['seasonal_lag']}")
     print(f"  store_id: {metadata['store_id'] or 'all stores'}")
     print(f"  ray_parallel: {metadata.get('ray_parallel', False)}")
 

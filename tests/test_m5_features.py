@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.run_vara_forecast import run_vara_forecast
-from vara.m5_features import make_m5_attention_features, make_m5_attention_features_from_files
+from vara.hierarchical_features import make_m5_attention_features, make_m5_attention_features_from_files
 from vara.series_features import load_series_feature_matrix
 
 
@@ -55,6 +56,127 @@ class M5FeatureTests(unittest.TestCase):
         self.assertIn("snap_lift_rel", features.columns)
         self.assertIn("store_id_CA_1", features.columns)
         self.assertIn("cat_id_FOODS", features.columns)
+
+    def test_seasonal_naive_filter_uses_train_window_only(self):
+        sales, prices, calendar = self._m5_tables()
+
+        features = make_m5_attention_features(
+            sales,
+            prices,
+            calendar,
+            holdout=2,
+            filter_method="seasonal_naive",
+            seasonal_lag=2,
+        )
+
+        self.assertEqual(features["transform"].tolist(), ["m5_attention_seasonal_naive"] * 2)
+        self.assertEqual(features["n_obs"].tolist(), [6, 6])
+        self.assertEqual(features["train_start"].tolist(), ["2011-01-31"] * 2)
+        self.assertEqual(features["train_end"].tolist(), ["2011-02-05"] * 2)
+        np.testing.assert_allclose(features["sales_mean"].to_numpy(dtype=float), [2.0, 2.0])
+
+    def test_auto_ets_filter_records_baseline_config_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sales, prices, calendar = self._m5_tables()
+            sales_path = root / "sales.parquet"
+            prices_path = root / "prices.parquet"
+            calendar_path = root / "calendar.parquet"
+            output_path = root / "features.parquet"
+            sales.to_parquet(sales_path, index=False)
+            prices.to_parquet(prices_path, index=False)
+            calendar.to_parquet(calendar_path, index=False)
+
+            metadata = make_m5_attention_features_from_files(
+                sales_path=sales_path,
+                prices_path=prices_path,
+                calendar_path=calendar_path,
+                output_path=output_path,
+                holdout=2,
+                filter_method="auto_ets",
+                seasonal_lag=2,
+            )
+
+            self.assertEqual(metadata["filter_method"], "auto_ets")
+            self.assertEqual(metadata["seasonal_lag"], 2)
+            self.assertEqual(metadata["baseline_config"]["model"], "AutoETS")
+            self.assertEqual(metadata["baseline_config"]["season_length"], 2)
+            self.assertNotIn("fallback", metadata["baseline_config"])
+            saved = pd.read_parquet(output_path)
+            self.assertEqual(saved["transform"].tolist(), ["m5_attention_auto_ets"] * 2)
+
+    def test_auto_ets_forecast_rejects_non_auto_ets_feature_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_path = root / "panel.csv"
+            feature_path = root / "features.csv"
+            pd.DataFrame({
+                "date": pd.date_range("2020-01-01", periods=8, freq="D"),
+                "Y1": np.arange(8, dtype=float),
+                "Y2": np.arange(8, dtype=float) + 1.0,
+            }).to_csv(data_path, index=False)
+            pd.DataFrame({
+                "series_id": ["Y1", "Y2"],
+                "x": [1.0, 2.0],
+            }).to_csv(feature_path, index=False)
+            feature_path.with_suffix(feature_path.suffix + ".metadata.json").write_text(json.dumps({
+                "filter_method": "direct",
+                "seasonal_lag": 1,
+            }))
+
+            with self.assertRaisesRegex(ValueError, "auto_ets-filtered feature file"):
+                run_vara_forecast(
+                    data_path=data_path,
+                    output_dir=root / "out",
+                    horizon=2,
+                    seasonal_lag=1,
+                    series_depth=None,
+                    series_suffix=None,
+                    feature_path=feature_path,
+                    forecast_scenario="auto_ets",
+                    y_transform="none",
+                    grid_size=3,
+                )
+
+    def test_auto_ets_forecast_rejects_auto_ets_feature_fallback_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_path = root / "panel.csv"
+            feature_path = root / "features.csv"
+            pd.DataFrame({
+                "date": pd.date_range("2020-01-01", periods=8, freq="D"),
+                "Y1": np.arange(8, dtype=float),
+                "Y2": np.arange(8, dtype=float) + 1.0,
+            }).to_csv(data_path, index=False)
+            pd.DataFrame({
+                "series_id": ["Y1", "Y2"],
+                "x": [1.0, 2.0],
+            }).to_csv(feature_path, index=False)
+            feature_path.with_suffix(feature_path.suffix + ".metadata.json").write_text(json.dumps({
+                "filter_method": "auto_ets",
+                "seasonal_lag": 1,
+                "baseline_config": {
+                    "model": "AutoETS",
+                    "alias": "auto_ets",
+                    "season_length": 1,
+                    "freq": 1,
+                    "fallback": "SeasonalNaive",
+                },
+            }))
+
+            with self.assertRaisesRegex(ValueError, "should not specify a fallback model"):
+                run_vara_forecast(
+                    data_path=data_path,
+                    output_dir=root / "out",
+                    horizon=2,
+                    seasonal_lag=1,
+                    series_depth=None,
+                    series_suffix=None,
+                    feature_path=feature_path,
+                    forecast_scenario="auto_ets",
+                    y_transform="none",
+                    grid_size=3,
+                )
 
     def test_prepare_m5_attention_features_from_files_and_loads_for_attention(self):
         with tempfile.TemporaryDirectory() as tmp:

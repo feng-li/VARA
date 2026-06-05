@@ -1,4 +1,4 @@
-"""Series-level M5 feature extraction for VARA attention."""
+"""Series-level hierarchical feature extraction for VARA attention."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
+from .forecast_baselines import auto_ets_baseline_panel, auto_ets_config
 from .series_features import META_COLUMNS, clean_feature_frame
 
 
@@ -24,6 +25,7 @@ M5_ATTENTION_META_COLUMNS = (
 )
 M5_CATEGORICAL_FEATURES = ("state_id", "store_id", "cat_id", "dept_id")
 DEFAULT_RECENT_WINDOWS = (7, 28, 56)
+FILTER_METHODS = ("direct", "seasonal_naive", "auto_ets")
 
 
 def read_table(path: Path) -> pd.DataFrame:
@@ -70,6 +72,19 @@ def _window_mean(values: np.ndarray, window: int) -> np.ndarray:
     return _safe_mean(values[:, -width:], axis=1)
 
 
+def _signed_log1p(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    return np.sign(values) * np.log1p(np.abs(values))
+
+
+def _normalize_filter_method(filter_method: str) -> str:
+    normalized = str(filter_method).strip().lower().replace("-", "_")
+    if normalized not in set(FILTER_METHODS):
+        valid = ", ".join(FILTER_METHODS)
+        raise ValueError(f"filter_method must be one of {valid}.")
+    return normalized
+
+
 def _calendar_for_days(calendar: pd.DataFrame, day_cols: list[str]) -> pd.DataFrame:
     _require_columns(calendar, ["d", "date", "wm_yr_wk"], "calendar")
     cal = calendar.copy()
@@ -91,16 +106,27 @@ def _calendar_lift(values: np.ndarray, mask: np.ndarray, base_mean: np.ndarray) 
     return _safe_ratio(in_mean, base_mean) - 1.0, _safe_ratio(in_mean, out_mean) - 1.0
 
 
-def _demand_feature_frame(sales: pd.DataFrame, calendar_days: pd.DataFrame, day_cols: list[str]) -> pd.DataFrame:
-    values = sales.loc[:, day_cols].to_numpy(dtype=float)
-    values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-    values = np.maximum(values, 0.0)
-    log_values = np.log1p(values)
+def _demand_feature_frame(
+    sales: pd.DataFrame,
+    calendar_days: pd.DataFrame,
+    day_cols: list[str],
+    *,
+    filter_method: str = "direct",
+) -> pd.DataFrame:
+    raw_values = sales.loc[:, day_cols].to_numpy(dtype=float)
+    raw_values = np.nan_to_num(raw_values, nan=0.0, posinf=0.0, neginf=0.0)
+    if filter_method == "direct":
+        values = np.maximum(raw_values, 0.0)
+        log_values = np.log1p(values)
+        nonzero = values > 0.0
+    else:
+        values = raw_values
+        log_values = _signed_log1p(values)
+        nonzero = np.abs(values) > 1e-12
     n_series, n_obs = values.shape
 
     mean_sales = _safe_mean(values, axis=1)
     std_sales = _safe_std(values, axis=1)
-    nonzero = values > 0.0
     zero_fraction = 1.0 - nonzero.mean(axis=1)
 
     out = pd.DataFrame({
@@ -170,6 +196,39 @@ def _demand_feature_frame(sales: pd.DataFrame, calendar_days: pd.DataFrame, day_
     return out
 
 
+def _filtered_train_sales(
+    sales: pd.DataFrame,
+    train_day_cols: list[str],
+    *,
+    filter_method: str,
+    seasonal_lag: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    filter_method = _normalize_filter_method(filter_method)
+    values = sales.loc[:, train_day_cols].to_numpy(dtype=float)
+    values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    out = sales.copy()
+
+    if filter_method == "direct":
+        return out, train_day_cols
+    if filter_method == "seasonal_naive":
+        lag = int(seasonal_lag)
+        if lag < 1 or values.shape[1] <= lag:
+            raise ValueError("seasonal_naive filtering requires more train days than seasonal_lag.")
+        feature_day_cols = train_day_cols[lag:]
+        out.loc[:, feature_day_cols] = values[:, lag:] - values[:, :-lag]
+        return out, feature_day_cols
+    if filter_method == "auto_ets":
+        baseline = auto_ets_baseline_panel(
+            values.T,
+            horizon=1,
+            seasonal_lag=seasonal_lag,
+            series_ids=sales["id"].astype(str).tolist(),
+        )
+        out.loc[:, train_day_cols] = baseline["residuals"].T
+        return out, train_day_cols
+    raise ValueError(f"Unknown filter_method: {filter_method!r}.")
+
+
 def _price_feature_frame(
     sales: pd.DataFrame,
     prices: pd.DataFrame,
@@ -216,13 +275,18 @@ def make_m5_attention_features(
     store_id: str | None = None,
     holdout: int = 28,
     max_series: int = 0,
+    filter_method: str = "direct",
+    seasonal_lag: int = 7,
     standardize_output: bool = False,
 ) -> pd.DataFrame:
     """Build one M5 attention feature row per item-store series.
 
-    ``holdout`` removes the last H sales days before computing demand, price, and
-    calendar-response features, matching the forecasting train/test split.
+    ``holdout`` removes the last H sales days before computing features,
+    matching the forecasting train/test split. ``filter_method`` is applied only
+    to this train window before demand and calendar-response features are
+    calculated.
     """
+    filter_method = _normalize_filter_method(filter_method)
     _require_columns(sales, M5_META_COLUMNS, "sales")
     day_cols = infer_m5_day_columns(sales.columns)
     if not day_cols:
@@ -241,17 +305,28 @@ def make_m5_attention_features(
         raise ValueError("No M5 sales rows remain after filtering.")
 
     train_day_cols = day_cols[:-holdout] if holdout else day_cols
-    calendar_days = _calendar_for_days(calendar, train_day_cols)
+    filtered_sales, feature_day_cols = _filtered_train_sales(
+        sales_data,
+        train_day_cols,
+        filter_method=filter_method,
+        seasonal_lag=seasonal_lag,
+    )
+    calendar_days = _calendar_for_days(calendar, feature_day_cols)
     dates = pd.to_datetime(calendar_days["date"])
 
     meta = sales_data.loc[:, list(M5_META_COLUMNS)].copy().rename(columns={"id": "series_id"})
     meta["series_id"] = meta["series_id"].astype(str)
-    meta.insert(1, "transform", "m5_attention")
-    meta.insert(2, "n_obs", len(train_day_cols))
+    meta.insert(1, "transform", f"m5_attention_{filter_method}")
+    meta.insert(2, "n_obs", len(feature_day_cols))
     meta.insert(3, "train_start", str(dates.iloc[0].date()))
     meta.insert(4, "train_end", str(dates.iloc[-1].date()))
 
-    demand = _demand_feature_frame(sales_data, calendar_days, train_day_cols)
+    demand = _demand_feature_frame(
+        filtered_sales,
+        calendar_days,
+        feature_day_cols,
+        filter_method=filter_method,
+    )
     price = _price_feature_frame(sales_data, price_data, calendar_days)
     features = meta.merge(demand, on="series_id", how="left", sort=False).merge(price, on="series_id", how="left", sort=False)
     features = pd.get_dummies(features, columns=list(M5_CATEGORICAL_FEATURES), prefix=list(M5_CATEGORICAL_FEATURES), dtype=float)
@@ -272,6 +347,8 @@ def make_m5_attention_features_from_files(
     store_id: str | None = None,
     holdout: int = 28,
     max_series: int = 0,
+    filter_method: str = "direct",
+    seasonal_lag: int = 7,
     standardize_output: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
@@ -288,6 +365,8 @@ def make_m5_attention_features_from_files(
         store_id=store_id,
         holdout=holdout,
         max_series=max_series,
+        filter_method=filter_method,
+        seasonal_lag=seasonal_lag,
         standardize_output=standardize_output,
     )
 
@@ -306,6 +385,9 @@ def make_m5_attention_features_from_files(
         "store_id": "" if store_id is None else str(store_id),
         "holdout": int(holdout),
         "max_series": int(max_series),
+        "filter_method": _normalize_filter_method(filter_method),
+        "seasonal_lag": int(seasonal_lag),
+        "baseline_config": auto_ets_config(seasonal_lag) if _normalize_filter_method(filter_method) == "auto_ets" else {},
         "standardize_output": bool(standardize_output),
         "n_series": int(len(features)),
         "n_columns": int(len(features.columns)),
