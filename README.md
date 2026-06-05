@@ -1,4 +1,4 @@
-# Vector Autoregression with Attention Weights (VARA)
+# Vector Autoregression with Attentions (VARA)
 
 VARA is a research codebase for a network-augmented vector autoregression that uses structured attention weights to model cross-series dependence.
 
