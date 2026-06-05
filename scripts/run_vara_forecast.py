@@ -51,7 +51,7 @@ SEASONAL_CORR_FEATURE_FUNCTIONS = (
     "seasonal_naive_residual_correlation,seasonal_profile_pca,recent_dynamics,hierarchy"
 )
 SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS = "seasonal_diff_predictive_corr_lag1_lag12"
-FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual")
+FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual", "auto_ets")
 FORECAST_MODES = ("recursive", "rolling-origin", "closed-loop")
 FORECAST_MODE_ALIASES = {
     "rolling_origin": "rolling-origin",
@@ -311,6 +311,70 @@ def _seasonal_naive_residual_panel(history: np.ndarray, seasonal_lag: int) -> np
         raise ValueError("History must have more rows than seasonal_lag for residual correction.")
     values = np.asarray(history, dtype=float)
     return values[seasonal_lag:] - values[:-seasonal_lag]
+
+
+def _statsforecast_long_from_panel(history: np.ndarray, series_ids: list[str]) -> pd.DataFrame:
+    values = np.asarray(history, dtype=float)
+    frame = pd.DataFrame(values, columns=series_ids)
+    frame.insert(0, "ds", np.arange(values.shape[0]))
+    return frame.melt(id_vars="ds", var_name="unique_id", value_name="y")
+
+
+def _statsforecast_wide(frame: pd.DataFrame, series_ids: list[str], value_col: str) -> np.ndarray:
+    wide = frame.pivot(index="ds", columns="unique_id", values=value_col).sort_index()
+    return wide.loc[:, series_ids].to_numpy(dtype=float)
+
+
+def _auto_ets_forecast_and_residual_panel(
+    history: np.ndarray,
+    horizon: int,
+    seasonal_lag: int,
+    series_ids: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    from statsforecast import StatsForecast
+    from statsforecast.models import AutoETS, SeasonalNaive
+
+    values = np.asarray(history, dtype=float)
+    if values.shape[0] < 2:
+        raise ValueError("History must have at least two rows for auto_ets residual correction.")
+    season_length = max(1, int(seasonal_lag))
+    long = _statsforecast_long_from_panel(values, series_ids)
+    sf = StatsForecast(
+        models=[AutoETS(season_length=season_length, alias="auto_ets")],
+        freq=1,
+        n_jobs=1,
+        fallback_model=SeasonalNaive(season_length=season_length),
+    )
+    forecast_long = sf.forecast(h=int(horizon), df=long, fitted=True)
+    fitted_long = sf.forecast_fitted_values()
+    baseline = _statsforecast_wide(forecast_long, series_ids, "auto_ets")
+    fitted = _statsforecast_wide(fitted_long, series_ids, "auto_ets")
+    return baseline, values - fitted
+
+
+def _residual_baseline_name(forecast_scenario: str) -> str:
+    if forecast_scenario == "seasonal-naive-residual":
+        return "seasonal_naive"
+    if forecast_scenario == "auto_ets":
+        return "auto_ets"
+    return ""
+
+
+def _baseline_forecast_and_residual_panel(
+    history: np.ndarray,
+    horizon: int,
+    seasonal_lag: int,
+    series_ids: list[str],
+    forecast_scenario: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    if forecast_scenario == "seasonal-naive-residual":
+        return (
+            _seasonal_naive_forecast(history, horizon, seasonal_lag),
+            _seasonal_naive_residual_panel(history, seasonal_lag),
+        )
+    if forecast_scenario == "auto_ets":
+        return _auto_ets_forecast_and_residual_panel(history, horizon, seasonal_lag, series_ids)
+    raise ValueError(f"Unknown residual forecast_scenario: {forecast_scenario!r}.")
 
 
 def _series_code(series_id: str, suffix: str = BASE_SUFFIX) -> str:
@@ -771,8 +835,13 @@ def _fit_vara_origin_step(
         model_train = origin_train
         model_transform = y_transform
     else:
-        baseline_one = _seasonal_naive_forecast(origin_train, 1, seasonal_lag)
-        model_train = _seasonal_naive_residual_panel(origin_train, seasonal_lag)
+        baseline_one, model_train = _baseline_forecast_and_residual_panel(
+            origin_train,
+            1,
+            seasonal_lag,
+            series_ids,
+            forecast_scenario,
+        )
         model_transform = residual_transform
 
     Y_train, fitted_y_transform = _fit_y_transform(model_train, model_transform, seasonal_lag)
@@ -1275,8 +1344,13 @@ def run_vara_forecast(
             model_train = train
             model_transform = y_transform
         else:
-            baseline_forecast = _seasonal_naive_forecast(train, horizon, seasonal_lag)
-            model_train = _seasonal_naive_residual_panel(train, seasonal_lag)
+            baseline_forecast, model_train = _baseline_forecast_and_residual_panel(
+                train,
+                horizon,
+                seasonal_lag,
+                series_ids,
+                forecast_scenario,
+            )
             model_transform = residual_transform
         Y_train, fitted_y_transform = _fit_y_transform(model_train, model_transform, seasonal_lag)
         Z, feature_df, feature_cols = _tourism_feature_matrix(
@@ -1521,8 +1595,8 @@ def run_vara_forecast(
         "ray_num_cpus": int(ray_num_cpus),
         "max_cpus_per_task": int(max_cpus_per_task),
         "forecast_scenario": forecast_scenario,
-        "residual_baseline": "seasonal_naive" if forecast_scenario == "seasonal-naive-residual" else "",
-        "residual_transform": residual_transform if forecast_scenario == "seasonal-naive-residual" else "",
+        "residual_baseline": _residual_baseline_name(forecast_scenario),
+        "residual_transform": residual_transform if forecast_scenario != "direct" else "",
         "train_start": str(wide["date"].iloc[0]),
         "train_end": str(wide["date"].iloc[-horizon - 1]),
         "test_start": str(wide["date"].iloc[-horizon]),
