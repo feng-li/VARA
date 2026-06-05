@@ -18,7 +18,12 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 import numpy as np
 import pandas as pd
 
-from vara.forecast_baselines import auto_ets_baseline_panel, auto_ets_config
+from vara.forecast_baselines import (
+    auto_ets_baseline_panel,
+    auto_ets_config,
+    statsmodels_ets_baseline_panel,
+    statsmodels_ets_config,
+)
 from vara.forecast_data import load_panel_data
 from vara.forecast_metrics import forecast_metric_tables
 
@@ -54,7 +59,7 @@ SEASONAL_CORR_FEATURE_FUNCTIONS = (
     "seasonal_naive_residual_correlation,seasonal_profile_pca,recent_dynamics,hierarchy"
 )
 SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS = "seasonal_diff_predictive_corr_lag1_lag12"
-FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual", "auto_ets")
+FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual", "auto_ets", "statsmodels_ets")
 FORECAST_MODES = ("recursive", "rolling-origin", "closed-loop")
 FORECAST_MODE_ALIASES = {
     "rolling_origin": "rolling-origin",
@@ -319,6 +324,8 @@ def _seasonal_naive_residual_panel(history: np.ndarray, seasonal_lag: int) -> np
 def _baseline_config_for_scenario(forecast_scenario: str, seasonal_lag: int) -> dict:
     if forecast_scenario == "auto_ets":
         return auto_ets_config(seasonal_lag)
+    if forecast_scenario == "statsmodels_ets":
+        return statsmodels_ets_config()
     if forecast_scenario == "seasonal-naive-residual":
         return {"model": "SeasonalNaive", "season_length": int(seasonal_lag)}
     return {}
@@ -386,6 +393,8 @@ def _residual_baseline_name(forecast_scenario: str) -> str:
         return "seasonal_naive"
     if forecast_scenario == "auto_ets":
         return "auto_ets"
+    if forecast_scenario == "statsmodels_ets":
+        return "statsmodels_ets"
     return ""
 
 
@@ -403,6 +412,9 @@ def _baseline_forecast_and_residual_panel(
         )
     if forecast_scenario == "auto_ets":
         baseline = auto_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
+        return baseline["forecast"], baseline["residuals"]
+    if forecast_scenario == "statsmodels_ets":
+        baseline = statsmodels_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
         return baseline["forecast"], baseline["residuals"]
     raise ValueError(f"Unknown residual forecast_scenario: {forecast_scenario!r}.")
 

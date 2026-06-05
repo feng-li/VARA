@@ -9,6 +9,7 @@ import pandas as pd
 
 
 AUTO_ETS_ALIAS = "auto_ets"
+STATSMODELS_ETS_ALIAS = "statsmodels_ets"
 
 
 def auto_ets_config(seasonal_lag: int) -> dict[str, Any]:
@@ -17,6 +18,18 @@ def auto_ets_config(seasonal_lag: int) -> dict[str, Any]:
         "alias": AUTO_ETS_ALIAS,
         "season_length": max(1, int(seasonal_lag)),
         "freq": 1,
+    }
+
+
+def statsmodels_ets_config() -> dict[str, Any]:
+    return {
+        "model": "statsmodels.ETSModel",
+        "alias": STATSMODELS_ETS_ALIAS,
+        "error": "add",
+        "trend": None,
+        "damped_trend": False,
+        "seasonal": None,
+        "initialization_method": "estimated",
     }
 
 
@@ -66,6 +79,43 @@ def auto_ets_baseline_panel(
     fitted_long = sf.forecast_fitted_values()
     fitted = _statsforecast_wide(fitted_long, series_ids, AUTO_ETS_ALIAS)
     forecast = _statsforecast_wide(forecast_long, series_ids, AUTO_ETS_ALIAS)
+    return {
+        "fitted": fitted,
+        "residuals": values - fitted,
+        "forecast": forecast,
+        "config": config,
+    }
+
+
+def statsmodels_ets_baseline_panel(
+    history: np.ndarray,
+    horizon: int,
+    seasonal_lag: int,
+    series_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Fit statsmodels ETSModel defaults and return fitted, residual, and forecast panels."""
+    del seasonal_lag
+
+    from statsmodels.tsa.exponential_smoothing.ets import ETSModel
+
+    values = np.asarray(history, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("history must have shape (T, p).")
+    if values.shape[0] < 2:
+        raise ValueError("statsmodels ETS baseline requires at least two training observations.")
+    if values.shape[1] != len(series_ids):
+        raise ValueError("history column count must match series_ids.")
+
+    config = statsmodels_ets_config()
+    fitted_cols = []
+    forecast_cols = []
+    for idx in range(values.shape[1]):
+        result = ETSModel(values[:, idx]).fit(disp=False)
+        fitted_cols.append(np.asarray(result.fittedvalues, dtype=float))
+        forecast_cols.append(np.asarray(result.forecast(int(horizon)), dtype=float))
+
+    fitted = np.column_stack(fitted_cols)
+    forecast = np.column_stack(forecast_cols)
     return {
         "fitted": fitted,
         "residuals": values - fitted,

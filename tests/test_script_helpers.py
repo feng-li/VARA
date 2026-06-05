@@ -23,10 +23,13 @@ from scripts.run_full_simulation import (
     make_simulation_setup_table,
 )
 from scripts.run_vara_forecast import (
+    _baseline_config_for_scenario,
+    _baseline_forecast_and_residual_panel,
     _feature_transform_from_y_transform,
     _fit_y_transform,
     _inverse_y_transform,
     _parse_forecast_modes,
+    _residual_baseline_name,
     _seasonal_naive_forecast,
     _seasonal_naive_residual_panel,
     _tourism_feature_matrix,
@@ -45,6 +48,32 @@ class ScriptHelperTests(unittest.TestCase):
 
     def test_feature_transform_maps_none_to_level(self):
         self.assertEqual(_feature_transform_from_y_transform("none"), "level")
+
+    def test_statsmodels_ets_residual_scenario_uses_default_baseline(self):
+        history = np.asarray([
+            [10.0, 20.0],
+            [11.0, 19.0],
+            [13.0, 18.0],
+            [14.0, 18.0],
+            [16.0, 17.0],
+            [17.0, 17.0],
+        ])
+
+        config = _baseline_config_for_scenario("statsmodels_ets", seasonal_lag=12)
+        forecast, residuals = _baseline_forecast_and_residual_panel(
+            history,
+            horizon=2,
+            seasonal_lag=12,
+            series_ids=["a", "b"],
+            forecast_scenario="statsmodels_ets",
+        )
+
+        self.assertEqual(config["alias"], "statsmodels_ets")
+        self.assertEqual(_residual_baseline_name("statsmodels_ets"), "statsmodels_ets")
+        self.assertEqual(forecast.shape, (2, 2))
+        self.assertEqual(residuals.shape, history.shape)
+        self.assertTrue(np.isfinite(forecast).all())
+        self.assertTrue(np.isfinite(residuals).all())
 
     def test_seasonal_naive_forecast_and_residual_panel(self):
         history = np.arange(1, 16, dtype=float)[:, None]

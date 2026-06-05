@@ -32,16 +32,17 @@ class TourismBenchmarkTests(unittest.TestCase):
             summary = run_forecast_benchmark(
                 data_dir=data_dir,
                 output_dir=output_dir,
-                models="naive,seasonal_naive,drift,ar1,ar1_snaive,var1,var1_snaive",
+                models="naive,seasonal_naive,drift,statsmodels_ets,ar1,ar1_snaive,var1,var1_snaive",
                 forecast_mode="rolling-origin",
                 horizon=2,
                 season_length=12,
                 series_depth=3,
             )
 
-            self.assertEqual(set(summary["model"]), {"naive", "seasonal_naive", "drift", "ar1", "ar1_snaive", "var1", "var1_snaive"})
+            self.assertEqual(set(summary["model"]), {"naive", "seasonal_naive", "drift", "statsmodels_ets", "ar1", "ar1_snaive", "var1", "var1_snaive"})
             self.assertTrue((output_dir / "benchmark_forecasts_long.csv").exists())
             self.assertTrue((output_dir / "forecast_naive.csv").exists())
+            self.assertTrue((output_dir / "forecast_statsmodels_ets.csv").exists())
             self.assertTrue((output_dir / "forecast_ar1.csv").exists())
             self.assertTrue((output_dir / "forecast_ar1_snaive.csv").exists())
             self.assertTrue((output_dir / "forecast_var1.csv").exists())
@@ -58,6 +59,7 @@ class TourismBenchmarkTests(unittest.TestCase):
             self.assertEqual(set(long_forecasts["origin"]), {1, 2})
             self.assertEqual(set(long_forecasts["series_id"]), {"AAAAll", "AABAll"})
             self.assertIn("seasonal_naive", long_forecasts.columns)
+            self.assertIn("statsmodels_ets", long_forecasts.columns)
             self.assertIn("ar1", long_forecasts.columns)
             self.assertIn("ar1_snaive", long_forecasts.columns)
             self.assertIn("var1", long_forecasts.columns)

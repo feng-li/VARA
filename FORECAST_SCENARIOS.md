@@ -10,6 +10,7 @@ to define the target that VARA models.
 | `direct` | The selected response panel after `--y-transform` | VARA forecast directly |
 | `seasonal-naive-residual` | Residuals after a seasonal-naive baseline | Seasonal-naive forecast plus VARA residual forecast |
 | `auto_ets` | Residuals after an AutoETS baseline | AutoETS forecast plus VARA residual forecast |
+| `statsmodels_ets` | Residuals after the default `statsmodels` `ETSModel` baseline | statsmodels ETS forecast plus VARA residual forecast |
 
 The residual scenarios decompose the forecast into a univariate baseline and a
 cross-series residual correction. The baseline captures each series' own level,
@@ -89,6 +90,15 @@ y_hat[t+h, i] = y_hat_auto_ets[t+h, i] + r_hat_vara[t+h, i].
 Conceptually, AutoETS handles each series' own univariate structure. VARA is
 responsible only for forecasting what AutoETS missed, using the cross-series
 attention-weighted lag structure.
+
+## statsmodels ETS Residual VARA
+
+The `statsmodels_ets` scenario follows the same residual-correction structure as
+`auto_ets`, but the univariate baseline is `statsmodels.tsa.exponential_smoothing.ets.ETSModel`
+with its default settings. In the installed API this means additive errors, no
+trend, no seasonal component, and estimated initialization. This gives a weaker,
+fixed ETS filter that can be useful when the goal is to test whether VARA adds
+cross-series information beyond a simple univariate smoother.
 
 ## Feature Use and Leakage
 

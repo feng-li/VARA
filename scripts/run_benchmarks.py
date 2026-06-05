@@ -20,6 +20,7 @@ from statsmodels.tsa.ar_model import AutoReg
 from statsmodels.tsa.api import VAR
 
 from vara.forecast_data import load_panel_data
+from vara.forecast_baselines import statsmodels_ets_baseline_panel
 from vara.forecast_metrics import forecast_metric_tables
 
 try:
@@ -33,7 +34,7 @@ else:
 BASE_SUFFIX = "All"
 DETAILED_CODE_DEPTH = 3
 STATSFORECAST_MODELS = {"naive", "seasonal_naive", "drift", "auto_ets", "auto_arima"}
-STATSMODELS_MODELS = {"ar1", "var1", "ar1_snaive", "var1_snaive"}
+STATSMODELS_MODELS = {"ar1", "var1", "ar1_snaive", "var1_snaive", "statsmodels_ets"}
 NEURALFORECAST_MODELS = {"deepar", "nbeats"}
 PANEL_MODELS = {"var1", "var1_snaive", "deepar", "nbeats"}
 ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS | NEURALFORECAST_MODELS
@@ -307,6 +308,9 @@ def _parse_model_names(models: str | list[str]) -> list[str]:
         "autoets": "auto_ets",
         "arima": "auto_arima",
         "autoarima": "auto_arima",
+        "default_ets": "statsmodels_ets",
+        "plain_ets": "statsmodels_ets",
+        "sm_ets": "statsmodels_ets",
         "ar": "ar1",
         "ar_1": "ar1",
         "ar1_seasonal_naive": "ar1_snaive",
@@ -644,6 +648,23 @@ def _forecast_var1_values(
         raise
 
 
+def _forecast_statsmodels_ets_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+) -> pd.DataFrame:
+    dates = _validate_forecast_dates(forecast_dates, h, "statsmodels ETS")
+    baseline = statsmodels_ets_baseline_panel(
+        train_wide.loc[:, series_cols].to_numpy(dtype=float),
+        horizon=h,
+        seasonal_lag=1,
+        series_ids=series_cols,
+    )
+    return _forecast_array_to_long(baseline["forecast"], dates, series_cols, "statsmodels_ets")
+
+
 def _forecast_ar1_once(
     train_wide: pd.DataFrame,
     series_cols: list[str],
@@ -754,6 +775,8 @@ def _forecast_once(
                 n_jobs=n_jobs,
             )
         )
+    if "statsmodels_ets" in model_names:
+        frames.append(_forecast_statsmodels_ets_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
     if "ar1" in model_names:
         frames.append(_forecast_ar1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
     if "ar1_snaive" in model_names:
