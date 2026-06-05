@@ -433,7 +433,7 @@ def _base_series_columns(
 
 
 def _feature_transform_from_y_transform(y_transform: str) -> str:
-    if y_transform in {"center", "standardize"}:
+    if y_transform in {"none", "center", "standardize"}:
         return "level"
     if y_transform in {"log1p-center", "log1p-standardize"}:
         return "log1p"

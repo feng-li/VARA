@@ -23,6 +23,7 @@ from scripts.run_full_simulation import (
     make_simulation_setup_table,
 )
 from scripts.run_vara_forecast import (
+    _feature_transform_from_y_transform,
     _fit_y_transform,
     _inverse_y_transform,
     _parse_forecast_modes,
@@ -41,6 +42,9 @@ class ScriptHelperTests(unittest.TestCase):
             _parse_forecast_modes("rolling_origin,closed_loop,recursive,recursive"),
             ["rolling-origin", "closed-loop", "recursive"],
         )
+
+    def test_feature_transform_maps_none_to_level(self):
+        self.assertEqual(_feature_transform_from_y_transform("none"), "level")
 
     def test_seasonal_naive_forecast_and_residual_panel(self):
         history = np.arange(1, 16, dtype=float)[:, None]

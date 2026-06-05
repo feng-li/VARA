@@ -115,11 +115,35 @@ def _comparison_table(benchmark_dir: Path, vara_dir: Path, output_dir: Path) -> 
     return out
 
 
+def _feature_metadata_path(feature_path: Path) -> Path:
+    return feature_path.with_suffix(feature_path.suffix + ".metadata.json")
+
+
+def _feature_outputs_exist(args: argparse.Namespace, config: dict[str, Any]) -> bool:
+    if config["feature_source"] != "file":
+        return False
+    feature_path = config["feature_path"]
+    if feature_path is None or not feature_path.exists():
+        return False
+    if args.forecast_scenario == "auto_ets" and not _feature_metadata_path(feature_path).exists():
+        return False
+    return True
+
+
+def _benchmark_outputs_exist(benchmark_dir: Path) -> bool:
+    return (
+        benchmark_dir.exists()
+        and (benchmark_dir / "metrics_summary.csv").exists()
+        and (benchmark_dir / "metrics_by_origin.csv").exists()
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a forecasting benchmark plus VARA workflow.")
     parser.add_argument("--dataset", choices=sorted(DATASET_DEFAULTS), default="m5")
     parser.add_argument("--data-path", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--benchmark-dir", type=Path, default=None)
     parser.add_argument("--data-format", choices=["auto", "wide", "long"], default=None)
     parser.add_argument("--date-col", type=str, default=None)
     parser.add_argument("--series-col", type=str, default=None)
@@ -177,7 +201,7 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "dataset": args.dataset,
         "data_path": _arg_value(args, defaults, "data_path"),
         "output_dir": output_dir,
-        "benchmark_dir": output_dir / "benchmarks",
+        "benchmark_dir": args.benchmark_dir or output_dir / "benchmarks",
         "vara_dir": output_dir / "vara",
         "comparison_dir": output_dir / "comparison",
         "data_format": _arg_value(args, defaults, "data_format"),
@@ -217,7 +241,7 @@ def _prepare_feature_cmd(args: argparse.Namespace, config: dict[str, Any], ray_a
     feature_path = config["feature_path"]
     if feature_path is None:
         raise ValueError("M5 file-based features require --feature-path or the dataset default feature path.")
-    if args.skip_features or (feature_path.exists() and not args.recompute_features):
+    if args.skip_features or (_feature_outputs_exist(args, config) and not args.recompute_features):
         if not args.skip_features:
             print(f"Using existing feature file: {feature_path}", flush=True)
         return None
@@ -383,7 +407,9 @@ def main() -> None:
         _run(feature_cmd, dry_run=args.dry_run)
 
     panel_args = _common_panel_args(config)
-    if not args.skip_benchmarks:
+    if not args.skip_benchmarks and _benchmark_outputs_exist(config["benchmark_dir"]):
+        print(f"Using existing benchmark outputs: {config['benchmark_dir']}", flush=True)
+    elif not args.skip_benchmarks:
         _run(_benchmark_cmd(args, config, panel_args, ray_args), dry_run=args.dry_run)
     if not args.skip_vara:
         _run(_vara_cmd(args, config, panel_args, ray_args), dry_run=args.dry_run)
