@@ -20,7 +20,12 @@ from statsmodels.tsa.ar_model import AutoReg
 from statsmodels.tsa.api import VAR
 
 from vara.forecast_data import load_panel_data
-from vara.forecast_baselines import statsmodels_ets_baseline_panel
+from vara.forecast_baselines import (
+    FORECAST_VARIANCE_LEVEL,
+    auto_ets_baseline_panel,
+    seasonal_ets_baseline_panel,
+    statsmodels_ets_baseline_panel,
+)
 from vara.forecast_metrics import forecast_metric_tables
 
 try:
@@ -34,9 +39,22 @@ else:
 BASE_SUFFIX = "All"
 DETAILED_CODE_DEPTH = 3
 STATSFORECAST_MODELS = {"naive", "seasonal_naive", "drift", "auto_ets", "auto_arima"}
-STATSMODELS_MODELS = {"ar1", "var1", "ar1_snaive", "var1_snaive", "statsmodels_ets"}
+STATSMODELS_MODELS = {
+    "ar1",
+    "var1",
+    "ar1_snaive",
+    "var1_snaive",
+    "ar1_auto_ets",
+    "var1_auto_ets",
+    "ar1_seasonal_ets",
+    "var1_seasonal_ets",
+    "ar1_statsmodels_ets",
+    "var1_statsmodels_ets",
+    "statsmodels_ets",
+    "seasonal_ets",
+}
 NEURALFORECAST_MODELS = {"deepar", "nbeats"}
-PANEL_MODELS = {"var1", "var1_snaive", "deepar", "nbeats"}
+PANEL_MODELS = {"var1", "var1_snaive", "var1_auto_ets", "var1_seasonal_ets", "var1_statsmodels_ets", "deepar", "nbeats"}
 ALL_MODELS = STATSFORECAST_MODELS | STATSMODELS_MODELS | NEURALFORECAST_MODELS
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1"
 STATSFORECAST_N_JOBS = 1
@@ -48,7 +66,16 @@ FORECAST_MODE_ALIASES = {
 TASK_MODEL_COL = "_task_model"
 TASK_SERIES_COL = "_task_series"
 TASK_FORECAST_COL = "_forecast"
+TASK_VARIANCE_COL = "_variance"
+VARIANCE_SUFFIX = "__variance"
+FORECAST_VARIANCE_LONG_FILE = "benchmark_forecast_variance_long.csv"
 SUCCESS_MARKER = "_SUCCESS"
+_FORECAST_VARIANCE_Z = 1.959963984540054
+_INTERVAL_Z_BY_LEVEL = {
+    80: 1.2815515655446004,
+    90: 1.6448536269514722,
+    95: _FORECAST_VARIANCE_Z,
+}
 
 
 @dataclass(frozen=True)
@@ -169,6 +196,7 @@ class BenchmarkConfig:
             "ray_debug": bool(self.ray_debug),
             "resume": bool(self.resume),
             "resume_csv": None if checkpoint_csv is None else str(checkpoint_csv),
+            "forecast_variance_level": int(FORECAST_VARIANCE_LEVEL),
             **self.neural_config.legacy_config(),
         }
 
@@ -184,7 +212,7 @@ def _load_completed_task_keys(checkpoint_csv: Path, *, horizon: int, n_series: i
     if not checkpoint_csv.exists() or checkpoint_csv.stat().st_size == 0:
         return set()
     try:
-        tasks = pd.read_csv(checkpoint_csv, usecols=[TASK_MODEL_COL, TASK_SERIES_COL])
+        tasks = pd.read_csv(checkpoint_csv, usecols=[TASK_MODEL_COL, TASK_SERIES_COL, TASK_FORECAST_COL, TASK_VARIANCE_COL])
     except ValueError:
         return set()
     if tasks.empty:
@@ -203,7 +231,9 @@ def _append_task_checkpoint(checkpoint_csv: Path, model_name: str, task_series: 
     if model_name not in frame.columns:
         raise ValueError(f"Task frame for model {model_name!r} is missing its forecast column.")
     key_cols = [col for col in ("origin", "train_end", "series_id", "date") if col in frame.columns]
+    var_col = _variance_col(model_name)
     out = frame.loc[:, [*key_cols, model_name]].rename(columns={model_name: TASK_FORECAST_COL})
+    out[TASK_VARIANCE_COL] = frame[var_col].to_numpy(dtype=float) if var_col in frame.columns else np.nan
     out.insert(0, TASK_SERIES_COL, str(task_series))
     out.insert(0, TASK_MODEL_COL, str(model_name))
     write_header = not checkpoint_csv.exists() or checkpoint_csv.stat().st_size == 0
@@ -233,7 +263,14 @@ def _load_task_checkpoint_forecasts(checkpoint_csv: Path, model_names: list[str]
             raise ValueError(f"Checkpoint is missing completed forecasts for model {model_name!r}.")
         if TASK_FORECAST_COL not in frame.columns:
             raise ValueError(f"Checkpoint rows for model {model_name!r} do not contain {TASK_FORECAST_COL!r}.")
-        frame = frame.loc[:, [*key_cols, TASK_FORECAST_COL]].rename(columns={TASK_FORECAST_COL: model_name})
+        cols = [*key_cols, TASK_FORECAST_COL]
+        rename = {TASK_FORECAST_COL: model_name}
+        if TASK_VARIANCE_COL in frame.columns:
+            cols.append(TASK_VARIANCE_COL)
+            rename[TASK_VARIANCE_COL] = _variance_col(model_name)
+        frame = frame.loc[:, cols].rename(columns=rename)
+        if _variance_col(model_name) not in frame.columns:
+            frame[_variance_col(model_name)] = np.nan
         frames.append(frame.reset_index(drop=True))
     return _merge_forecast_frames(frames)
 
@@ -248,6 +285,73 @@ def _archive_checkpoint_outputs(checkpoint_csv: Path, forecast_long_csv: Path) -
 def _print_progress(message: str) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+
+
+def _variance_col(model_name: str) -> str:
+    return f"{model_name}{VARIANCE_SUFFIX}"
+
+
+def _clean_variance(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    return np.where(np.isfinite(arr) & (arr >= 0.0), arr, np.nan)
+
+
+def _interval_variance(lower: np.ndarray, upper: np.ndarray, *, level: int = FORECAST_VARIANCE_LEVEL) -> np.ndarray:
+    lo = np.asarray(lower, dtype=float)
+    hi = np.asarray(upper, dtype=float)
+    z = _INTERVAL_Z_BY_LEVEL.get(int(level))
+    if z is None:
+        return np.full(lo.shape, np.nan, dtype=float)
+    return _clean_variance(((hi - lo) / (2.0 * z)) ** 2)
+
+
+def _forecast_variance_from_interval_columns(
+    frame: pd.DataFrame,
+    model_name: str,
+    *,
+    levels: tuple[int, ...] = (FORECAST_VARIANCE_LEVEL, 90, 80),
+) -> np.ndarray:
+    for level in levels:
+        lo_col = f"{model_name}-lo-{level}"
+        hi_col = f"{model_name}-hi-{level}"
+        if lo_col in frame.columns and hi_col in frame.columns:
+            return _interval_variance(
+                frame[lo_col].to_numpy(dtype=float),
+                frame[hi_col].to_numpy(dtype=float),
+                level=level,
+            )
+    return np.full(len(frame), np.nan, dtype=float)
+
+
+def _combine_variance_arrays(*arrays: np.ndarray | None) -> np.ndarray | None:
+    valid_arrays = [np.asarray(arr, dtype=float) for arr in arrays if arr is not None]
+    if not valid_arrays:
+        return None
+    out = np.zeros_like(valid_arrays[0], dtype=float)
+    observed = np.zeros_like(valid_arrays[0], dtype=bool)
+    for arr in valid_arrays:
+        arr = _clean_variance(arr)
+        mask = np.isfinite(arr)
+        out[mask] += arr[mask]
+        observed |= mask
+    out[~observed] = np.nan
+    return out
+
+
+def _key_columns(frame: pd.DataFrame) -> list[str]:
+    return [col for col in ("origin", "train_end", "series_id", "date") if col in frame.columns]
+
+
+def _point_forecast_frame(long_forecasts: pd.DataFrame, model_names: list[str]) -> pd.DataFrame:
+    return long_forecasts.loc[:, [*_key_columns(long_forecasts), *model_names]].copy()
+
+
+def _variance_frame(long_forecasts: pd.DataFrame, model_names: list[str]) -> pd.DataFrame:
+    out = long_forecasts.loc[:, _key_columns(long_forecasts)].copy()
+    for model in model_names:
+        var_col = _variance_col(model)
+        out[model] = long_forecasts[var_col].to_numpy(dtype=float) if var_col in long_forecasts.columns else np.nan
+    return out
 
 
 def _series_code(series_id: str, suffix: str = BASE_SUFFIX) -> str:
@@ -311,16 +415,32 @@ def _parse_model_names(models: str | list[str]) -> list[str]:
         "default_ets": "statsmodels_ets",
         "plain_ets": "statsmodels_ets",
         "sm_ets": "statsmodels_ets",
+        "fixed_seasonal_ets": "seasonal_ets",
+        "seasonalets": "seasonal_ets",
+        "hw": "seasonal_ets",
+        "holt_winters": "seasonal_ets",
         "ar": "ar1",
         "ar_1": "ar1",
         "ar1_seasonal_naive": "ar1_snaive",
         "ar1_seasonal_naive_resid": "ar1_snaive",
         "ar1_snaive_resid": "ar1_snaive",
+        "ar1_autoets": "ar1_auto_ets",
+        "ar1_auto_ets_resid": "ar1_auto_ets",
+        "ar1_seasonalets": "ar1_seasonal_ets",
+        "ar1_seasonal_ets_resid": "ar1_seasonal_ets",
+        "ar1_fixed_seasonal_ets": "ar1_seasonal_ets",
+        "ar1_statsmodels_ets_resid": "ar1_statsmodels_ets",
         "var": "var1",
         "var_1": "var1",
         "var1_seasonal_naive": "var1_snaive",
         "var1_seasonal_naive_resid": "var1_snaive",
         "var1_snaive_resid": "var1_snaive",
+        "var1_autoets": "var1_auto_ets",
+        "var1_auto_ets_resid": "var1_auto_ets",
+        "var1_seasonalets": "var1_seasonal_ets",
+        "var1_seasonal_ets_resid": "var1_seasonal_ets",
+        "var1_fixed_seasonal_ets": "var1_seasonal_ets",
+        "var1_statsmodels_ets_resid": "var1_statsmodels_ets",
         "deep_ar": "deepar",
         "neural_deepar": "deepar",
         "n_beats": "nbeats",
@@ -449,10 +569,19 @@ def _forecast_neural_once(
     expected = pd.MultiIndex.from_product(
         [series_cols, dates], names=["series_id", "date"]
     ).to_frame(index=False)
-    out = expected.merge(out.loc[:, ["series_id", "date", model_name]], on=["series_id", "date"], how="left")
+    interval_cols = [
+        col for col in out.columns
+        if col.startswith(f"{model_name}-lo-") or col.startswith(f"{model_name}-hi-")
+    ]
+    out = expected.merge(
+        out.loc[:, ["series_id", "date", model_name, *interval_cols]],
+        on=["series_id", "date"],
+        how="left",
+    )
     if out[model_name].isna().any():
         raise RuntimeError(f"{model_label} did not return forecasts for all requested series/date pairs.")
-    return out
+    out[_variance_col(model_name)] = _forecast_variance_from_interval_columns(out, model_name)
+    return out.loc[:, ["series_id", "date", model_name, _variance_col(model_name)]]
 
 
 def _forecast_deepar_once(
@@ -551,8 +680,24 @@ def _forecast_statsforecast_once(
 ) -> pd.DataFrame:
     models = _make_models(model_names, season_length)
     sf = StatsForecast(models=models, freq=freq, n_jobs=n_jobs)
-    out = sf.forecast(df=_wide_to_statsforecast_long(train_wide, series_cols), h=h)
-    return out.rename(columns={"unique_id": "series_id", "ds": "date"})
+    out = sf.forecast(df=_wide_to_statsforecast_long(train_wide, series_cols), h=h, level=[FORECAST_VARIANCE_LEVEL])
+    out = out.rename(columns={"unique_id": "series_id", "ds": "date"})
+    keep_cols = ["series_id", "date"]
+    for model_name in model_names:
+        keep_cols.append(model_name)
+        lo_col = f"{model_name}-lo-{FORECAST_VARIANCE_LEVEL}"
+        hi_col = f"{model_name}-hi-{FORECAST_VARIANCE_LEVEL}"
+        var_col = _variance_col(model_name)
+        if lo_col in out.columns and hi_col in out.columns:
+            out[var_col] = _interval_variance(
+                out[lo_col].to_numpy(dtype=float),
+                out[hi_col].to_numpy(dtype=float),
+                level=FORECAST_VARIANCE_LEVEL,
+            )
+        else:
+            out[var_col] = np.nan
+        keep_cols.append(var_col)
+    return out.loc[:, keep_cols]
 
 
 
@@ -592,6 +737,7 @@ def _forecast_array_to_long(
     dates: pd.Series,
     series_cols: list[str],
     model_name: str,
+    variance: np.ndarray | None = None,
 ) -> pd.DataFrame:
     values = np.asarray(forecast, dtype=float)
     if values.ndim == 1:
@@ -601,9 +747,53 @@ def _forecast_array_to_long(
         raise RuntimeError(f"{model_name} forecast has shape {values.shape}; expected {expected_shape}.")
     wide = pd.DataFrame(values, columns=series_cols)
     wide.insert(0, "date", pd.to_datetime(dates).to_numpy())
-    return wide.melt(id_vars="date", var_name="series_id", value_name=model_name).loc[
+    out = wide.melt(id_vars="date", var_name="series_id", value_name=model_name).loc[
         :, ["series_id", "date", model_name]
     ]
+    var_col = _variance_col(model_name)
+    if variance is None:
+        out[var_col] = np.nan
+    else:
+        var_values = np.asarray(variance, dtype=float)
+        if var_values.ndim == 1:
+            var_values = var_values[:, None]
+        if var_values.shape != expected_shape:
+            raise RuntimeError(f"{model_name} variance has shape {var_values.shape}; expected {expected_shape}.")
+        var_wide = pd.DataFrame(_clean_variance(var_values), columns=series_cols)
+        var_wide.insert(0, "date", pd.to_datetime(dates).to_numpy())
+        out[var_col] = var_wide.melt(id_vars="date", var_name="series_id", value_name=var_col)[var_col].to_numpy(dtype=float)
+    return out
+
+
+def _fallback_ar1_values(y: np.ndarray, h: int, fallback: str, model_label: str) -> np.ndarray:
+    if fallback == "zero":
+        return np.zeros(h, dtype=float)
+    if y.shape[0] > 0:
+        return np.repeat(y[-1], h).astype(float)
+    raise ValueError(f"{model_label} requires at least two training observations.")
+
+
+def _forecast_ar1_mean_variance(
+    values: np.ndarray,
+    h: int,
+    *,
+    fallback: str,
+    model_label: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    y = np.asarray(values, dtype=float)
+    if y.shape[0] <= 1:
+        return _fallback_ar1_values(y, h, fallback, model_label), np.full(h, np.nan, dtype=float)
+    try:
+        fit = AutoReg(y, lags=1, trend="c", old_names=False).fit()
+        pred = fit.get_prediction(start=len(y), end=len(y) + int(h) - 1).summary_frame()
+        mean = pred["mean"].to_numpy(dtype=float)
+        if "mean_se" in pred.columns:
+            variance = pred["mean_se"].to_numpy(dtype=float) ** 2
+        else:
+            variance = np.full(int(h), np.nan, dtype=float)
+        return mean, _clean_variance(variance)
+    except Exception:
+        return _fallback_ar1_values(y, h, fallback, model_label), np.full(h, np.nan, dtype=float)
 
 
 def _forecast_ar1_values(
@@ -613,17 +803,38 @@ def _forecast_ar1_values(
     fallback: str,
     model_label: str,
 ) -> np.ndarray:
+    return _forecast_ar1_mean_variance(values, h, fallback=fallback, model_label=model_label)[0]
+
+
+def _forecast_var1_mean_variance(
+    values: np.ndarray,
+    series_cols: list[str],
+    h: int,
+    *,
+    fallback_zero: bool,
+    model_label: str,
+) -> tuple[np.ndarray, np.ndarray]:
     y = np.asarray(values, dtype=float)
     if y.shape[0] <= 1:
-        if fallback == "zero":
-            return np.zeros(h, dtype=float)
+        if fallback_zero:
+            return (
+                np.zeros((h, len(series_cols)), dtype=float),
+                np.full((h, len(series_cols)), np.nan, dtype=float),
+            )
         raise ValueError(f"{model_label} requires at least two training observations.")
     try:
-        return np.asarray(AutoReg(y, lags=1, trend="c", old_names=False).fit().forecast(steps=h), dtype=float)
+        fit = VAR(pd.DataFrame(y, columns=series_cols)).fit(maxlags=1, trend="c")
+        forecast = np.asarray(fit.forecast(y[-fit.k_ar:], steps=h), dtype=float)
+        forecast_cov = np.asarray(fit.forecast_cov(steps=h), dtype=float)
+        variance = np.diagonal(forecast_cov, axis1=1, axis2=2)
+        return forecast, _clean_variance(variance)
     except Exception:
-        if fallback == "zero":
-            return np.zeros(h, dtype=float)
-        return np.repeat(y[-1], h).astype(float)
+        if fallback_zero:
+            return (
+                np.zeros((h, len(series_cols)), dtype=float),
+                np.full((h, len(series_cols)), np.nan, dtype=float),
+            )
+        raise
 
 
 def _forecast_var1_values(
@@ -634,18 +845,37 @@ def _forecast_var1_values(
     fallback_zero: bool,
     model_label: str,
 ) -> np.ndarray:
-    y = np.asarray(values, dtype=float)
-    if y.shape[0] <= 1:
-        if fallback_zero:
-            return np.zeros((h, len(series_cols)), dtype=float)
-        raise ValueError(f"{model_label} requires at least two training observations.")
-    try:
-        fit = VAR(pd.DataFrame(y, columns=series_cols)).fit(maxlags=1, trend="c")
-        return np.asarray(fit.forecast(y[-fit.k_ar:], steps=h), dtype=float)
-    except Exception:
-        if fallback_zero:
-            return np.zeros((h, len(series_cols)), dtype=float)
-        raise
+    return _forecast_var1_mean_variance(
+        values,
+        series_cols,
+        h,
+        fallback_zero=fallback_zero,
+        model_label=model_label,
+    )[0]
+
+
+def _forecast_seasonal_ets_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+    season_length: int,
+) -> pd.DataFrame:
+    dates = _validate_forecast_dates(forecast_dates, h, "seasonal ETS")
+    baseline = seasonal_ets_baseline_panel(
+        train_wide.loc[:, series_cols].to_numpy(dtype=float),
+        horizon=h,
+        seasonal_lag=season_length,
+        series_ids=series_cols,
+    )
+    return _forecast_array_to_long(
+        baseline["forecast"],
+        dates,
+        series_cols,
+        "seasonal_ets",
+        variance=baseline.get("forecast_variance"),
+    )
 
 
 def _forecast_statsmodels_ets_once(
@@ -662,7 +892,13 @@ def _forecast_statsmodels_ets_once(
         seasonal_lag=1,
         series_ids=series_cols,
     )
-    return _forecast_array_to_long(baseline["forecast"], dates, series_cols, "statsmodels_ets")
+    return _forecast_array_to_long(
+        baseline["forecast"],
+        dates,
+        series_cols,
+        "statsmodels_ets",
+        variance=baseline.get("forecast_variance"),
+    )
 
 
 def _forecast_ar1_once(
@@ -673,8 +909,8 @@ def _forecast_ar1_once(
     h: int,
 ) -> pd.DataFrame:
     dates = _validate_forecast_dates(forecast_dates, h, "AR(1)")
-    forecasts = [
-        _forecast_ar1_values(
+    results = [
+        _forecast_ar1_mean_variance(
             train_wide.loc[:, series_id].to_numpy(dtype=float),
             h,
             fallback="last",
@@ -682,7 +918,86 @@ def _forecast_ar1_once(
         )
         for series_id in series_cols
     ]
-    return _forecast_array_to_long(np.column_stack(forecasts), dates, series_cols, "ar1")
+    forecasts = [item[0] for item in results]
+    variances = [item[1] for item in results]
+    return _forecast_array_to_long(
+        np.column_stack(forecasts),
+        dates,
+        series_cols,
+        "ar1",
+        variance=np.column_stack(variances),
+    )
+
+
+def _filtered_baseline_panel(
+    values: np.ndarray,
+    h: int,
+    season_length: int,
+    series_cols: list[str],
+    filter_name: str,
+) -> dict[str, Any]:
+    if filter_name == "auto_ets":
+        return auto_ets_baseline_panel(values, h, season_length, series_cols)
+    if filter_name == "seasonal_ets":
+        return seasonal_ets_baseline_panel(values, h, season_length, series_cols)
+    if filter_name == "statsmodels_ets":
+        return statsmodels_ets_baseline_panel(values, h, season_length, series_cols)
+    raise ValueError(f"Unknown residual filter: {filter_name!r}.")
+
+
+def _forecast_ar1_filtered_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+    season_length: int,
+    filter_name: str,
+    model_name: str,
+) -> pd.DataFrame:
+    dates = _validate_forecast_dates(forecast_dates, h, f"AR(1) {filter_name} residual")
+    values = train_wide.loc[:, series_cols].to_numpy(dtype=float)
+    baseline = _filtered_baseline_panel(values, h, season_length, series_cols, filter_name)
+    residuals = baseline["residuals"]
+    results = [
+        _forecast_ar1_mean_variance(
+            residuals[:, idx],
+            h,
+            fallback="zero",
+            model_label=f"AR(1) {filter_name} residual",
+        )
+        for idx in range(len(series_cols))
+    ]
+    forecasts = [item[0] for item in results]
+    variances = [item[1] for item in results]
+    forecast = baseline["forecast"] + np.column_stack(forecasts)
+    variance = _combine_variance_arrays(baseline.get("forecast_variance"), np.column_stack(variances))
+    return _forecast_array_to_long(forecast, dates, series_cols, model_name, variance=variance)
+
+
+def _forecast_var1_filtered_once(
+    train_wide: pd.DataFrame,
+    series_cols: list[str],
+    *,
+    forecast_dates: pd.Series | list[pd.Timestamp],
+    h: int,
+    season_length: int,
+    filter_name: str,
+    model_name: str,
+) -> pd.DataFrame:
+    dates = _validate_forecast_dates(forecast_dates, h, f"VAR(1) {filter_name} residual")
+    values = train_wide.loc[:, series_cols].to_numpy(dtype=float)
+    baseline = _filtered_baseline_panel(values, h, season_length, series_cols, filter_name)
+    residual_forecast, residual_variance = _forecast_var1_mean_variance(
+        baseline["residuals"],
+        series_cols,
+        h,
+        fallback_zero=True,
+        model_label=f"VAR(1) {filter_name} residual",
+    )
+    forecast = baseline["forecast"] + residual_forecast
+    variance = _combine_variance_arrays(baseline.get("forecast_variance"), residual_variance)
+    return _forecast_array_to_long(forecast, dates, series_cols, model_name, variance=variance)
 
 
 def _forecast_ar1_snaive_once(
@@ -695,18 +1010,26 @@ def _forecast_ar1_snaive_once(
 ) -> pd.DataFrame:
     dates = _validate_forecast_dates(forecast_dates, h, "AR(1) seasonal-naive")
     forecasts = []
+    variances = []
     for series_id in series_cols:
         y = train_wide.loc[:, series_id].to_numpy(dtype=float)
         baseline = _seasonal_naive_array(y[:, None], h, season_length)[:, 0]
         residual = _seasonal_residual_array(y[:, None], season_length)[:, 0]
-        residual_forecast = _forecast_ar1_values(
+        residual_forecast, residual_variance = _forecast_ar1_mean_variance(
             residual,
             h,
             fallback="zero",
             model_label="AR(1) seasonal-naive residual",
         )
         forecasts.append(baseline + residual_forecast)
-    return _forecast_array_to_long(np.column_stack(forecasts), dates, series_cols, "ar1_snaive")
+        variances.append(residual_variance)
+    return _forecast_array_to_long(
+        np.column_stack(forecasts),
+        dates,
+        series_cols,
+        "ar1_snaive",
+        variance=np.column_stack(variances),
+    )
 
 
 def _forecast_var1_once(
@@ -717,14 +1040,14 @@ def _forecast_var1_once(
     h: int,
 ) -> pd.DataFrame:
     dates = _validate_forecast_dates(forecast_dates, h, "VAR(1)")
-    forecast = _forecast_var1_values(
+    forecast, variance = _forecast_var1_mean_variance(
         train_wide.loc[:, series_cols].to_numpy(dtype=float),
         series_cols,
         h,
         fallback_zero=False,
         model_label="VAR(1)",
     )
-    return _forecast_array_to_long(forecast, dates, series_cols, "var1")
+    return _forecast_array_to_long(forecast, dates, series_cols, "var1", variance=variance)
 
 
 def _forecast_var1_snaive_once(
@@ -739,14 +1062,20 @@ def _forecast_var1_snaive_once(
     y = train_wide.loc[:, series_cols].to_numpy(dtype=float)
     baseline = _seasonal_naive_array(y, h, season_length)
     residual = _seasonal_residual_array(y, season_length)
-    residual_forecast = _forecast_var1_values(
+    residual_forecast, residual_variance = _forecast_var1_mean_variance(
         residual,
         series_cols,
         h,
         fallback_zero=True,
         model_label="VAR(1) seasonal-naive residual",
     )
-    return _forecast_array_to_long(baseline + residual_forecast, dates, series_cols, "var1_snaive")
+    return _forecast_array_to_long(
+        baseline + residual_forecast,
+        dates,
+        series_cols,
+        "var1_snaive",
+        variance=residual_variance,
+    )
 
 
 def _forecast_once(
@@ -775,8 +1104,35 @@ def _forecast_once(
                 n_jobs=n_jobs,
             )
         )
+    if "seasonal_ets" in model_names:
+        frames.append(
+            _forecast_seasonal_ets_once(
+                train_wide,
+                series_cols,
+                forecast_dates=forecast_dates,
+                h=h,
+                season_length=season_length,
+            )
+        )
     if "statsmodels_ets" in model_names:
         frames.append(_forecast_statsmodels_ets_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
+    for model_name, filter_name in (
+        ("ar1_auto_ets", "auto_ets"),
+        ("ar1_seasonal_ets", "seasonal_ets"),
+        ("ar1_statsmodels_ets", "statsmodels_ets"),
+    ):
+        if model_name in model_names:
+            frames.append(
+                _forecast_ar1_filtered_once(
+                    train_wide,
+                    series_cols,
+                    forecast_dates=forecast_dates,
+                    h=h,
+                    season_length=season_length,
+                    filter_name=filter_name,
+                    model_name=model_name,
+                )
+            )
     if "ar1" in model_names:
         frames.append(_forecast_ar1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
     if "ar1_snaive" in model_names:
@@ -789,6 +1145,23 @@ def _forecast_once(
                 season_length=season_length,
             )
         )
+    for model_name, filter_name in (
+        ("var1_auto_ets", "auto_ets"),
+        ("var1_seasonal_ets", "seasonal_ets"),
+        ("var1_statsmodels_ets", "statsmodels_ets"),
+    ):
+        if model_name in model_names:
+            frames.append(
+                _forecast_var1_filtered_once(
+                    train_wide,
+                    series_cols,
+                    forecast_dates=forecast_dates,
+                    h=h,
+                    season_length=season_length,
+                    filter_name=filter_name,
+                    model_name=model_name,
+                )
+            )
     if "var1" in model_names:
         frames.append(_forecast_var1_once(train_wide, series_cols, forecast_dates=forecast_dates, h=h))
     if "var1_snaive" in model_names:
@@ -1239,10 +1612,14 @@ def _forecast_models_with_ray(
     return _merge_forecast_frames(model_frames)
 
 
-def _wide_model_frame(long_forecasts: pd.DataFrame, model: str, series_cols: list[str]) -> pd.DataFrame:
-    wide = long_forecasts.pivot(index="date", columns="series_id", values=model).reset_index()
+def _wide_value_frame(long_forecasts: pd.DataFrame, value_col: str, series_cols: list[str]) -> pd.DataFrame:
+    wide = long_forecasts.pivot(index="date", columns="series_id", values=value_col).reset_index()
     wide.columns.name = None
     return wide.loc[:, ["date", *series_cols]]
+
+
+def _wide_model_frame(long_forecasts: pd.DataFrame, model: str, series_cols: list[str]) -> pd.DataFrame:
+    return _wide_value_frame(long_forecasts, model, series_cols)
 
 
 def _compute_metrics(
@@ -1263,6 +1640,11 @@ def _compute_metrics(
         model: _wide_model_frame(long_forecasts, model, series_cols).loc[:, series_cols].to_numpy(dtype=float)
         for model in model_names
     }
+    forecast_variances = {
+        model: _wide_value_frame(long_forecasts, _variance_col(model), series_cols).loc[:, series_cols].to_numpy(dtype=float)
+        for model in model_names
+        if _variance_col(model) in long_forecasts.columns
+    }
     return forecast_metric_tables(
         forecasts,
         test,
@@ -1274,6 +1656,7 @@ def _compute_metrics(
         forecast_mode=forecast_mode,
         horizon=horizon,
         summary_context=summary_context,
+        forecast_variances=forecast_variances,
     )
 
 
@@ -1300,14 +1683,17 @@ def _save_benchmark_outputs(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     forecast_long_csv = output_dir / "benchmark_forecasts_long.csv"
-    long_forecasts.to_csv(forecast_long_csv, index=False)
+    point_forecasts = _point_forecast_frame(long_forecasts, model_names)
+    variance_forecasts = _variance_frame(long_forecasts, model_names)
+    point_forecasts.to_csv(forecast_long_csv, index=False)
+    variance_forecasts.to_csv(output_dir / FORECAST_VARIANCE_LONG_FILE, index=False)
     if checkpoint_csv is not None:
         _archive_checkpoint_outputs(checkpoint_csv, forecast_long_csv)
     test_wide.to_csv(output_dir / "test.csv", index=False)
 
     test_values = test_wide.loc[:, series_cols].to_numpy(dtype=float)
     for model in model_names:
-        forecast_wide_raw = _wide_model_frame(long_forecasts, model, series_cols)
+        forecast_wide_raw = _wide_model_frame(point_forecasts, model, series_cols)
         forecast_wide = pd.concat(
             [
                 forecast_wide_raw.loc[:, ["date"]].reset_index(drop=True),
@@ -1319,6 +1705,18 @@ def _save_benchmark_outputs(
             axis=1,
         )
         forecast_wide.to_csv(output_dir / f"forecast_{model}.csv", index=False)
+        variance_wide_raw = _wide_model_frame(variance_forecasts, model, series_cols)
+        variance_wide = pd.concat(
+            [
+                variance_wide_raw.loc[:, ["date"]].reset_index(drop=True),
+                pd.DataFrame(
+                    variance_wide_raw.loc[:, series_cols].to_numpy(dtype=float),
+                    columns=series_cols,
+                ),
+            ],
+            axis=1,
+        )
+        variance_wide.to_csv(output_dir / f"forecast_variance_{model}.csv", index=False)
         error_wide = forecast_wide.copy()
         error_wide.loc[:, series_cols] = forecast_wide.loc[:, series_cols].to_numpy(dtype=float) - test_values
         error_wide.to_csv(output_dir / f"errors_{model}.csv", index=False)
@@ -1404,7 +1802,8 @@ def run_forecast_benchmark(
     )
     success_path = output_dir / SUCCESS_MARKER
     summary_path = output_dir / "metrics_summary.csv"
-    if resume and success_path.exists() and summary_path.exists():
+    variance_path = output_dir / FORECAST_VARIANCE_LONG_FILE
+    if resume and success_path.exists() and summary_path.exists() and variance_path.exists():
         _print_progress(f"Benchmark output already complete: {success_path}; skipping run")
         return pd.read_csv(summary_path)
 
@@ -1691,6 +2090,7 @@ def main() -> None:
         by_series_frames = []
         by_origin_frames = []
         forecast_frames = []
+        variance_frames = []
         for forecast_mode in forecast_modes:
             mode_output_dir = benchmark_config.output_dir / forecast_mode
             mode_resume_csv = None
@@ -1710,6 +2110,9 @@ def main() -> None:
             forecasts = pd.read_csv(mode_output_dir / "benchmark_forecasts_long.csv")
             forecasts.insert(0, "forecast_mode", forecast_mode)
             forecast_frames.append(forecasts)
+            variances = pd.read_csv(mode_output_dir / FORECAST_VARIANCE_LONG_FILE)
+            variances.insert(0, "forecast_mode", forecast_mode)
+            variance_frames.append(variances)
 
         summary = pd.concat(summary_frames, ignore_index=True, sort=False)
         summary.to_csv(benchmark_config.output_dir / "metrics_summary.csv", index=False)
@@ -1721,6 +2124,9 @@ def main() -> None:
         )
         pd.concat(forecast_frames, ignore_index=True, sort=False).to_csv(
             benchmark_config.output_dir / "benchmark_forecasts_long.csv", index=False
+        )
+        pd.concat(variance_frames, ignore_index=True, sort=False).to_csv(
+            benchmark_config.output_dir / FORECAST_VARIANCE_LONG_FILE, index=False
         )
 
     print("Benchmark summary:")

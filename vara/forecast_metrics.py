@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from math import erf, pi, sqrt
 from typing import Any
 
 import numpy as np
@@ -24,6 +25,33 @@ def _seasonal_scales(train: np.ndarray, season_length: int) -> tuple[np.ndarray,
     return mae_scale, rmse_scale
 
 
+def _nanmean_or_nan(values: np.ndarray, axis=None):
+    arr = np.asarray(values, dtype=float)
+    finite = np.isfinite(arr)
+    count = finite.sum(axis=axis)
+    total = np.where(finite, arr, 0.0).sum(axis=axis)
+    return np.divide(total, count, out=np.full_like(total, np.nan, dtype=float), where=count > 0)
+
+
+def _normal_crps(mean: np.ndarray, variance: np.ndarray, actual: np.ndarray) -> np.ndarray:
+    mean = np.asarray(mean, dtype=float)
+    actual = np.asarray(actual, dtype=float)
+    variance = np.asarray(variance, dtype=float)
+    out = np.full(mean.shape, np.nan, dtype=float)
+    finite = np.isfinite(mean) & np.isfinite(actual) & np.isfinite(variance)
+    degenerate = finite & (variance == 0.0)
+    out[degenerate] = np.abs(mean[degenerate] - actual[degenerate])
+    valid = finite & (variance > 0.0)
+    if not valid.any():
+        return out
+    sigma = np.sqrt(variance[valid])
+    z = (actual[valid] - mean[valid]) / sigma
+    cdf = 0.5 * (1.0 + np.vectorize(erf, otypes=[float])(z / sqrt(2.0)))
+    pdf = np.exp(-0.5 * z ** 2) / sqrt(2.0 * pi)
+    out[valid] = sigma * (z * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / sqrt(pi))
+    return out
+
+
 def forecast_metric_tables(
     forecasts: Mapping[str, np.ndarray],
     test: np.ndarray,
@@ -36,6 +64,7 @@ def forecast_metric_tables(
     forecast_mode: str,
     horizon: int,
     summary_context: Mapping[str, Any] | None = None,
+    forecast_variances: Mapping[str, np.ndarray] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build benchmark-style summary, by-series, and by-origin metric tables."""
     model_names = list(model_names) if model_names is not None else list(forecasts)
@@ -49,9 +78,18 @@ def forecast_metric_tables(
     summary_rows = []
     for model in model_names:
         forecast = np.asarray(forecasts[model], dtype=float)
+        variance = None if forecast_variances is None else forecast_variances.get(model)
+        if variance is not None:
+            variance = np.asarray(variance, dtype=float)
+            if variance.shape != forecast.shape:
+                raise ValueError(
+                    f"Forecast variance for model {model!r} has shape {variance.shape}; "
+                    f"expected {forecast.shape}."
+                )
         error = forecast - test
         abs_error = np.abs(error)
         squared_error = error ** 2
+        crps = np.full(forecast.shape, np.nan, dtype=float) if variance is None else _normal_crps(forecast, variance, test)
         pct_error = _safe_pct(abs_error, test)
         smape = 2.0 * abs_error / np.where(
             np.abs(test) + np.abs(forecast) > 1e-12,
@@ -71,6 +109,12 @@ def forecast_metric_tables(
             "mase": series_mae / mase_scale,
             "rmsse": np.sqrt(np.nanmean(squared_error, axis=0) / rmsse_scale),
             "bias": np.nanmean(error, axis=0),
+            "crps": _nanmean_or_nan(crps, axis=0),
+            "forecast_variance_mean": (
+                np.full(len(series_ids), np.nan)
+                if variance is None
+                else _nanmean_or_nan(variance, axis=0)
+            ),
             "mean_actual": np.nanmean(test, axis=0),
             "mean_forecast": np.nanmean(forecast, axis=0),
         })
@@ -84,6 +128,12 @@ def forecast_metric_tables(
             "mape_pct": np.nanmean(pct_error, axis=1) * 100.0,
             "smape_pct": np.nanmean(smape, axis=1) * 100.0,
             "bias": np.nanmean(error, axis=1),
+            "crps": _nanmean_or_nan(crps, axis=1),
+            "forecast_variance_mean": (
+                np.full(test.shape[0], np.nan)
+                if variance is None
+                else _nanmean_or_nan(variance, axis=1)
+            ),
         }))
 
         summary_rows.append({
@@ -99,6 +149,10 @@ def forecast_metric_tables(
             "mase": float(np.nanmean(series_rows["mase"])),
             "rmsse": float(np.nanmean(series_rows["rmsse"])),
             "bias": float(np.nanmean(error)),
+            "crps": float(_nanmean_or_nan(crps)),
+            "forecast_variance_mean": (
+                np.nan if variance is None else float(_nanmean_or_nan(variance))
+            ),
         })
 
     summary = pd.DataFrame(summary_rows)

@@ -22,6 +22,26 @@ DEFAULT_FEATURE_FUNCTIONS = (
     "entropy,intervals,unitroot_kpss,flat_spots,lumpiness,unitroot_pp,frequency,"
     "nonlinearity,guerrero,pacf_features"
 )
+TOURISM_TABLE7_MODELS = (
+    "seasonal_naive,auto_ets,auto_arima,nbeats,ar1_auto_ets,var1_auto_ets,"
+    "deepar,ar1,var1"
+)
+TOURISM_TABLE7_FEATURE_FUNCTIONS = (
+    "stl_features,acf_features,pacf_features,entropy,holt_parameters,"
+    "hw_parameters,frequency,guerrero"
+)
+TOURISM_TABLE7_MODEL_LABELS = {
+    "vara": "VARA on AutoETS residuals, reduced features",
+    "ar1_auto_ets": "AR(1) on AutoETS residuals",
+    "var1_auto_ets": "VAR(1) on AutoETS residuals",
+    "auto_ets": "AutoETS",
+    "auto_arima": "AutoARIMA",
+    "nbeats": "N-BEATS",
+    "seasonal_naive": "Seasonal naive",
+    "deepar": "DeepAR",
+    "ar1": "AR(1)",
+    "var1": "VAR(1)",
+}
 
 DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
     "m5": {
@@ -42,10 +62,22 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "feature_functions": "",
         "feature_path_name": "m5_attention_features_auto_ets.parquet",
         "clip_nonnegative": True,
+        "models": DEFAULT_MODELS,
+        "forecast_mode": DEFAULT_FORECAST_MODES,
+        "forecast_scenario": "auto_ets",
+        "residual_transform": "center",
+        "y_transform": "none",
+        "grid_size": 7,
+        "ridge": 0.01,
+        "attention_mode": "dense",
+        "attention_top_k": 50,
+        "feature_update_policy": "exact",
+        "feature_update_interval": 1,
+        "include_full_tsfeatures_vara": False,
     },
     "tourism": {
         "data_path": Path("data/tourism/tourism.csv"),
-        "output_dir": Path("outputs/tourism_auto_ets_dense_workflow"),
+        "output_dir": Path("outputs/tourism_vara_auto_ets_core8_features"),
         "data_format": "wide",
         "date_col": "date",
         "series_col": "series_id",
@@ -58,9 +90,21 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "feature_freq": 12,
         "freq": "MS",
         "feature_source": "tsfeatures",
-        "feature_functions": DEFAULT_FEATURE_FUNCTIONS,
+        "feature_functions": TOURISM_TABLE7_FEATURE_FUNCTIONS,
         "feature_path_name": "",
         "clip_nonnegative": True,
+        "models": TOURISM_TABLE7_MODELS,
+        "forecast_mode": "rolling-origin",
+        "forecast_scenario": "auto_ets",
+        "residual_transform": "center",
+        "y_transform": "none",
+        "grid_size": 7,
+        "ridge": 0.01,
+        "attention_mode": "dense",
+        "attention_top_k": 50,
+        "feature_update_policy": "exact",
+        "feature_update_interval": 1,
+        "include_full_tsfeatures_vara": True,
     },
 }
 
@@ -83,9 +127,20 @@ def _run(cmd: list[str], *, dry_run: bool = False) -> None:
     subprocess.run(cmd, check=True)
 
 
-def _comparison_table(benchmark_dir: Path, vara_dir: Path, output_dir: Path) -> pd.DataFrame:
+def _comparison_table(
+    benchmark_dir: Path,
+    vara_dirs: list[tuple[Path, str | None]],
+    output_dir: Path,
+) -> pd.DataFrame:
     bench = pd.read_csv(benchmark_dir / "metrics_summary.csv")
-    vara = pd.read_csv(vara_dir / "metrics_summary.csv")
+    vara_frames = []
+    for vara_dir, model_label in vara_dirs:
+        frame = pd.read_csv(vara_dir / "metrics_summary.csv")
+        if model_label is not None:
+            frame = frame.copy()
+            frame["model"] = model_label
+        vara_frames.append(frame)
+    vara = pd.concat(vara_frames, ignore_index=True, sort=False)
 
     keep = [
         "model",
@@ -125,7 +180,7 @@ def _feature_outputs_exist(args: argparse.Namespace, config: dict[str, Any]) -> 
     feature_path = config["feature_path"]
     if feature_path is None or not feature_path.exists():
         return False
-    if args.forecast_scenario == "auto_ets" and not _feature_metadata_path(feature_path).exists():
+    if config.get("forecast_scenario") == "auto_ets" and not _feature_metadata_path(feature_path).exists():
         return False
     return True
 
@@ -164,25 +219,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-vara", action="store_true")
     parser.add_argument("--skip-plot", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--include-full-tsfeatures-vara", action=argparse.BooleanOptionalAction, default=None)
 
-    parser.add_argument("--models", type=str, default=DEFAULT_MODELS)
-    parser.add_argument("--forecast-mode", type=str, default=DEFAULT_FORECAST_MODES)
+    parser.add_argument("--models", type=str, default=None)
+    parser.add_argument("--forecast-mode", type=str, default=None)
     parser.add_argument("--freq", type=str, default=None)
     parser.add_argument("--clip-nonnegative", action=argparse.BooleanOptionalAction, default=None)
 
     parser.add_argument("--horizon", type=int, default=None)
     parser.add_argument("--seasonal-lag", type=int, default=None)
     parser.add_argument("--feature-freq", type=int, default=None)
-    parser.add_argument("--forecast-scenario", choices=["direct", "seasonal-naive-residual", "auto_ets", "statsmodels_ets"], default="auto_ets")
-    parser.add_argument("--residual-transform", choices=["center", "standardize"], default="center")
-    parser.add_argument("--y-transform", default="none")
+    parser.add_argument("--forecast-scenario", choices=["direct", "seasonal-naive-residual", "auto_ets", "statsmodels_ets", "seasonal_ets"], default=None)
+    parser.add_argument("--residual-transform", choices=["center", "standardize"], default=None)
+    parser.add_argument("--y-transform", default=None)
 
-    parser.add_argument("--grid-size", type=int, default=7)
-    parser.add_argument("--ridge", type=float, default=0.01)
-    parser.add_argument("--attention-mode", choices=["dense", "topk", "score", "score-topk"], default="dense")
-    parser.add_argument("--attention-top-k", type=int, default=50)
-    parser.add_argument("--feature-update-policy", choices=["exact", "periodic"], default="exact")
-    parser.add_argument("--feature-update-interval", type=int, default=1)
+    parser.add_argument("--grid-size", type=int, default=None)
+    parser.add_argument("--ridge", type=float, default=None)
+    parser.add_argument("--attention-mode", choices=["dense", "topk", "score", "score-topk"], default=None)
+    parser.add_argument("--attention-top-k", type=int, default=None)
+    parser.add_argument("--feature-update-policy", choices=["exact", "periodic"], default=None)
+    parser.add_argument("--feature-update-interval", type=int, default=None)
     parser.add_argument("--ray-num-cpus", type=int, default=52)
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
     parser.add_argument("--ray-debug", action="store_true")
@@ -219,6 +275,22 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "feature_path": feature_path,
         "feature_functions": _arg_value(args, defaults, "feature_functions"),
         "clip_nonnegative": defaults["clip_nonnegative"] if args.clip_nonnegative is None else args.clip_nonnegative,
+        "models": _arg_value(args, defaults, "models"),
+        "forecast_mode": _arg_value(args, defaults, "forecast_mode"),
+        "forecast_scenario": _arg_value(args, defaults, "forecast_scenario"),
+        "residual_transform": _arg_value(args, defaults, "residual_transform"),
+        "y_transform": _arg_value(args, defaults, "y_transform"),
+        "grid_size": _arg_value(args, defaults, "grid_size"),
+        "ridge": _arg_value(args, defaults, "ridge"),
+        "attention_mode": _arg_value(args, defaults, "attention_mode"),
+        "attention_top_k": _arg_value(args, defaults, "attention_top_k"),
+        "feature_update_policy": _arg_value(args, defaults, "feature_update_policy"),
+        "feature_update_interval": _arg_value(args, defaults, "feature_update_interval"),
+        "include_full_tsfeatures_vara": (
+            defaults["include_full_tsfeatures_vara"]
+            if args.include_full_tsfeatures_vara is None
+            else args.include_full_tsfeatures_vara
+        ),
     }
     return config
 
@@ -304,9 +376,9 @@ def _benchmark_cmd(args: argparse.Namespace, config: dict[str, Any], panel_args:
         "--freq",
         str(config["freq"]),
         "--forecast-mode",
-        args.forecast_mode,
+        str(config["forecast_mode"]),
         "--models",
-        args.models,
+        str(config["models"]),
         *ray_args,
     ]
     if config["clip_nonnegative"]:
@@ -314,13 +386,21 @@ def _benchmark_cmd(args: argparse.Namespace, config: dict[str, Any], panel_args:
     return cmd
 
 
-def _vara_cmd(args: argparse.Namespace, config: dict[str, Any], panel_args: list[str], ray_args: list[str]) -> list[str]:
+def _vara_cmd(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    panel_args: list[str],
+    ray_args: list[str],
+    *,
+    output_dir: Path | None = None,
+    feature_functions: str | None = None,
+) -> list[str]:
     cmd = [
         sys.executable,
         "scripts/run_vara_forecast.py",
         *panel_args,
         "--output-dir",
-        config["vara_dir"].as_posix(),
+        (output_dir or config["vara_dir"]).as_posix(),
         "--seasonal-lag",
         str(config["seasonal_lag"]),
         "--feature-freq",
@@ -328,52 +408,71 @@ def _vara_cmd(args: argparse.Namespace, config: dict[str, Any], panel_args: list
         "--feature-source",
         str(config["feature_source"]),
         "--forecast-scenario",
-        args.forecast_scenario,
+        str(config["forecast_scenario"]),
         "--residual-transform",
-        args.residual_transform,
+        str(config["residual_transform"]),
         "--y-transform",
-        args.y_transform,
+        str(config["y_transform"]),
         "--forecast-mode",
-        args.forecast_mode,
+        str(config["forecast_mode"]),
         "--feature-update-policy",
-        args.feature_update_policy,
+        str(config["feature_update_policy"]),
         "--feature-update-interval",
-        str(args.feature_update_interval),
+        str(config["feature_update_interval"]),
         "--grid-size",
-        str(args.grid_size),
+        str(config["grid_size"]),
         "--ridge",
-        str(args.ridge),
+        str(config["ridge"]),
         "--attention-mode",
-        args.attention_mode,
+        str(config["attention_mode"]),
         "--attention-top-k",
-        str(args.attention_top_k),
+        str(config["attention_top_k"]),
         *ray_args,
     ]
     if config["feature_path"] is not None:
         cmd.extend(["--feature-path", config["feature_path"].as_posix()])
-    if config["feature_functions"]:
-        cmd.extend(["--feature-functions", str(config["feature_functions"])])
+    effective_feature_functions = config["feature_functions"] if feature_functions is None else feature_functions
+    if effective_feature_functions:
+        cmd.extend(["--feature-functions", str(effective_feature_functions)])
     return cmd
 
 
 def _plot_cmd(config: dict[str, Any]) -> list[str]:
     comparison_dir = config["comparison_dir"]
+    if config.get("dataset") == "tourism":
+        model_labels = (
+            "vara=VARA on AutoETS residuals (reduced features),"
+            "ar1_auto_ets=AR(1) on AutoETS residuals,"
+            "var1_auto_ets=VAR(1) on AutoETS residuals,"
+            "auto_ets=AutoETS,auto_arima=AutoARIMA,nbeats=N-BEATS,"
+            "seasonal_naive=Seasonal naive,deepar=DeepAR,ar1=AR(1),var1=VAR(1)"
+        )
+        method_order = (
+            "VARA on AutoETS residuals (reduced features),"
+            "AR(1) on AutoETS residuals,AutoETS,AutoARIMA,N-BEATS,"
+            "VAR(1) on AutoETS residuals,Seasonal naive,DeepAR,AR(1),VAR(1)"
+        )
+    else:
+        model_labels = (
+            "vara=VARA(1),seasonal_ets=Seasonal ETS,auto_ets=AutoETS,auto_arima=AutoARIMA,"
+            "seasonal_naive=SNaive,ar1=AR(1),var1=VAR(1),deepar=DeepAR,nbeats=NBEATS,"
+            "naive=Naive,drift=Drift"
+        )
+        method_order = (
+            "VARA(1),Seasonal ETS,AutoETS,AutoARIMA,AR(1),VAR(1),SNaive,"
+            "DeepAR,NBEATS,Naive,Drift"
+        )
     return [
         sys.executable,
         "scripts/plot_forecast_horizon_metrics.py",
         "--results-dirs",
         f"{config['benchmark_dir'].as_posix()},{config['vara_dir'].as_posix()}",
         "--model-labels",
-        (
-            "vara=VARA(1) on AutoETS residuals,auto_ets=AutoETS,auto_arima=AutoARIMA,"
-            "seasonal_naive=SNaive,ar1=AR(1),var1=VAR(1),deepar=DeepAR,nbeats=NBEATS,"
-            "naive=Naive,drift=Drift"
-        ),
+        model_labels,
         "--method-order",
-        (
-            "VARA(1) on AutoETS residuals,AutoETS,AutoARIMA,AR(1),VAR(1),SNaive,"
-            "DeepAR,NBEATS,Naive,Drift"
-        ),
+        method_order,
+        "--metrics",
+        "rmse=RMSE,bias=Bias",
         "--output-csv",
         (comparison_dir / "horizon_metrics.csv").as_posix(),
         "--output-pdf",
@@ -388,7 +487,7 @@ def main() -> None:
     args = _parse_args()
     if (
         args.dataset == "m5"
-        and args.forecast_scenario == "auto_ets"
+        and (args.forecast_scenario or DATASET_DEFAULTS[args.dataset]["forecast_scenario"]) == "auto_ets"
         and args.feature_filter_method != "auto_ets"
         and not args.skip_features
     ):
@@ -411,14 +510,39 @@ def main() -> None:
         print(f"Using existing benchmark outputs: {config['benchmark_dir']}", flush=True)
     elif not args.skip_benchmarks:
         _run(_benchmark_cmd(args, config, panel_args, ray_args), dry_run=args.dry_run)
+    vara_outputs = [(config["vara_dir"], "VARA on AutoETS residuals, reduced features" if args.dataset == "tourism" else None)]
+    full_vara_dir = config["output_dir"] / "vara_full_tsfeatures"
+    if config.get("include_full_tsfeatures_vara"):
+        vara_outputs.append((full_vara_dir, "VARA on AutoETS residuals, full tsfeatures"))
+
     if not args.skip_vara:
         _run(_vara_cmd(args, config, panel_args, ray_args), dry_run=args.dry_run)
+        if config.get("include_full_tsfeatures_vara"):
+            _run(
+                _vara_cmd(
+                    args,
+                    config,
+                    panel_args,
+                    ray_args,
+                    output_dir=full_vara_dir,
+                    feature_functions=DEFAULT_FEATURE_FUNCTIONS,
+                ),
+                dry_run=args.dry_run,
+            )
 
     if not args.dry_run:
-        comparison = _comparison_table(config["benchmark_dir"], config["vara_dir"], config["comparison_dir"])
-        show = ["forecast_mode", "rank_rmse", "model", "n_series", "rmse", "mae", "mase", "rmsse", "bias"]
+        comparison = _comparison_table(config["benchmark_dir"], vara_outputs, config["comparison_dir"])
+        if args.dataset == "tourism":
+            comparison_display = comparison.copy()
+            comparison_display["model"] = comparison_display["model"].map(TOURISM_TABLE7_MODEL_LABELS).fillna(
+                comparison_display["model"]
+            )
+            show = ["forecast_mode", "rank_rmse", "model", "n_series", "rmse", "bias"]
+        else:
+            comparison_display = comparison
+            show = ["forecast_mode", "rank_rmse", "model", "n_series", "rmse", "mae", "mase", "rmsse", "bias"]
         print(f"\n{args.dataset} benchmark and VARA comparison:")
-        print(comparison[show].to_string(index=False))
+        print(comparison_display[show].to_string(index=False))
 
     if not args.skip_plot:
         _run(_plot_cmd(config), dry_run=args.dry_run)

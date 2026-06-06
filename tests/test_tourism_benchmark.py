@@ -22,31 +22,36 @@ class TourismBenchmarkTests(unittest.TestCase):
             data_dir = root / "data"
             output_dir = root / "out"
             data_dir.mkdir()
-            dates = pd.date_range("2020-01-01", periods=24, freq="MS")
+            dates = pd.date_range("2020-01-01", periods=36, freq="MS")
             pd.DataFrame({
                 "date": dates,
-                "AAAAll": np.arange(24, dtype=float) + 10.0,
-                "AABAll": 2.0 * np.arange(24, dtype=float) + 30.0,
+                "AAAAll": np.arange(36, dtype=float) + 10.0,
+                "AABAll": 2.0 * np.arange(36, dtype=float) + 30.0,
             }).to_csv(data_dir / "tourism.csv", index=False)
 
             summary = run_forecast_benchmark(
                 data_dir=data_dir,
                 output_dir=output_dir,
-                models="naive,seasonal_naive,drift,statsmodels_ets,ar1,ar1_snaive,var1,var1_snaive",
+                models="naive,seasonal_naive,drift,statsmodels_ets,seasonal_ets,ar1,ar1_snaive,ar1_seasonal_ets,var1,var1_snaive,var1_seasonal_ets",
                 forecast_mode="rolling-origin",
                 horizon=2,
                 season_length=12,
                 series_depth=3,
             )
 
-            self.assertEqual(set(summary["model"]), {"naive", "seasonal_naive", "drift", "statsmodels_ets", "ar1", "ar1_snaive", "var1", "var1_snaive"})
+            self.assertEqual(set(summary["model"]), {"naive", "seasonal_naive", "drift", "statsmodels_ets", "seasonal_ets", "ar1", "ar1_snaive", "ar1_seasonal_ets", "var1", "var1_snaive", "var1_seasonal_ets"})
             self.assertTrue((output_dir / "benchmark_forecasts_long.csv").exists())
+            self.assertTrue((output_dir / "benchmark_forecast_variance_long.csv").exists())
             self.assertTrue((output_dir / "forecast_naive.csv").exists())
+            self.assertTrue((output_dir / "forecast_variance_naive.csv").exists())
             self.assertTrue((output_dir / "forecast_statsmodels_ets.csv").exists())
+            self.assertTrue((output_dir / "forecast_seasonal_ets.csv").exists())
             self.assertTrue((output_dir / "forecast_ar1.csv").exists())
+            self.assertTrue((output_dir / "forecast_ar1_seasonal_ets.csv").exists())
             self.assertTrue((output_dir / "forecast_ar1_snaive.csv").exists())
             self.assertTrue((output_dir / "forecast_var1.csv").exists())
             self.assertTrue((output_dir / "forecast_var1_snaive.csv").exists())
+            self.assertTrue((output_dir / "forecast_var1_seasonal_ets.csv").exists())
             self.assertTrue((output_dir / "errors_seasonal_naive.csv").exists())
             self.assertTrue((output_dir / "metrics_by_series.csv").exists())
             self.assertTrue((output_dir / "metrics_by_origin.csv").exists())
@@ -60,14 +65,27 @@ class TourismBenchmarkTests(unittest.TestCase):
             self.assertEqual(set(long_forecasts["series_id"]), {"AAAAll", "AABAll"})
             self.assertIn("seasonal_naive", long_forecasts.columns)
             self.assertIn("statsmodels_ets", long_forecasts.columns)
+            self.assertIn("seasonal_ets", long_forecasts.columns)
             self.assertIn("ar1", long_forecasts.columns)
+            self.assertIn("ar1_seasonal_ets", long_forecasts.columns)
             self.assertIn("ar1_snaive", long_forecasts.columns)
             self.assertIn("var1", long_forecasts.columns)
             self.assertIn("var1_snaive", long_forecasts.columns)
+            self.assertIn("var1_seasonal_ets", long_forecasts.columns)
+            self.assertFalse(any(col.endswith("__variance") for col in long_forecasts.columns))
+
+            long_variance = pd.read_csv(output_dir / "benchmark_forecast_variance_long.csv")
+            self.assertEqual(long_variance.shape[0], 4)
+            self.assertIn("naive", long_variance.columns)
+            self.assertIn("ar1", long_variance.columns)
+            self.assertTrue(np.isfinite(long_variance["naive"]).all())
+            self.assertTrue(np.isfinite(long_variance["ar1"]).all())
+            self.assertIn("crps", summary.columns)
+            self.assertIn("forecast_variance_mean", summary.columns)
 
             seasonal_wide = pd.read_csv(output_dir / "forecast_seasonal_naive.csv")
-            self.assertEqual(list(seasonal_wide["AAAAll"]), [20.0, 21.0])
-            self.assertEqual(list(seasonal_wide["AABAll"]), [50.0, 52.0])
+            self.assertEqual(list(seasonal_wide["AAAAll"]), [32.0, 33.0])
+            self.assertEqual(list(seasonal_wide["AABAll"]), [74.0, 76.0])
 
     def test_success_marker_skips_completed_resume_run(self):
         with tempfile.TemporaryDirectory() as tmp:

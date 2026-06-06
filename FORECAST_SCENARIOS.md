@@ -11,6 +11,7 @@ to define the target that VARA models.
 | `seasonal-naive-residual` | Residuals after a seasonal-naive baseline | Seasonal-naive forecast plus VARA residual forecast |
 | `auto_ets` | Residuals after an AutoETS baseline | AutoETS forecast plus VARA residual forecast |
 | `statsmodels_ets` | Residuals after the default `statsmodels` `ETSModel` baseline | statsmodels ETS forecast plus VARA residual forecast |
+| `seasonal_ets` | Residuals after a fixed additive seasonal `statsmodels` `ETSModel` baseline | seasonal ETS forecast plus VARA residual forecast |
 
 The residual scenarios decompose the forecast into a univariate baseline and a
 cross-series residual correction. The baseline captures each series' own level,
@@ -99,6 +100,14 @@ with its default settings. In the installed API this means additive errors, no
 trend, no seasonal component, and estimated initialization. This gives a weaker,
 fixed ETS filter that can be useful when the goal is to test whether VARA adds
 cross-series information beyond a simple univariate smoother.
+
+## Seasonal ETS Residual VARA
+
+The `seasonal_ets` scenario uses the same `statsmodels` `ETSModel` API, but fixes
+the univariate baseline to additive errors with additive seasonality and no trend.
+The seasonal period is set by `--seasonal-lag`. This is less adaptive than AutoETS
+because it does not search over ETS forms, but it still removes the dominant
+seasonal pattern in monthly tourism data before VARA models residual dependence.
 
 ## Feature Use and Leakage
 

@@ -75,6 +75,31 @@ class ScriptHelperTests(unittest.TestCase):
         self.assertTrue(np.isfinite(forecast).all())
         self.assertTrue(np.isfinite(residuals).all())
 
+    def test_seasonal_ets_residual_scenario_uses_fixed_seasonal_baseline(self):
+        t = np.arange(36, dtype=float)
+        history = np.column_stack([
+            20.0 + 0.2 * t + 2.0 * np.sin(2.0 * np.pi * t / 12.0),
+            30.0 - 0.1 * t + 3.0 * np.cos(2.0 * np.pi * t / 12.0),
+        ])
+
+        config = _baseline_config_for_scenario("seasonal_ets", seasonal_lag=12)
+        forecast, residuals = _baseline_forecast_and_residual_panel(
+            history,
+            horizon=3,
+            seasonal_lag=12,
+            series_ids=["a", "b"],
+            forecast_scenario="seasonal_ets",
+        )
+
+        self.assertEqual(config["alias"], "seasonal_ets")
+        self.assertEqual(config["seasonal"], "add")
+        self.assertEqual(config["seasonal_periods"], 12)
+        self.assertEqual(_residual_baseline_name("seasonal_ets"), "seasonal_ets")
+        self.assertEqual(forecast.shape, (3, 2))
+        self.assertEqual(residuals.shape, history.shape)
+        self.assertTrue(np.isfinite(forecast).all())
+        self.assertTrue(np.isfinite(residuals).all())
+
     def test_seasonal_naive_forecast_and_residual_panel(self):
         history = np.arange(1, 16, dtype=float)[:, None]
 

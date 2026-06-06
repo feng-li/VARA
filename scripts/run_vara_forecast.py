@@ -21,6 +21,8 @@ import pandas as pd
 from vara.forecast_baselines import (
     auto_ets_baseline_panel,
     auto_ets_config,
+    seasonal_ets_baseline_panel,
+    seasonal_ets_config,
     statsmodels_ets_baseline_panel,
     statsmodels_ets_config,
 )
@@ -59,13 +61,20 @@ SEASONAL_CORR_FEATURE_FUNCTIONS = (
     "seasonal_naive_residual_correlation,seasonal_profile_pca,recent_dynamics,hierarchy"
 )
 SEASONAL_PREDICTIVE_FEATURE_FUNCTIONS = "seasonal_diff_predictive_corr_lag1_lag12"
-FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual", "auto_ets", "statsmodels_ets")
+FORECAST_SCENARIOS = ("direct", "seasonal-naive-residual", "auto_ets", "statsmodels_ets", "seasonal_ets")
 FORECAST_MODES = ("recursive", "rolling-origin", "closed-loop")
 FORECAST_MODE_ALIASES = {
     "rolling_origin": "rolling-origin",
     "closed_loop": "closed-loop",
 }
-FEATURE_SOURCES = ("file", "tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive")
+FEATURE_SOURCES = (
+    "file",
+    "tsfeatures",
+    "tourism",
+    "hybrid",
+    "seasonal-corr",
+    "seasonal-predictive",
+)
 SCORE_FEATURE_SOURCES = {"seasonal-predictive"}
 TOPK_ATTENTION_MODES = {"topk", "score-topk"}
 SCORE_ATTENTION_MODES = {"score", "score-topk"}
@@ -326,6 +335,8 @@ def _baseline_config_for_scenario(forecast_scenario: str, seasonal_lag: int) -> 
         return auto_ets_config(seasonal_lag)
     if forecast_scenario == "statsmodels_ets":
         return statsmodels_ets_config()
+    if forecast_scenario == "seasonal_ets":
+        return seasonal_ets_config(seasonal_lag)
     if forecast_scenario == "seasonal-naive-residual":
         return {"model": "SeasonalNaive", "season_length": int(seasonal_lag)}
     return {}
@@ -395,6 +406,8 @@ def _residual_baseline_name(forecast_scenario: str) -> str:
         return "auto_ets"
     if forecast_scenario == "statsmodels_ets":
         return "statsmodels_ets"
+    if forecast_scenario == "seasonal_ets":
+        return "seasonal_ets"
     return ""
 
 
@@ -415,6 +428,9 @@ def _baseline_forecast_and_residual_panel(
         return baseline["forecast"], baseline["residuals"]
     if forecast_scenario == "statsmodels_ets":
         baseline = statsmodels_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
+        return baseline["forecast"], baseline["residuals"]
+    if forecast_scenario == "seasonal_ets":
+        baseline = seasonal_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
         return baseline["forecast"], baseline["residuals"]
     raise ValueError(f"Unknown residual forecast_scenario: {forecast_scenario!r}.")
 
@@ -750,7 +766,9 @@ def _tourism_feature_matrix(
     feature_freq: int,
     feature_functions: str | Sequence[str],
     feature_path: Path | None = None,
+    forecast_scenario: str | None = None,
 ) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
+    del forecast_scenario
     if feature_source == "file":
         if feature_path is None:
             raise ValueError("feature_path must be provided when feature_source='file'.")
@@ -1410,6 +1428,7 @@ def run_vara_forecast(
             seasonal_lag=seasonal_lag,
             feature_freq=feature_freq,
             feature_functions=feature_functions,
+            forecast_scenario=forecast_scenario,
             feature_path=input_feature_path,
         )
 
