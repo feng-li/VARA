@@ -411,6 +411,29 @@ def _residual_baseline_name(forecast_scenario: str) -> str:
     return ""
 
 
+def _baseline_forecast_residual_and_variance(
+    history: np.ndarray,
+    horizon: int,
+    seasonal_lag: int,
+    series_ids: list[str],
+    forecast_scenario: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if forecast_scenario == "seasonal-naive-residual":
+        forecast = _seasonal_naive_forecast(history, horizon, seasonal_lag)
+        residuals = _seasonal_naive_residual_panel(history, seasonal_lag)
+        return forecast, residuals, np.zeros_like(forecast, dtype=float)
+    if forecast_scenario == "auto_ets":
+        baseline = auto_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
+        return baseline["forecast"], baseline["residuals"], baseline["forecast_variance"]
+    if forecast_scenario == "statsmodels_ets":
+        baseline = statsmodels_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
+        return baseline["forecast"], baseline["residuals"], baseline["forecast_variance"]
+    if forecast_scenario == "seasonal_ets":
+        baseline = seasonal_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
+        return baseline["forecast"], baseline["residuals"], baseline["forecast_variance"]
+    raise ValueError(f"Unknown residual forecast_scenario: {forecast_scenario!r}.")
+
+
 def _baseline_forecast_and_residual_panel(
     history: np.ndarray,
     horizon: int,
@@ -418,21 +441,42 @@ def _baseline_forecast_and_residual_panel(
     series_ids: list[str],
     forecast_scenario: str,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if forecast_scenario == "seasonal-naive-residual":
-        return (
-            _seasonal_naive_forecast(history, horizon, seasonal_lag),
-            _seasonal_naive_residual_panel(history, seasonal_lag),
+    forecast, residuals, _ = _baseline_forecast_residual_and_variance(
+        history,
+        horizon,
+        seasonal_lag,
+        series_ids,
+        forecast_scenario,
+    )
+    return forecast, residuals
+
+
+def _inverse_y_variance(variance: np.ndarray, forecast_original_scale: np.ndarray, transform: dict) -> np.ndarray:
+    variance = np.asarray(variance, dtype=float)
+    scale = np.asarray(transform["scale"], dtype=float)
+    out = variance * (scale ** 2)
+    if str(transform["method"]).startswith("log1p"):
+        out = out * np.maximum(np.asarray(forecast_original_scale, dtype=float) + 1.0, 0.0) ** 2
+    return np.where(np.isfinite(out) & (out >= 0.0), out, np.nan)
+
+
+def _one_step_residual_forecast_variance(forecaster, forecast_original_scale: np.ndarray, transform: dict) -> np.ndarray:
+    sigma2_hat = getattr(forecaster, "sigma2_hat", None)
+    if sigma2_hat is None:
+        return np.full_like(forecast_original_scale, np.nan, dtype=float)
+    variance = np.asarray(sigma2_hat, dtype=float)[None, :]
+    return _inverse_y_variance(variance, forecast_original_scale, transform)
+
+
+def _combine_forecast_variance(baseline_variance: np.ndarray, residual_variance: np.ndarray) -> np.ndarray:
+    baseline_variance = np.asarray(baseline_variance, dtype=float)
+    residual_variance = np.asarray(residual_variance, dtype=float)
+    if baseline_variance.shape != residual_variance.shape:
+        raise ValueError(
+            f"Baseline variance shape {baseline_variance.shape} does not match "
+            f"residual variance shape {residual_variance.shape}."
         )
-    if forecast_scenario == "auto_ets":
-        baseline = auto_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
-        return baseline["forecast"], baseline["residuals"]
-    if forecast_scenario == "statsmodels_ets":
-        baseline = statsmodels_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
-        return baseline["forecast"], baseline["residuals"]
-    if forecast_scenario == "seasonal_ets":
-        baseline = seasonal_ets_baseline_panel(history, horizon, seasonal_lag, series_ids)
-        return baseline["forecast"], baseline["residuals"]
-    raise ValueError(f"Unknown residual forecast_scenario: {forecast_scenario!r}.")
+    return baseline_variance + residual_variance
 
 
 def _series_code(series_id: str, suffix: str = BASE_SUFFIX) -> str:
@@ -891,11 +935,12 @@ def _fit_vara_origin_step(
     else:
         origin_train = np.asarray(origin_train, dtype=float)
     baseline_one = np.zeros((1, len(series_ids)), dtype=float)
+    baseline_variance_one = np.zeros_like(baseline_one, dtype=float)
     if forecast_scenario == "direct":
         model_train = origin_train
         model_transform = y_transform
     else:
-        baseline_one, model_train = _baseline_forecast_and_residual_panel(
+        baseline_one, model_train, baseline_variance_one = _baseline_forecast_residual_and_variance(
             origin_train,
             1,
             seasonal_lag,
@@ -910,7 +955,13 @@ def _fit_vara_origin_step(
     forecast_model_scale = np.asarray(forecaster.predict(h=1))
     transformed_one = _unscale_y_transform(forecast_model_scale, fitted_y_transform)
     residual_one = _inverse_y_transform(forecast_model_scale, fitted_y_transform)
+    residual_variance_one = _one_step_residual_forecast_variance(forecaster, residual_one, fitted_y_transform)
     forecast_one = residual_one if forecast_scenario == "direct" else baseline_one + residual_one
+    forecast_variance_one = (
+        residual_variance_one
+        if forecast_scenario == "direct"
+        else _combine_forecast_variance(baseline_variance_one, residual_variance_one)
+    )
 
     forecast_date = str(wide["date"].iloc[origin_end])
     train_end = str(train_end_override if train_end_override is not None else wide["date"].iloc[origin_end - 1])
@@ -940,6 +991,9 @@ def _fit_vara_origin_step(
         "forecast": forecast_one[0],
         "baseline": baseline_one[0],
         "residual": residual_one[0],
+        "forecast_variance": forecast_variance_one[0],
+        "baseline_variance": baseline_variance_one[0],
+        "residual_variance": residual_variance_one[0],
         "forecast_transformed": transformed_one[0],
         "feature_df": origin_features,
         "diag": diag,
@@ -1221,6 +1275,9 @@ def _collect_origin_results(origin_results: list[dict]) -> dict:
         "forecast": np.vstack([result["forecast"] for result in origin_results]),
         "baseline": np.vstack([result["baseline"] for result in origin_results]),
         "residual": np.vstack([result["residual"] for result in origin_results]),
+        "forecast_variance": np.vstack([result["forecast_variance"] for result in origin_results]),
+        "baseline_variance": np.vstack([result["baseline_variance"] for result in origin_results]),
+        "residual_variance": np.vstack([result["residual_variance"] for result in origin_results]),
         "forecast_transformed": np.vstack([result["forecast_transformed"] for result in origin_results]),
         "feature_frames": [result["feature_df"] for result in origin_results],
         "rolling_diagnostics": [result["diag"] for result in origin_results],
@@ -1403,14 +1460,18 @@ def run_vara_forecast(
     exact_feature_origins = []
     baseline_forecasts = []
     residual_forecasts = []
+    forecast_variances = []
+    baseline_variances = []
+    residual_variances = []
 
     if forecast_mode == "recursive":
         baseline_forecast = np.zeros((horizon, len(series_ids)), dtype=float)
+        baseline_variance = np.zeros_like(baseline_forecast, dtype=float)
         if forecast_scenario == "direct":
             model_train = train
             model_transform = y_transform
         else:
-            baseline_forecast, model_train = _baseline_forecast_and_residual_panel(
+            baseline_forecast, model_train, baseline_variance = _baseline_forecast_residual_and_variance(
                 train,
                 horizon,
                 seasonal_lag,
@@ -1438,9 +1499,22 @@ def run_vara_forecast(
         forecast_model_scale = np.asarray(forecaster.predict(h=horizon))
         forecast_transformed = _unscale_y_transform(forecast_model_scale, fitted_y_transform)
         residual_forecast = _inverse_y_transform(forecast_model_scale, fitted_y_transform)
+        if horizon == 1:
+            residual_variance = _one_step_residual_forecast_variance(forecaster, residual_forecast, fitted_y_transform)
+            forecast_variance = (
+                residual_variance
+                if forecast_scenario == "direct"
+                else _combine_forecast_variance(baseline_variance, residual_variance)
+            )
+        else:
+            residual_variance = np.full_like(residual_forecast, np.nan, dtype=float)
+            forecast_variance = np.full_like(residual_forecast, np.nan, dtype=float)
         forecast = residual_forecast if forecast_scenario == "direct" else baseline_forecast + residual_forecast
         baseline_forecasts.append(baseline_forecast)
         residual_forecasts.append(residual_forecast)
+        forecast_variances.append(forecast_variance)
+        baseline_variances.append(baseline_variance)
+        residual_variances.append(residual_variance)
         feature_frames.append(feature_df)
         fit_diagnostics = forecaster.diagnostics()
         n_train_model_initial = int(Y_train.shape[0])
@@ -1472,6 +1546,9 @@ def run_vara_forecast(
         forecast = collected["forecast"]
         baseline_forecasts.append(collected["baseline"])
         residual_forecasts.append(collected["residual"])
+        forecast_variances.append(collected["forecast_variance"])
+        baseline_variances.append(collected["baseline_variance"])
+        residual_variances.append(collected["residual_variance"])
         forecast_transformed = collected["forecast_transformed"]
         feature_frames.extend(collected["feature_frames"])
         rolling_diagnostics.extend(collected["rolling_diagnostics"])
@@ -1518,6 +1595,9 @@ def run_vara_forecast(
             forecast = collected["forecast"]
             baseline_forecasts.append(collected["baseline"])
             residual_forecasts.append(collected["residual"])
+            forecast_variances.append(collected["forecast_variance"])
+            baseline_variances.append(collected["baseline_variance"])
+            residual_variances.append(collected["residual_variance"])
             forecast_transformed = collected["forecast_transformed"]
             feature_frames.extend(collected["feature_frames"])
             rolling_diagnostics.extend(collected["rolling_diagnostics"])
@@ -1587,6 +1667,9 @@ def run_vara_forecast(
             forecast = collected["forecast"]
             baseline_forecasts.append(collected["baseline"])
             residual_forecasts.append(collected["residual"])
+            forecast_variances.append(collected["forecast_variance"])
+            baseline_variances.append(collected["baseline_variance"])
+            residual_variances.append(collected["residual_variance"])
             forecast_transformed = collected["forecast_transformed"]
             feature_frames.extend(collected["feature_frames"])
             rolling_diagnostics.extend(collected["rolling_diagnostics"])
@@ -1599,6 +1682,9 @@ def run_vara_forecast(
 
     baseline_forecast = np.vstack(baseline_forecasts) if baseline_forecasts else np.zeros_like(forecast)
     residual_forecast = np.vstack(residual_forecasts) if residual_forecasts else forecast.copy()
+    forecast_variance = np.vstack(forecast_variances) if forecast_variances else np.full_like(forecast, np.nan, dtype=float)
+    baseline_variance = np.vstack(baseline_variances) if baseline_variances else np.full_like(forecast, np.nan, dtype=float)
+    residual_variance = np.vstack(residual_variances) if residual_variances else np.full_like(forecast, np.nan, dtype=float)
 
     errors = forecast - test
     rmse = float(np.sqrt(np.mean(errors ** 2)))
@@ -1615,6 +1701,9 @@ def run_vara_forecast(
     _write_wide_output(output_dir, "baseline_forecast.csv", baseline_forecast, forecast_dates, series_ids)
     _write_wide_output(output_dir, "residual_forecast.csv", residual_forecast, forecast_dates, series_ids)
     _write_wide_output(output_dir, "forecast_transformed.csv", forecast_transformed, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "forecast_variance.csv", forecast_variance, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "baseline_forecast_variance.csv", baseline_variance, forecast_dates, series_ids)
+    _write_wide_output(output_dir, "residual_forecast_variance.csv", residual_variance, forecast_dates, series_ids)
     _write_wide_output(output_dir, "test.csv", test, forecast_dates, series_ids)
     _write_wide_output(output_dir, "errors.csv", errors, forecast_dates, series_ids)
 
@@ -1628,6 +1717,7 @@ def run_vara_forecast(
         season_length=seasonal_lag,
         forecast_mode=forecast_mode,
         horizon=horizon,
+        forecast_variances={"vara": forecast_variance},
         summary_context={
             "data": str(input_path),
             "series_depth": -1 if series_depth is None else int(series_depth),

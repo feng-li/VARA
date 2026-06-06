@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 
@@ -42,11 +43,26 @@ TOURISM_TABLE7_MODEL_LABELS = {
     "ar1": "AR(1)",
     "var1": "VAR(1)",
 }
+M5_ROLLING_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,ar1_snaive,deepar,nbeats"
+M5_MODEL_LABELS = {
+    "vara": "VARA on AutoETS residuals",
+    "naive": "Naive",
+    "seasonal_naive": "Seasonal naive",
+    "drift": "Drift",
+    "auto_ets": "AutoETS",
+    "auto_arima": "AutoARIMA",
+    "ar1": "AR(1)",
+    "ar1_snaive": "AR(1) on seasonal-naive residuals",
+    "deepar": "DeepAR",
+    "nbeats": "N-BEATS",
+}
 
 DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
     "m5": {
         "data_path": Path("data/m5/long/sales_train_evaluation_long.parquet"),
-        "output_dir": Path("outputs/m5_auto_ets_dense_workflow"),
+        "output_dir": Path("outputs/m5_vara_auto_ets_dense_workflow"),
+        "benchmark_dir": Path("outputs/m5_benchmark_all_modes"),
+        "benchmark_mode_subdirs": True,
         "data_format": "long",
         "date_col": "date",
         "series_col": "series_id",
@@ -62,8 +78,8 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "feature_functions": "",
         "feature_path_name": "m5_attention_features_auto_ets.parquet",
         "clip_nonnegative": True,
-        "models": DEFAULT_MODELS,
-        "forecast_mode": DEFAULT_FORECAST_MODES,
+        "models": M5_ROLLING_MODELS,
+        "forecast_mode": "rolling-origin",
         "forecast_scenario": "auto_ets",
         "residual_transform": "center",
         "y_transform": "none",
@@ -78,6 +94,8 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
     "tourism": {
         "data_path": Path("data/tourism/tourism.csv"),
         "output_dir": Path("outputs/tourism_vara_auto_ets_core8_features"),
+        "benchmark_dir": None,
+        "benchmark_mode_subdirs": False,
         "data_format": "wide",
         "date_col": "date",
         "series_col": "series_id",
@@ -157,6 +175,8 @@ def _comparison_table(
         "rmsse",
         "bias",
     ]
+    optional_keep = ["crps", "forecast_variance_mean"]
+    keep.extend([col for col in optional_keep if col in bench.columns and col in vara.columns])
     missing = [col for col in keep if col not in bench.columns or col not in vara.columns]
     if missing:
         raise ValueError(f"Missing comparison columns: {missing}")
@@ -190,7 +210,174 @@ def _benchmark_outputs_exist(benchmark_dir: Path) -> bool:
         benchmark_dir.exists()
         and (benchmark_dir / "metrics_summary.csv").exists()
         and (benchmark_dir / "metrics_by_origin.csv").exists()
+        and (benchmark_dir / "benchmark_forecast_variance_long.csv").exists()
     )
+
+
+def _forecast_modes(value: str) -> list[str]:
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def _benchmark_dir_for_mode(base_dir: Path, forecast_mode: str, *, use_mode_subdirs: bool) -> Path:
+    modes = _forecast_modes(forecast_mode)
+    if len(modes) != 1:
+        return base_dir
+    mode = modes[0]
+    if base_dir.name == mode:
+        return base_dir
+    mode_dir = base_dir / mode
+    if use_mode_subdirs or _benchmark_outputs_exist(mode_dir):
+        return mode_dir
+    return base_dir
+
+
+def _safe_pct(numer: np.ndarray, denom: np.ndarray) -> np.ndarray:
+    return numer / np.where(np.abs(denom) > 1e-12, np.abs(denom), np.nan)
+
+
+def _nanmean_or_nan(values: np.ndarray, axis=None):
+    arr = np.asarray(values, dtype=float)
+    finite = np.isfinite(arr)
+    count = finite.sum(axis=axis)
+    total = np.where(finite, arr, 0.0).sum(axis=axis)
+    if axis is None:
+        return float(total / count) if int(count) > 0 else np.nan
+    return np.divide(total, count, out=np.full_like(total, np.nan, dtype=float), where=count > 0)
+
+
+def _benchmark_needs_series_subset(benchmark_dir: Path, max_series: int) -> bool:
+    if max_series <= 0 or not (benchmark_dir / "metrics_summary.csv").exists():
+        return False
+    summary = pd.read_csv(benchmark_dir / "metrics_summary.csv")
+    if "n_series" not in summary.columns or summary.empty:
+        return False
+    return int(pd.to_numeric(summary["n_series"], errors="coerce").max()) > max_series
+
+
+def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, max_series: int) -> Path:
+    """Create benchmark metric files for the first max_series columns of an existing wide forecast output."""
+    if max_series <= 0 or not _benchmark_needs_series_subset(benchmark_dir, max_series):
+        return benchmark_dir
+
+    test_path = benchmark_dir / "test.csv"
+    summary_path = benchmark_dir / "metrics_summary.csv"
+    if not test_path.exists():
+        raise FileNotFoundError(f"Cannot subset benchmark outputs without {test_path}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = pd.read_csv(summary_path)
+    test_wide = pd.read_csv(test_path)
+    date_col = test_wide.columns[0]
+    selected_series = list(test_wide.columns[1: 1 + max_series])
+    if len(selected_series) < max_series:
+        raise ValueError(
+            f"Requested max_series={max_series}, but {test_path} only contains {len(selected_series)} series."
+        )
+
+    test = test_wide[selected_series].to_numpy(dtype=float)
+    dates = test_wide[date_col]
+    by_origin_rows = []
+    by_series_rows = []
+    summary_rows = []
+
+    original_by_series = None
+    by_series_path = benchmark_dir / "metrics_by_series.csv"
+    if by_series_path.exists():
+        original_by_series = pd.read_csv(by_series_path)
+
+    for _, summary_row in summary.iterrows():
+        model = str(summary_row["model"])
+        forecast_path = benchmark_dir / f"forecast_{model}.csv"
+        if not forecast_path.exists():
+            raise FileNotFoundError(f"Missing forecast file for model {model!r}: {forecast_path}")
+        forecast_wide = pd.read_csv(forecast_path)
+        forecast = forecast_wide[selected_series].to_numpy(dtype=float)
+        error = forecast - test
+        abs_error = np.abs(error)
+        squared_error = error ** 2
+        pct_error = _safe_pct(abs_error, test)
+        smape = 2.0 * abs_error / np.where(
+            np.abs(test) + np.abs(forecast) > 1e-12,
+            np.abs(test) + np.abs(forecast),
+            np.nan,
+        )
+
+        model_by_series = pd.DataFrame({
+            "model": model,
+            "series_id": selected_series,
+            "rmse": np.sqrt(_nanmean_or_nan(squared_error, axis=0)),
+            "mae": _nanmean_or_nan(abs_error, axis=0),
+            "mape_pct": _nanmean_or_nan(pct_error, axis=0) * 100.0,
+            "smape_pct": _nanmean_or_nan(smape, axis=0) * 100.0,
+            "bias": _nanmean_or_nan(error, axis=0),
+            "mean_actual": _nanmean_or_nan(test, axis=0),
+            "mean_forecast": _nanmean_or_nan(forecast, axis=0),
+        })
+        if original_by_series is not None:
+            scale_cols = [col for col in ["mase", "rmsse"] if col in original_by_series.columns]
+            if scale_cols:
+                scales = original_by_series.loc[
+                    original_by_series["model"].astype(str).eq(model)
+                    & original_by_series["series_id"].astype(str).isin(selected_series),
+                    ["series_id", *scale_cols],
+                ]
+                model_by_series = model_by_series.merge(scales, on="series_id", how="left")
+        for col in ["mase", "rmsse"]:
+            if col not in model_by_series.columns:
+                model_by_series[col] = np.nan
+        by_series_rows.append(model_by_series)
+
+        by_origin_rows.append(pd.DataFrame({
+            "model": model,
+            "date": dates,
+            "rmse": np.sqrt(_nanmean_or_nan(squared_error, axis=1)),
+            "mae": _nanmean_or_nan(abs_error, axis=1),
+            "mape_pct": _nanmean_or_nan(pct_error, axis=1) * 100.0,
+            "smape_pct": _nanmean_or_nan(smape, axis=1) * 100.0,
+            "bias": _nanmean_or_nan(error, axis=1),
+        }))
+
+        new_summary = summary_row.to_dict()
+        new_summary.update({
+            "n_series": len(selected_series),
+            "rmse": float(np.sqrt(_nanmean_or_nan(squared_error))),
+            "mae": float(_nanmean_or_nan(abs_error)),
+            "mape_pct": float(_nanmean_or_nan(pct_error) * 100.0),
+            "smape_pct": float(_nanmean_or_nan(smape) * 100.0),
+            "mase": float(_nanmean_or_nan(model_by_series["mase"].to_numpy(dtype=float))),
+            "rmsse": float(_nanmean_or_nan(model_by_series["rmsse"].to_numpy(dtype=float))),
+            "bias": float(_nanmean_or_nan(error)),
+        })
+        summary_rows.append(new_summary)
+
+    subset_summary = pd.DataFrame(summary_rows)
+    subset_by_series = pd.concat(by_series_rows, ignore_index=True, sort=False)
+    subset_by_origin = pd.concat(by_origin_rows, ignore_index=True, sort=False)
+
+    subset_summary.to_csv(output_dir / "metrics_summary.csv", index=False)
+    subset_by_series.to_csv(output_dir / "metrics_by_series.csv", index=False)
+    subset_by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
+    test_wide.loc[:, [date_col, *selected_series]].to_csv(output_dir / "test.csv", index=False)
+    return output_dir
+
+
+def _comparison_benchmark_dir(config: dict[str, Any]) -> Path:
+    benchmark_dir = config["benchmark_dir"]
+    if config.get("dataset") != "m5":
+        return benchmark_dir
+    modes = _forecast_modes(config["forecast_mode"])
+    if len(modes) != 1:
+        return benchmark_dir
+    max_series = int(config.get("max_series") or 0)
+    if max_series <= 0:
+        return benchmark_dir
+    subset_dir = config["comparison_dir"] / f"benchmark_first_{max_series}_{modes[0]}"
+    if _benchmark_needs_series_subset(benchmark_dir, max_series):
+        print(
+            f"Subsetting existing M5 benchmark outputs to first {max_series} series: {subset_dir}",
+            flush=True,
+        )
+    return _subset_existing_benchmark_outputs(benchmark_dir, subset_dir, max_series)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -252,12 +439,20 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
     feature_path = args.feature_path
     if feature_source == "file" and feature_path is None and defaults.get("feature_path_name"):
         feature_path = output_dir / "features" / str(defaults["feature_path_name"])
+    forecast_mode = _arg_value(args, defaults, "forecast_mode")
+    benchmark_root_dir = args.benchmark_dir or defaults.get("benchmark_dir") or output_dir / "benchmarks"
+    benchmark_dir = _benchmark_dir_for_mode(
+        benchmark_root_dir,
+        forecast_mode,
+        use_mode_subdirs=bool(defaults.get("benchmark_mode_subdirs")),
+    )
 
     config = {
         "dataset": args.dataset,
         "data_path": _arg_value(args, defaults, "data_path"),
         "output_dir": output_dir,
-        "benchmark_dir": args.benchmark_dir or output_dir / "benchmarks",
+        "benchmark_root_dir": benchmark_root_dir,
+        "benchmark_dir": benchmark_dir,
         "vara_dir": output_dir / "vara",
         "comparison_dir": output_dir / "comparison",
         "data_format": _arg_value(args, defaults, "data_format"),
@@ -276,7 +471,7 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "feature_functions": _arg_value(args, defaults, "feature_functions"),
         "clip_nonnegative": defaults["clip_nonnegative"] if args.clip_nonnegative is None else args.clip_nonnegative,
         "models": _arg_value(args, defaults, "models"),
-        "forecast_mode": _arg_value(args, defaults, "forecast_mode"),
+        "forecast_mode": forecast_mode,
         "forecast_scenario": _arg_value(args, defaults, "forecast_scenario"),
         "residual_transform": _arg_value(args, defaults, "residual_transform"),
         "y_transform": _arg_value(args, defaults, "y_transform"),
@@ -439,6 +634,7 @@ def _vara_cmd(
 
 def _plot_cmd(config: dict[str, Any]) -> list[str]:
     comparison_dir = config["comparison_dir"]
+    exclude_methods = ""
     if config.get("dataset") == "tourism":
         model_labels = (
             "vara=VARA on AutoETS residuals (reduced features),"
@@ -448,31 +644,32 @@ def _plot_cmd(config: dict[str, Any]) -> list[str]:
             "seasonal_naive=Seasonal naive,deepar=DeepAR,ar1=AR(1),var1=VAR(1)"
         )
         method_order = (
-            "VARA on AutoETS residuals (reduced features),"
+            "VARA on AutoETS residuals (full tsfeatures),"
             "AR(1) on AutoETS residuals,AutoETS,AutoARIMA,N-BEATS,"
             "VAR(1) on AutoETS residuals,Seasonal naive,DeepAR,AR(1),VAR(1)"
         )
+        exclude_methods = "VARA on AutoETS residuals (reduced features)"
     else:
         model_labels = (
-            "vara=VARA(1),seasonal_ets=Seasonal ETS,auto_ets=AutoETS,auto_arima=AutoARIMA,"
-            "seasonal_naive=SNaive,ar1=AR(1),var1=VAR(1),deepar=DeepAR,nbeats=NBEATS,"
-            "naive=Naive,drift=Drift"
+            "vara=VARA on AutoETS residuals,auto_ets=AutoETS,auto_arima=AutoARIMA,"
+            "nbeats=N-BEATS,deepar=DeepAR,ar1=AR(1),ar1_snaive=AR(1) on seasonal-naive residuals,"
+            "seasonal_naive=Seasonal naive,naive=Naive,drift=Drift"
         )
         method_order = (
-            "VARA(1),Seasonal ETS,AutoETS,AutoARIMA,AR(1),VAR(1),SNaive,"
-            "DeepAR,NBEATS,Naive,Drift"
+            "VARA on AutoETS residuals,AutoETS,AutoARIMA,N-BEATS,DeepAR,AR(1),"
+            "AR(1) on seasonal-naive residuals,Seasonal naive,Naive,Drift"
         )
-    return [
+    cmd = [
         sys.executable,
         "scripts/plot_forecast_horizon_metrics.py",
         "--results-dirs",
-        f"{config['benchmark_dir'].as_posix()},{config['vara_dir'].as_posix()}",
+        f"{config.get('plot_benchmark_dir', config['benchmark_dir']).as_posix()},{config['vara_dir'].as_posix()}",
         "--model-labels",
         model_labels,
         "--method-order",
         method_order,
-        "--metrics",
-        "rmse=RMSE,bias=Bias",
+        "--plot-metrics",
+        "rmse=RMSE,crps=CRPS,bias=Bias",
         "--output-csv",
         (comparison_dir / "horizon_metrics.csv").as_posix(),
         "--output-pdf",
@@ -481,6 +678,9 @@ def _plot_cmd(config: dict[str, Any]) -> list[str]:
         (comparison_dir / "horizon_metrics.png").as_posix(),
         "--log-positive-metrics",
     ]
+    if exclude_methods:
+        cmd.extend(["--exclude-methods", exclude_methods])
+    return cmd
 
 
 def main() -> None:
@@ -510,6 +710,7 @@ def main() -> None:
         print(f"Using existing benchmark outputs: {config['benchmark_dir']}", flush=True)
     elif not args.skip_benchmarks:
         _run(_benchmark_cmd(args, config, panel_args, ray_args), dry_run=args.dry_run)
+    comparison_benchmark_dir = config["benchmark_dir"] if args.dry_run else _comparison_benchmark_dir(config)
     vara_outputs = [(config["vara_dir"], "VARA on AutoETS residuals, reduced features" if args.dataset == "tourism" else None)]
     full_vara_dir = config["output_dir"] / "vara_full_tsfeatures"
     if config.get("include_full_tsfeatures_vara"):
@@ -531,7 +732,7 @@ def main() -> None:
             )
 
     if not args.dry_run:
-        comparison = _comparison_table(config["benchmark_dir"], vara_outputs, config["comparison_dir"])
+        comparison = _comparison_table(comparison_benchmark_dir, vara_outputs, config["comparison_dir"])
         if args.dataset == "tourism":
             comparison_display = comparison.copy()
             comparison_display["model"] = comparison_display["model"].map(TOURISM_TABLE7_MODEL_LABELS).fillna(
@@ -539,13 +740,19 @@ def main() -> None:
             )
             show = ["forecast_mode", "rank_rmse", "model", "n_series", "rmse", "bias"]
         else:
-            comparison_display = comparison
+            comparison_display = comparison.copy()
+            comparison_display["model"] = comparison_display["model"].map(M5_MODEL_LABELS).fillna(
+                comparison_display["model"]
+            )
             show = ["forecast_mode", "rank_rmse", "model", "n_series", "rmse", "mae", "mase", "rmsse", "bias"]
+        show.extend([col for col in ["crps", "forecast_variance_mean"] if col in comparison_display.columns])
         print(f"\n{args.dataset} benchmark and VARA comparison:")
         print(comparison_display[show].to_string(index=False))
 
     if not args.skip_plot:
-        _run(_plot_cmd(config), dry_run=args.dry_run)
+        plot_config = dict(config)
+        plot_config["plot_benchmark_dir"] = comparison_benchmark_dir
+        _run(_plot_cmd(plot_config), dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

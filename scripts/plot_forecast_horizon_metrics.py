@@ -12,10 +12,11 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 import pandas as pd
 
 
-DEFAULT_METRICS = "rmse=RMSE,mae=MAE,mape_pct=MAPE (%),smape_pct=sMAPE (%),bias=Bias"
+DEFAULT_METRICS = "rmse=RMSE,crps=CRPS,bias=Bias"
 
 
 def _parse_mapping(value: str) -> dict[str, str]:
@@ -75,8 +76,68 @@ def _load_metrics_by_horizon(
         "mase",
         "rmsse",
         "bias",
+        "crps",
+        "forecast_variance_mean",
     ]
     return metrics.loc[:, [col for col in keep if col in metrics.columns]]
+
+
+def _style_maps(methods: list[str]) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    palette = cycle(plt.rcParams["axes.prop_cycle"].by_key()["color"])
+    colors = {method: next(palette) for method in methods}
+    marker_cycle = cycle(["o", "s", "^", "D", "v", "P", "X", "*", "<", ">", "h", "8"])
+    markers = {method: next(marker_cycle) for method in methods}
+    linestyle_cycle = cycle(["-", "--", "-.", ":", (0, (5, 2)), (0, (3, 1, 1, 1))])
+    linestyles = {method: next(linestyle_cycle) for method in methods}
+    return colors, markers, linestyles
+
+
+def _is_vara_method(method: str) -> bool:
+    return str(method).strip().startswith("VARA")
+
+
+def _plot_method_line(ax, sub: pd.DataFrame, col: str, method: str, colors: dict, markers: dict, linestyles: dict) -> None:
+    is_vara = _is_vara_method(method)
+    ax.plot(
+        sub["horizon"],
+        sub[col],
+        label=method,
+        color=colors.get(method),
+        linestyle="-" if is_vara else "None",
+        marker=markers.get(method, "o"),
+        markersize=5.2,
+        markerfacecolor="white",
+        markeredgewidth=1.1,
+        linewidth=1.9 if is_vara else 0.0,
+    )
+
+
+def _add_panel_legends(axes, plot_metrics: list[tuple[str, str]]) -> None:
+    for ax, (metric, _) in zip(axes, plot_metrics):
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(
+                handles,
+                labels,
+                loc="lower right" if metric == "bias" else "upper right",
+                ncol=2,
+                frameon=True,
+                framealpha=0.88,
+                facecolor="white",
+                edgecolor="0.75",
+                fontsize=7.2,
+                columnspacing=0.65,
+                handlelength=1.8,
+                handletextpad=0.4,
+                borderpad=0.35,
+            )
+
+
+def _format_log_axis_ticks(ax) -> None:
+    ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 3.0, 5.0)))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}"))
+    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=(1.5, 2.5, 4.0, 6.0, 7.0, 8.0, 9.0)))
+    ax.yaxis.set_minor_formatter(NullFormatter())
 
 
 def plot_horizon_metrics(
@@ -95,21 +156,22 @@ def plot_horizon_metrics(
         raise ValueError("None of the requested plot metrics are present in the metrics table.")
 
     methods = method_order or sorted(metrics["method"].dropna().astype(str).unique())
-    palette = cycle(plt.rcParams["axes.prop_cycle"].by_key()["color"])
-    colors = {method: next(palette) for method in methods}
-    marker_cycle = cycle(["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"])
-    markers = {method: next(marker_cycle) for method in methods}
+    colors, markers, linestyles = _style_maps(methods)
 
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
     if output_png is not None:
         output_png.parent.mkdir(parents=True, exist_ok=True)
 
     max_horizon = int(metrics["horizon"].max())
-    n_panels = len(plot_metrics) + 1
-    n_cols = 2
-    n_rows = (n_panels + n_cols - 1) // n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(13.5, 3.4 * n_rows), sharex=False)
-    axes = axes.ravel()
+    x_padding = 0.45 if max_horizon > 1 else 0.25
+    n_panels = len(plot_metrics)
+    n_cols = 1
+    n_rows = n_panels
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7.4, 3.0 * n_rows), sharex=False)
+    if n_panels == 1:
+        axes = [axes]
+    else:
+        axes = axes.ravel()
 
     for ax, (col, label) in zip(axes, plot_metrics):
         panel_title = label
@@ -117,39 +179,22 @@ def plot_horizon_metrics(
             sub = metrics[metrics["method"].eq(method)]
             if sub.empty:
                 continue
-            ax.plot(
-                sub["horizon"],
-                sub[col],
-                label=method,
-                color=colors.get(method),
-                marker=markers.get(method, "o"),
-                markersize=4.5,
-                linewidth=1.8,
-            )
-        ax.set_xlim(1, max_horizon)
+            _plot_method_line(ax, sub, col, method, colors, markers, linestyles)
+        ax.set_xlim(1 - x_padding, max_horizon + x_padding)
         ax.set_xticks(range(1, max_horizon + 1))
         ax.set_xlabel("Horizon")
         ax.grid(True, alpha=0.25)
         if log_positive_metrics and col != "bias" and (metrics[col].dropna() > 0.0).all():
             ax.set_yscale("log")
+            _format_log_axis_ticks(ax)
             panel_title = f"{label} (log scale)"
         if col == "bias":
             ax.axhline(0.0, color="0.4", linewidth=0.9, alpha=0.8)
         ax.set_title(panel_title, fontsize=12)
 
-    legend_ax = axes[len(plot_metrics)]
-    legend_ax.axis("off")
-    handles, labels = axes[0].get_legend_handles_labels()
-    legend_ax.legend(handles, labels, loc="center left", frameon=False, fontsize=10)
+    _add_panel_legends(axes, plot_metrics)
     if note:
-        legend_ax.text(
-            0.0,
-            0.05,
-            note,
-            transform=legend_ax.transAxes,
-            fontsize=10,
-            color="0.25",
-        )
+        fig.text(0.01, 0.015, note, fontsize=10, color="0.25")
 
     for ax in axes[n_panels:]:
         ax.axis("off")
@@ -223,21 +268,22 @@ def plot_relative_metrics(
     metric_labels = relative[["metric", "metric_label"]].drop_duplicates().sort_values("metric")
     plot_metrics = list(metric_labels.itertuples(index=False, name=None))
 
-    palette = cycle(plt.rcParams["axes.prop_cycle"].by_key()["color"])
-    colors = {method: next(palette) for method in methods}
-    marker_cycle = cycle(["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"])
-    markers = {method: next(marker_cycle) for method in methods}
+    colors, markers, linestyles = _style_maps(methods)
 
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
     if output_png is not None:
         output_png.parent.mkdir(parents=True, exist_ok=True)
 
     max_horizon = int(relative["horizon"].max())
-    n_panels = len(plot_metrics) + 1
-    n_cols = 2
-    n_rows = (n_panels + n_cols - 1) // n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(13.5, 3.4 * n_rows), sharex=False)
-    axes = axes.ravel()
+    x_padding = 0.45 if max_horizon > 1 else 0.25
+    n_panels = len(plot_metrics)
+    n_cols = 1
+    n_rows = n_panels
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7.4, 3.0 * n_rows), sharex=False)
+    if n_panels == 1:
+        axes = [axes]
+    else:
+        axes = axes.ravel()
 
     for ax, (metric, label) in zip(axes, plot_metrics):
         panel = relative[relative["metric"].eq(metric)]
@@ -246,29 +292,26 @@ def plot_relative_metrics(
             sub = panel[panel["method"].eq(method)]
             if sub.empty:
                 continue
-            ax.plot(
-                sub["horizon"],
-                sub["relative_pct"],
-                label=method,
-                color=colors.get(method),
-                marker=markers.get(method, "o"),
-                markersize=4.5,
-                linewidth=1.8,
+            _plot_method_line(
+                ax,
+                sub.rename(columns={"relative_pct": "_relative_pct"}),
+                "_relative_pct",
+                method,
+                colors,
+                markers,
+                linestyles,
             )
         ax.axhline(0.0, color="0.4", linewidth=0.9, alpha=0.8)
         ax.set_title(f"{label} vs {baseline_method} (%)", fontsize=12)
-        ax.set_xlim(1, max_horizon)
+        ax.set_xlim(1 - x_padding, max_horizon + x_padding)
         ax.set_xticks(range(1, max_horizon + 1))
         ax.set_xlabel("Horizon")
         ax.set_ylabel("Relative change (%)")
         ax.grid(True, alpha=0.25)
 
-    legend_ax = axes[len(plot_metrics)]
-    legend_ax.axis("off")
-    handles, labels = axes[0].get_legend_handles_labels()
-    legend_ax.legend(handles, labels, loc="center left", frameon=False, fontsize=10)
+    _add_panel_legends(axes, plot_metrics)
     if note:
-        legend_ax.text(0.0, 0.05, note, transform=legend_ax.transAxes, fontsize=10, color="0.25")
+        fig.text(0.01, 0.015, note, fontsize=10, color="0.25")
 
     for ax in axes[n_panels:]:
         ax.axis("off")
