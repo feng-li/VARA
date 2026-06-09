@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from vara.forecast_metrics import _normal_crps
+
 
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1,deepar,nbeats"
 DEFAULT_FORECAST_MODES = "recursive,rolling-origin,closed-loop"
@@ -279,6 +281,8 @@ def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, ma
     by_origin_rows = []
     by_series_rows = []
     summary_rows = []
+    point_long_frames = []
+    variance_long_frames = []
 
     original_by_series = None
     by_series_path = benchmark_dir / "metrics_by_series.csv"
@@ -292,6 +296,34 @@ def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, ma
             raise FileNotFoundError(f"Missing forecast file for model {model!r}: {forecast_path}")
         forecast_wide = pd.read_csv(forecast_path)
         forecast = forecast_wide[selected_series].to_numpy(dtype=float)
+        forecast_date_col = forecast_wide.columns[0]
+        forecast_subset = forecast_wide.loc[:, [forecast_date_col, *selected_series]].copy()
+        forecast_subset.to_csv(output_dir / f"forecast_{model}.csv", index=False)
+        point_long_frames.append(
+            forecast_subset.rename(columns={forecast_date_col: "date"}).melt(
+                id_vars="date",
+                var_name="series_id",
+                value_name=model,
+            )
+        )
+
+        variance = None
+        variance_path = benchmark_dir / f"forecast_variance_{model}.csv"
+        if variance_path.exists():
+            variance_wide = pd.read_csv(variance_path)
+            variance_date_col = variance_wide.columns[0]
+            variance_subset = variance_wide.loc[:, [variance_date_col, *selected_series]].copy()
+            variance_subset.to_csv(output_dir / f"forecast_variance_{model}.csv", index=False)
+            variance = variance_subset[selected_series].to_numpy(dtype=float)
+            variance = np.where(np.isfinite(variance) & (variance >= 0.0), variance, np.nan)
+            variance_long_frames.append(
+                variance_subset.rename(columns={variance_date_col: "date"}).melt(
+                    id_vars="date",
+                    var_name="series_id",
+                    value_name=model,
+                )
+            )
+
         error = forecast - test
         abs_error = np.abs(error)
         squared_error = error ** 2
@@ -301,6 +333,20 @@ def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, ma
             np.abs(test) + np.abs(forecast),
             np.nan,
         )
+        crps = (
+            np.full_like(forecast, np.nan, dtype=float)
+            if variance is None
+            else _normal_crps(forecast, variance, test)
+        )
+        include_variance_metrics = (
+            variance is not None
+            or "crps" in summary.columns
+            or "forecast_variance_mean" in summary.columns
+        )
+
+        error_subset = forecast_subset.copy()
+        error_subset.loc[:, selected_series] = error
+        error_subset.to_csv(output_dir / f"errors_{model}.csv", index=False)
 
         model_by_series = pd.DataFrame({
             "model": model,
@@ -313,6 +359,13 @@ def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, ma
             "mean_actual": _nanmean_or_nan(test, axis=0),
             "mean_forecast": _nanmean_or_nan(forecast, axis=0),
         })
+        if include_variance_metrics:
+            model_by_series["crps"] = _nanmean_or_nan(crps, axis=0)
+            model_by_series["forecast_variance_mean"] = (
+                np.full(len(selected_series), np.nan)
+                if variance is None
+                else _nanmean_or_nan(variance, axis=0)
+            )
         if original_by_series is not None:
             scale_cols = [col for col in ["mase", "rmsse"] if col in original_by_series.columns]
             if scale_cols:
@@ -327,7 +380,7 @@ def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, ma
                 model_by_series[col] = np.nan
         by_series_rows.append(model_by_series)
 
-        by_origin_rows.append(pd.DataFrame({
+        model_by_origin = pd.DataFrame({
             "model": model,
             "date": dates,
             "rmse": np.sqrt(_nanmean_or_nan(squared_error, axis=1)),
@@ -335,7 +388,15 @@ def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, ma
             "mape_pct": _nanmean_or_nan(pct_error, axis=1) * 100.0,
             "smape_pct": _nanmean_or_nan(smape, axis=1) * 100.0,
             "bias": _nanmean_or_nan(error, axis=1),
-        }))
+        })
+        if include_variance_metrics:
+            model_by_origin["crps"] = _nanmean_or_nan(crps, axis=1)
+            model_by_origin["forecast_variance_mean"] = (
+                np.full(len(dates), np.nan)
+                if variance is None
+                else _nanmean_or_nan(variance, axis=1)
+            )
+        by_origin_rows.append(model_by_origin)
 
         new_summary = summary_row.to_dict()
         new_summary.update({
@@ -348,6 +409,14 @@ def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, ma
             "rmsse": float(_nanmean_or_nan(model_by_series["rmsse"].to_numpy(dtype=float))),
             "bias": float(_nanmean_or_nan(error)),
         })
+        if include_variance_metrics:
+            new_summary["crps"] = float(_nanmean_or_nan(crps))
+            new_summary["forecast_variance_mean"] = (
+                np.nan if variance is None else float(_nanmean_or_nan(variance))
+            )
+        else:
+            new_summary.pop("crps", None)
+            new_summary.pop("forecast_variance_mean", None)
         summary_rows.append(new_summary)
 
     subset_summary = pd.DataFrame(summary_rows)
@@ -358,6 +427,16 @@ def _subset_existing_benchmark_outputs(benchmark_dir: Path, output_dir: Path, ma
     subset_by_series.to_csv(output_dir / "metrics_by_series.csv", index=False)
     subset_by_origin.to_csv(output_dir / "metrics_by_origin.csv", index=False)
     test_wide.loc[:, [date_col, *selected_series]].to_csv(output_dir / "test.csv", index=False)
+    if point_long_frames:
+        point_long = point_long_frames[0]
+        for frame in point_long_frames[1:]:
+            point_long = point_long.merge(frame, on=["date", "series_id"], how="outer")
+        point_long.to_csv(output_dir / "benchmark_forecasts_long.csv", index=False)
+    if variance_long_frames:
+        variance_long = variance_long_frames[0]
+        for frame in variance_long_frames[1:]:
+            variance_long = variance_long.merge(frame, on=["date", "series_id"], how="outer")
+        variance_long.to_csv(output_dir / "benchmark_forecast_variance_long.csv", index=False)
     return output_dir
 
 
@@ -634,21 +713,24 @@ def _vara_cmd(
 
 def _plot_cmd(config: dict[str, Any]) -> list[str]:
     comparison_dir = config["comparison_dir"]
-    exclude_methods = ""
     if config.get("dataset") == "tourism":
+        vara_label = config.get("plot_vara_label") or (
+            "VARA on AutoETS residuals (full tsfeatures)"
+            if config.get("include_full_tsfeatures_vara")
+            else "VARA on AutoETS residuals (reduced features)"
+        )
         model_labels = (
-            "vara=VARA on AutoETS residuals (reduced features),"
+            f"vara={vara_label},"
             "ar1_auto_ets=AR(1) on AutoETS residuals,"
             "var1_auto_ets=VAR(1) on AutoETS residuals,"
             "auto_ets=AutoETS,auto_arima=AutoARIMA,nbeats=N-BEATS,"
             "seasonal_naive=Seasonal naive,deepar=DeepAR,ar1=AR(1),var1=VAR(1)"
         )
         method_order = (
-            "VARA on AutoETS residuals (full tsfeatures),"
+            f"{vara_label},"
             "AR(1) on AutoETS residuals,AutoETS,AutoARIMA,N-BEATS,"
             "VAR(1) on AutoETS residuals,Seasonal naive,DeepAR,AR(1),VAR(1)"
         )
-        exclude_methods = "VARA on AutoETS residuals (reduced features)"
     else:
         model_labels = (
             "vara=VARA on AutoETS residuals,auto_ets=AutoETS,auto_arima=AutoARIMA,"
@@ -659,11 +741,15 @@ def _plot_cmd(config: dict[str, Any]) -> list[str]:
             "VARA on AutoETS residuals,AutoETS,AutoARIMA,N-BEATS,DeepAR,AR(1),"
             "AR(1) on seasonal-naive residuals,Seasonal naive,Naive,Drift"
         )
+    results_dirs = [
+        config.get("plot_benchmark_dir", config["benchmark_dir"]),
+        *config.get("plot_vara_dirs", [config["vara_dir"]]),
+    ]
     cmd = [
         sys.executable,
         "scripts/plot_forecast_horizon_metrics.py",
         "--results-dirs",
-        f"{config.get('plot_benchmark_dir', config['benchmark_dir']).as_posix()},{config['vara_dir'].as_posix()}",
+        ",".join(Path(path).as_posix() for path in results_dirs),
         "--model-labels",
         model_labels,
         "--method-order",
@@ -678,8 +764,6 @@ def _plot_cmd(config: dict[str, Any]) -> list[str]:
         (comparison_dir / "horizon_metrics.png").as_posix(),
         "--log-positive-metrics",
     ]
-    if exclude_methods:
-        cmd.extend(["--exclude-methods", exclude_methods])
     return cmd
 
 
@@ -752,6 +836,14 @@ def main() -> None:
     if not args.skip_plot:
         plot_config = dict(config)
         plot_config["plot_benchmark_dir"] = comparison_benchmark_dir
+        if args.dataset == "tourism" and config.get("include_full_tsfeatures_vara"):
+            plot_config["plot_vara_dirs"] = [full_vara_dir]
+            plot_config["plot_vara_label"] = "VARA on AutoETS residuals (full tsfeatures)"
+        elif args.dataset == "tourism":
+            plot_config["plot_vara_dirs"] = [config["vara_dir"]]
+            plot_config["plot_vara_label"] = "VARA on AutoETS residuals (reduced features)"
+        else:
+            plot_config["plot_vara_dirs"] = [path for path, _ in vara_outputs]
         _run(_plot_cmd(plot_config), dry_run=args.dry_run)
 
 
