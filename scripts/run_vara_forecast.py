@@ -136,6 +136,7 @@ class VARAForecastConfig:
     ray_num_cpus: int = 1
     max_cpus_per_task: int = 1
     ray_debug: bool = False
+    clip_nonnegative: bool = False
 
     @property
     def input_path(self) -> Path:
@@ -170,6 +171,7 @@ class VARAForecastConfig:
             "ray_num_cpus": self.ray_num_cpus,
             "max_cpus_per_task": self.max_cpus_per_task,
             "ray_debug": self.ray_debug,
+            "clip_nonnegative": self.clip_nonnegative,
         }
 
 
@@ -1351,6 +1353,7 @@ def run_vara_forecast(
     ray_num_cpus: int = DEFAULT_VARA_FORECAST_CONFIG.ray_num_cpus,
     max_cpus_per_task: int = DEFAULT_VARA_FORECAST_CONFIG.max_cpus_per_task,
     ray_debug: bool = DEFAULT_VARA_FORECAST_CONFIG.ray_debug,
+    clip_nonnegative: bool = DEFAULT_VARA_FORECAST_CONFIG.clip_nonnegative,
 ) -> dict:
     if forecast_scenario not in set(FORECAST_SCENARIOS):
         raise ValueError(f"forecast_scenario must be one of {FORECAST_SCENARIOS}.")
@@ -1434,6 +1437,7 @@ def run_vara_forecast(
         ray_num_cpus=ray_num_cpus,
         max_cpus_per_task=max_cpus_per_task,
         ray_debug=ray_debug,
+        clip_nonnegative=clip_nonnegative,
     )
     input_path = config.input_path
     wide = load_panel_data(
@@ -1686,6 +1690,11 @@ def run_vara_forecast(
     baseline_variance = np.vstack(baseline_variances) if baseline_variances else np.full_like(forecast, np.nan, dtype=float)
     residual_variance = np.vstack(residual_variances) if residual_variances else np.full_like(forecast, np.nan, dtype=float)
 
+    clip_nonnegative = bool(clip_nonnegative)
+    if clip_nonnegative:
+        forecast = np.maximum(forecast, 0.0)
+        residual_forecast = forecast.copy() if forecast_scenario == "direct" else forecast - baseline_forecast
+
     errors = forecast - test
     rmse = float(np.sqrt(np.mean(errors ** 2)))
     mae = float(np.mean(np.abs(errors)))
@@ -1752,6 +1761,7 @@ def run_vara_forecast(
         "ray_num_cpus": int(ray_num_cpus),
         "max_cpus_per_task": int(max_cpus_per_task),
         "forecast_scenario": forecast_scenario,
+        "clip_nonnegative": bool(clip_nonnegative),
         "residual_baseline": _residual_baseline_name(forecast_scenario),
         "residual_transform": residual_transform if forecast_scenario != "direct" else "",
         "baseline_config_model": baseline_config.get("model", ""),
@@ -1789,6 +1799,8 @@ def run_vara_forecast(
         "mase": float(summary["mase"].iloc[0]),
         "rmsse": float(summary["rmsse"].iloc[0]),
         "bias": float(summary["bias"].iloc[0]),
+        "crps": float(summary["crps"].iloc[0]),
+        "forecast_variance_mean": float(summary["forecast_variance_mean"].iloc[0]),
         **fit_diagnostics,
     }
     pd.DataFrame([metrics]).to_csv(output_dir / "metrics.csv", index=False)
@@ -1831,6 +1843,7 @@ def _vara_config_from_args(args: argparse.Namespace) -> VARAForecastConfig:
         ray_num_cpus=args.ray_num_cpus,
         max_cpus_per_task=args.max_cpus_per_task,
         ray_debug=args.ray_debug,
+        clip_nonnegative=args.clip_nonnegative,
     )
 
 
@@ -1940,6 +1953,12 @@ def _parse_args() -> argparse.Namespace:
         help="Ray CPU resources per rolling-origin task.",
     )
     parser.add_argument("--ray-debug", action="store_true", help="Print Ray rolling-origin task start/done logs.")
+    parser.add_argument(
+        "--clip-nonnegative",
+        action="store_true",
+        default=default_config.clip_nonnegative,
+        help="Clip final VARA forecasts at zero before writing outputs and computing metrics.",
+    )
     parser.add_argument(
         "--y-transform",
         type=str,

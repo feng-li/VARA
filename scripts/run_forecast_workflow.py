@@ -705,6 +705,8 @@ def _vara_cmd(
     ]
     if config["feature_path"] is not None:
         cmd.extend(["--feature-path", config["feature_path"].as_posix()])
+    if config.get("clip_nonnegative"):
+        cmd.append("--clip-nonnegative")
     effective_feature_functions = config["feature_functions"] if feature_functions is None else feature_functions
     if effective_feature_functions:
         cmd.extend(["--feature-functions", str(effective_feature_functions)])
