@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from vara.forecast_metrics import _normal_crps
+from vara.run_config import save_run_config
 
 
 DEFAULT_MODELS = "naive,seasonal_naive,drift,auto_ets,auto_arima,ar1,var1,deepar,nbeats"
@@ -59,6 +60,69 @@ M5_MODEL_LABELS = {
     "nbeats": "N-BEATS",
 }
 
+
+WORKFLOW_CONFIG_FILENAME = "config_forecast_workflow.json"
+WORKFLOW_CONFIG_KEYS = (
+    "config_json",
+    "dataset",
+    "data_path",
+    "output_dir",
+    "benchmark_dir",
+    "data_format",
+    "date_col",
+    "series_col",
+    "value_col",
+    "series_suffix",
+    "series_depth",
+    "max_series",
+    "feature_path",
+    "feature_source",
+    "feature_functions",
+    "feature_filter_method",
+    "recompute_features",
+    "skip_features",
+    "standardize_features",
+    "skip_benchmarks",
+    "skip_vara",
+    "skip_plot",
+    "dry_run",
+    "include_full_tsfeatures_vara",
+    "models",
+    "forecast_mode",
+    "freq",
+    "clip_nonnegative",
+    "horizon",
+    "seasonal_lag",
+    "feature_freq",
+    "forecast_scenario",
+    "residual_transform",
+    "y_transform",
+    "residual_shrinkage",
+    "learn_residual_shrinkage",
+    "residual_shrinkage_grid",
+    "grid_size",
+    "ridge",
+    "attention_mode",
+    "attention_top_k",
+    "feature_update_policy",
+    "feature_update_interval",
+    "ray_num_cpus",
+    "max_cpus_per_task",
+    "ray_debug",
+)
+WORKFLOW_PATH_CONFIG_KEYS = {
+    "config_json",
+    "data_path",
+    "output_dir",
+    "benchmark_dir",
+    "feature_path",
+}
+WORKFLOW_OPTIONAL_PATH_CONFIG_KEYS = {
+    "config_json",
+    "benchmark_dir",
+    "feature_path",
+}
+
 DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
     "m5": {
         "data_path": Path("data/m5/long/sales_train_evaluation_long.parquet"),
@@ -85,6 +149,9 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "forecast_scenario": "auto_ets",
         "residual_transform": "center",
         "y_transform": "none",
+        "residual_shrinkage": 1.0,
+        "learn_residual_shrinkage": False,
+        "residual_shrinkage_grid": "0,0.05,0.1,0.2,0.3,0.35,0.4,0.45,0.5,0.6,0.75,1",
         "grid_size": 7,
         "ridge": 0.01,
         "attention_mode": "dense",
@@ -118,6 +185,9 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "forecast_scenario": "auto_ets",
         "residual_transform": "center",
         "y_transform": "none",
+        "residual_shrinkage": 1.0,
+        "learn_residual_shrinkage": False,
+        "residual_shrinkage_grid": "0,0.05,0.1,0.2,0.3,0.35,0.4,0.45,0.5,0.6,0.75,1",
         "grid_size": 7,
         "ridge": 0.01,
         "attention_mode": "dense",
@@ -133,6 +203,56 @@ def _as_config_value(value: Any) -> Any:
     if isinstance(value, Path):
         return value.as_posix()
     return value
+
+
+def _load_config_json_defaults(path: str | Path) -> dict[str, Any]:
+    """Load argparse defaults from a saved forecast-workflow config JSON."""
+    config = json.loads(Path(path).read_text(encoding="utf-8"))
+    defaults: dict[str, Any] = {}
+    for key in WORKFLOW_CONFIG_KEYS:
+        effective_key = f"effective_{key}"
+        if key in config and config[key] is not None:
+            value = config[key]
+        elif effective_key in config:
+            value = config[effective_key]
+        elif key in config:
+            value = config[key]
+        else:
+            continue
+        if key in WORKFLOW_PATH_CONFIG_KEYS and value not in (None, ""):
+            value = Path(value)
+        elif key in WORKFLOW_OPTIONAL_PATH_CONFIG_KEYS and value == "":
+            value = None
+        defaults[key] = value
+    return defaults
+
+
+def _workflow_config_values(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    workflow_extra: dict[str, Any],
+) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for key in WORKFLOW_CONFIG_KEYS:
+        if key in config:
+            values[key] = _as_config_value(config[key])
+        elif hasattr(args, key):
+            values[key] = _as_config_value(getattr(args, key))
+    values.update({key: _as_config_value(value) for key, value in workflow_extra.items()})
+    return values
+
+
+def _save_workflow_config(
+    output_dir: Path,
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    workflow_extra: dict[str, Any],
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_config = _workflow_config_values(args, config, workflow_extra)
+    config_path = output_dir / WORKFLOW_CONFIG_FILENAME
+    save_run_config(config_path, run_config)
+    return config_path
 
 
 def _arg_value(args: argparse.Namespace, defaults: dict[str, Any], name: str) -> Any:
@@ -232,6 +352,240 @@ def _benchmark_dir_for_mode(base_dir: Path, forecast_mode: str, *, use_mode_subd
         return mode_dir
     return base_dir
 
+
+
+
+def _parse_residual_shrinkage_grid(value: str) -> list[float]:
+    values = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        val = float(part)
+        if not np.isfinite(val) or val < 0.0:
+            raise ValueError("residual shrinkage grid values must be finite nonnegative numbers.")
+        values.append(val)
+    if not values:
+        raise ValueError("residual shrinkage grid must contain at least one value.")
+    return sorted(set(values))
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    if path.suffix.lower() == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+
+def _write_table(frame: pd.DataFrame, path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() == ".parquet":
+        frame.to_parquet(path, index=False)
+    else:
+        frame.to_csv(path, index=False)
+
+
+def _validation_panel_path(config: dict[str, Any]) -> Path:
+    data_path = Path(config["data_path"])
+    suffix = data_path.suffix or ".csv"
+    return config["output_dir"] / "validation" / "data" / f"validation_panel{suffix}"
+
+
+def _write_validation_panel(config: dict[str, Any], *, overwrite: bool = False) -> Path:
+    out = _validation_panel_path(config)
+    if out.exists() and not overwrite:
+        print(f"Using existing validation panel: {out}", flush=True)
+        return out
+
+    frame = _read_table(Path(config["data_path"]))
+    date_col = str(config["date_col"])
+    if date_col not in frame.columns:
+        raise ValueError(f"date column {date_col!r} is not in {config['data_path']}")
+    dates = pd.to_datetime(frame[date_col])
+    unique_dates = pd.Series(dates.dropna().unique()).sort_values().reset_index(drop=True)
+    horizon = int(config["horizon"])
+    if len(unique_dates) <= 2 * horizon:
+        raise ValueError(
+            "Need more than two forecast horizons of observations to learn residual shrinkage "
+            f"on validation; got {len(unique_dates)} dates and horizon={horizon}."
+        )
+    cutoff = unique_dates.iloc[-horizon - 1]
+    validation_frame = frame.loc[dates <= cutoff].copy()
+    _write_table(validation_frame, out)
+
+    info = {
+        "source_data_path": str(config["data_path"]),
+        "validation_panel_path": str(out),
+        "horizon": horizon,
+        "inner_train_start": str(unique_dates.iloc[0]),
+        "inner_train_end": str(unique_dates.iloc[-2 * horizon - 1]),
+        "validation_start": str(unique_dates.iloc[-2 * horizon]),
+        "validation_end": str(unique_dates.iloc[-horizon - 1]),
+        "final_test_start": str(unique_dates.iloc[-horizon]),
+        "final_test_end": str(unique_dates.iloc[-1]),
+    }
+    out.with_suffix(out.suffix + ".metadata.json").write_text(json.dumps(info, indent=2) + "\n")
+    return out
+
+
+def _validation_feature_path(config: dict[str, Any]) -> Path | None:
+    feature_path = config.get("feature_path")
+    if feature_path is None:
+        return None
+    feature_path = Path(feature_path)
+    return config["output_dir"] / "validation" / "features" / f"{feature_path.stem}_validation{feature_path.suffix}"
+
+
+def _align_validation_feature_file(validation_feature_path: Path, final_feature_path: Path) -> None:
+    final_features = _read_table(final_feature_path)
+    validation_features = _read_table(validation_feature_path)
+    final_cols = list(final_features.columns)
+    missing = [col for col in final_cols if col not in validation_features.columns]
+    if missing:
+        raise ValueError(
+            f"Validation feature file {validation_feature_path} is missing columns from "
+            f"{final_feature_path}: {missing[:10]}"
+        )
+    aligned = validation_features.loc[:, final_cols].copy()
+    _write_table(aligned, validation_feature_path)
+
+    metadata_path = _feature_metadata_path(validation_feature_path)
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+    meta_cols = {"series_id", "item_id", "dept_id", "cat_id", "store_id", "state_id"}
+    metadata.update({
+        "output_path": str(validation_feature_path),
+        "aligned_to_feature_path": str(final_feature_path),
+        "n_series": int(len(aligned)),
+        "n_columns": int(len(aligned.columns)),
+        "feature_columns": [col for col in aligned.columns if col not in meta_cols],
+    })
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+def _prepare_validation_feature_cmd(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    ray_args: list[str],
+) -> tuple[list[str] | None, Path | None]:
+    if config["feature_source"] != "file":
+        return None, config.get("feature_path")
+    if args.dataset != "m5":
+        raise ValueError("Validation shrinkage with file-based features is currently implemented for M5 only.")
+    final_feature_path = config.get("feature_path")
+    if final_feature_path is None:
+        raise ValueError("M5 file-based validation shrinkage requires a final feature path.")
+
+    validation_feature_path = _validation_feature_path(config)
+    if validation_feature_path is None:
+        raise ValueError("Could not resolve validation feature path.")
+    metadata_path = _feature_metadata_path(validation_feature_path)
+    if validation_feature_path.exists() and metadata_path.exists() and not args.recompute_features:
+        print(f"Using existing validation feature file: {validation_feature_path}", flush=True)
+        _align_validation_feature_file(validation_feature_path, Path(final_feature_path))
+        return None, validation_feature_path
+    if args.skip_features:
+        raise FileNotFoundError(
+            f"Validation feature file is missing: {validation_feature_path}. "
+            "Remove --skip-features or create it first."
+        )
+
+    validation_feature_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "scripts/prepare_m5_attention_features.py",
+        "--out",
+        validation_feature_path.as_posix(),
+        "--holdout",
+        str(2 * int(config["horizon"])),
+        "--filter-method",
+        args.feature_filter_method,
+        "--seasonal-lag",
+        str(config["seasonal_lag"]),
+        "--max-series",
+        str(config["max_series"]),
+        *ray_args,
+    ]
+    if args.standardize_features:
+        cmd.append("--standardize-output")
+    cmd.append("--overwrite")
+    return cmd, validation_feature_path
+
+
+def _read_forecast_block(path: Path) -> tuple[list[str], np.ndarray]:
+    frame = pd.read_csv(path)
+    cols = list(frame.columns[1:])
+    return cols, frame.loc[:, cols].to_numpy(dtype=float)
+
+
+def _learn_residual_shrinkage_from_validation(
+    validation_dir: Path,
+    forecast_mode: str,
+    *,
+    clip_nonnegative: bool,
+    grid: list[float],
+) -> float:
+    modes = _forecast_modes(forecast_mode)
+    mode_dirs = [(mode, validation_dir / mode) for mode in modes] if len(modes) > 1 else [(modes[0], validation_dir)]
+    tests = []
+    baselines = []
+    residuals = []
+    for mode, mode_dir in mode_dirs:
+        if not (mode_dir / "test.csv").exists():
+            raise FileNotFoundError(f"Missing validation VARA outputs for mode={mode}: {mode_dir}")
+        test_cols, test = _read_forecast_block(mode_dir / "test.csv")
+        base_cols, baseline = _read_forecast_block(mode_dir / "baseline_forecast.csv")
+        resid_cols, residual = _read_forecast_block(mode_dir / "residual_forecast.csv")
+        if test_cols != base_cols or test_cols != resid_cols:
+            raise ValueError(f"Validation output columns do not match in {mode_dir}")
+        tests.append(test)
+        baselines.append(baseline)
+        residuals.append(residual)
+
+    y = np.vstack(tests)
+    baseline = np.vstack(baselines)
+    residual = np.vstack(residuals)
+    target_residual = y - baseline
+    denom = float(np.nansum(residual ** 2))
+    lower = min(grid)
+    upper = max(grid)
+    closed_form = 0.0 if denom <= 1e-12 else float(np.nansum(target_residual * residual) / denom)
+    closed_form = float(np.clip(closed_form, lower, upper))
+    candidates = sorted(set(float(v) for v in [*grid, closed_form]))
+
+    rows = []
+    for lam in candidates:
+        forecast = baseline + lam * residual
+        if clip_nonnegative:
+            forecast = np.maximum(forecast, 0.0)
+        errors = forecast - y
+        rmse = float(np.sqrt(np.nanmean(errors ** 2)))
+        mae = float(np.nanmean(np.abs(errors)))
+        bias = float(np.nanmean(errors))
+        rows.append({"residual_shrinkage": lam, "rmse": rmse, "mae": mae, "bias": bias})
+
+    scores = pd.DataFrame(rows).sort_values(["rmse", "mae", "residual_shrinkage"]).reset_index(drop=True)
+    validation_dir.mkdir(parents=True, exist_ok=True)
+    scores.to_csv(validation_dir / "residual_shrinkage_validation_scores.csv", index=False)
+    best = scores.iloc[0].to_dict()
+    report = {
+        "selected_residual_shrinkage": float(best["residual_shrinkage"]),
+        "validation_rmse": float(best["rmse"]),
+        "validation_mae": float(best["mae"]),
+        "validation_bias": float(best["bias"]),
+        "closed_form_residual_shrinkage": float(closed_form),
+        "clip_nonnegative": bool(clip_nonnegative),
+        "forecast_mode": str(forecast_mode),
+        "validation_dir": str(validation_dir),
+    }
+    (validation_dir / "residual_shrinkage.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(
+        "Learned residual shrinkage from validation: "
+        f"lambda={report['selected_residual_shrinkage']:.6g}, "
+        f"validation_rmse={report['validation_rmse']:.6g}",
+        flush=True,
+    )
+    return float(best["residual_shrinkage"])
 
 def _safe_pct(numer: np.ndarray, denom: np.ndarray) -> np.ndarray:
     return numer / np.where(np.abs(denom) > 1e-12, np.abs(denom), np.nan)
@@ -461,6 +815,12 @@ def _comparison_benchmark_dir(config: dict[str, Any]) -> Path:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a forecasting benchmark plus VARA workflow.")
+    parser.add_argument(
+        "--config-json",
+        type=Path,
+        default=None,
+        help="Load defaults from a saved config_forecast_workflow.json. CLI flags override JSON values.",
+    )
     parser.add_argument("--dataset", choices=sorted(DATASET_DEFAULTS), default="m5")
     parser.add_argument("--data-path", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -477,14 +837,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-source", choices=["file", "tsfeatures", "tourism", "hybrid", "seasonal-corr", "seasonal-predictive"], default=None)
     parser.add_argument("--feature-functions", type=str, default=None)
     parser.add_argument("--feature-filter-method", choices=["direct", "seasonal_naive", "auto_ets"], default="auto_ets")
-    parser.add_argument("--recompute-features", action="store_true")
-    parser.add_argument("--skip-features", action="store_true")
+    parser.add_argument("--recompute-features", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--skip-features", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--standardize-features", action=argparse.BooleanOptionalAction, default=True)
 
-    parser.add_argument("--skip-benchmarks", action="store_true")
-    parser.add_argument("--skip-vara", action="store_true")
-    parser.add_argument("--skip-plot", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-benchmarks", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--skip-vara", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--skip-plot", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--include-full-tsfeatures-vara", action=argparse.BooleanOptionalAction, default=None)
 
     parser.add_argument("--models", type=str, default=None)
@@ -498,6 +858,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--forecast-scenario", choices=["direct", "seasonal-naive-residual", "auto_ets", "statsmodels_ets", "seasonal_ets"], default=None)
     parser.add_argument("--residual-transform", choices=["center", "standardize"], default=None)
     parser.add_argument("--y-transform", default=None)
+    parser.add_argument("--residual-shrinkage", type=float, default=None)
+    parser.add_argument(
+        "--learn-residual-shrinkage",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Learn one global residual shrinkage value on the validation window before the final VARA run.",
+    )
+    parser.add_argument(
+        "--residual-shrinkage-grid",
+        type=str,
+        default=None,
+        help="Comma-separated candidate lambdas used when learning residual shrinkage on validation.",
+    )
 
     parser.add_argument("--grid-size", type=int, default=None)
     parser.add_argument("--ridge", type=float, default=None)
@@ -507,7 +880,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-update-interval", type=int, default=None)
     parser.add_argument("--ray-num-cpus", type=int, default=52)
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
-    parser.add_argument("--ray-debug", action="store_true")
+    parser.add_argument("--ray-debug", action=argparse.BooleanOptionalAction, default=False)
+
+    config_args, _ = parser.parse_known_args()
+    if config_args.config_json:
+        parser.set_defaults(**_load_config_json_defaults(config_args.config_json))
     return parser.parse_args()
 
 
@@ -554,6 +931,9 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "forecast_scenario": _arg_value(args, defaults, "forecast_scenario"),
         "residual_transform": _arg_value(args, defaults, "residual_transform"),
         "y_transform": _arg_value(args, defaults, "y_transform"),
+        "residual_shrinkage": _arg_value(args, defaults, "residual_shrinkage"),
+        "learn_residual_shrinkage": _arg_value(args, defaults, "learn_residual_shrinkage"),
+        "residual_shrinkage_grid": _arg_value(args, defaults, "residual_shrinkage_grid"),
         "grid_size": _arg_value(args, defaults, "grid_size"),
         "ridge": _arg_value(args, defaults, "ridge"),
         "attention_mode": _arg_value(args, defaults, "attention_mode"),
@@ -689,6 +1069,8 @@ def _vara_cmd(
         str(config["y_transform"]),
         "--forecast-mode",
         str(config["forecast_mode"]),
+        "--residual-shrinkage",
+        str(config["residual_shrinkage"]),
         "--feature-update-policy",
         str(config["feature_update_policy"]),
         "--feature-update-interval",
@@ -782,9 +1164,13 @@ def main() -> None:
     output_dir = config["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    saved_config = {key: _as_config_value(value) for key, value in vars(args).items()}
-    saved_config.update({f"effective_{key}": _as_config_value(value) for key, value in config.items()})
-    (output_dir / "workflow_config.json").write_text(json.dumps(saved_config, indent=2, sort_keys=True) + "\n")
+    workflow_extra: dict[str, Any] = {}
+
+    def _write_workflow_config() -> None:
+        workflow_extra["workflow_config_path"] = (output_dir / WORKFLOW_CONFIG_FILENAME).as_posix()
+        _save_workflow_config(output_dir, args, config, workflow_extra)
+
+    _write_workflow_config()
 
     ray_args = _ray_args(args)
     feature_cmd = _prepare_feature_cmd(args, config, ray_args)
@@ -802,6 +1188,52 @@ def main() -> None:
     if config.get("include_full_tsfeatures_vara"):
         vara_outputs.append((full_vara_dir, "VARA on AutoETS residuals, full tsfeatures"))
 
+    if config.get("learn_residual_shrinkage") and not args.skip_vara:
+        if config["forecast_scenario"] == "direct":
+            raise ValueError("Residual shrinkage can only be learned for residual-correction scenarios.")
+        if args.dry_run:
+            print(
+                "Dry run: residual shrinkage would be learned on the validation window "
+                "before the final VARA run.",
+                flush=True,
+            )
+        else:
+            validation_panel = _write_validation_panel(config, overwrite=args.recompute_features)
+            validation_config = dict(config)
+            validation_config["data_path"] = validation_panel
+            validation_config["clip_nonnegative"] = False
+            validation_config["residual_shrinkage"] = 1.0
+            validation_feature_cmd, validation_feature_path = _prepare_validation_feature_cmd(
+                args,
+                config,
+                ray_args,
+            )
+            if validation_feature_cmd is not None:
+                _run(validation_feature_cmd, dry_run=False)
+                if validation_feature_path is not None and config.get("feature_path") is not None:
+                    _align_validation_feature_file(validation_feature_path, Path(config["feature_path"]))
+            validation_config["feature_path"] = validation_feature_path
+            validation_panel_args = _common_panel_args(validation_config)
+            validation_vara_dir = output_dir / "validation" / "vara"
+            _run(
+                _vara_cmd(args, validation_config, validation_panel_args, ray_args, output_dir=validation_vara_dir),
+                dry_run=False,
+            )
+            learned_lambda = _learn_residual_shrinkage_from_validation(
+                validation_vara_dir,
+                str(config["forecast_mode"]),
+                clip_nonnegative=bool(config["clip_nonnegative"]),
+                grid=_parse_residual_shrinkage_grid(str(config["residual_shrinkage_grid"])),
+            )
+            config["residual_shrinkage"] = learned_lambda
+            workflow_extra.update({
+                "learned_residual_shrinkage": learned_lambda,
+                "residual_shrinkage_validation_dir": validation_vara_dir.as_posix(),
+                "residual_shrinkage_validation_panel": validation_panel.as_posix(),
+                "residual_shrinkage_validation_feature_path": "" if validation_feature_path is None else validation_feature_path.as_posix(),
+            })
+            _write_workflow_config()
+
     if not args.skip_vara:
         _run(_vara_cmd(args, config, panel_args, ray_args), dry_run=args.dry_run)
         if config.get("include_full_tsfeatures_vara"):
@@ -817,7 +1249,8 @@ def main() -> None:
                 dry_run=args.dry_run,
             )
 
-    if not args.dry_run:
+    have_comparison_benchmark = (not args.dry_run) and _benchmark_outputs_exist(comparison_benchmark_dir)
+    if not args.dry_run and have_comparison_benchmark:
         comparison = _comparison_table(comparison_benchmark_dir, vara_outputs, config["comparison_dir"])
         if args.dataset == "tourism":
             comparison_display = comparison.copy()
@@ -834,8 +1267,13 @@ def main() -> None:
         show.extend([col for col in ["crps", "forecast_variance_mean"] if col in comparison_display.columns])
         print(f"\n{args.dataset} benchmark and VARA comparison:")
         print(comparison_display[show].to_string(index=False))
+    elif not args.dry_run:
+        print(
+            f"Skipping comparison because benchmark outputs were not found: {comparison_benchmark_dir}",
+            flush=True,
+        )
 
-    if not args.skip_plot:
+    if not args.skip_plot and (args.dry_run or have_comparison_benchmark):
         plot_config = dict(config)
         plot_config["plot_benchmark_dir"] = comparison_benchmark_dir
         if args.dataset == "tourism" and config.get("include_full_tsfeatures_vara"):
