@@ -137,6 +137,7 @@ class VARAForecastConfig:
     max_cpus_per_task: int = 1
     ray_debug: bool = False
     clip_nonnegative: bool = False
+    residual_shrinkage: float = 1.0
 
     @property
     def input_path(self) -> Path:
@@ -172,6 +173,7 @@ class VARAForecastConfig:
             "max_cpus_per_task": self.max_cpus_per_task,
             "ray_debug": self.ray_debug,
             "clip_nonnegative": self.clip_nonnegative,
+            "residual_shrinkage": self.residual_shrinkage,
         }
 
 
@@ -1354,12 +1356,18 @@ def run_vara_forecast(
     max_cpus_per_task: int = DEFAULT_VARA_FORECAST_CONFIG.max_cpus_per_task,
     ray_debug: bool = DEFAULT_VARA_FORECAST_CONFIG.ray_debug,
     clip_nonnegative: bool = DEFAULT_VARA_FORECAST_CONFIG.clip_nonnegative,
+    residual_shrinkage: float = DEFAULT_VARA_FORECAST_CONFIG.residual_shrinkage,
 ) -> dict:
     if forecast_scenario not in set(FORECAST_SCENARIOS):
         raise ValueError(f"forecast_scenario must be one of {FORECAST_SCENARIOS}.")
     forecast_mode = _normalize_forecast_mode(forecast_mode)
     if residual_transform not in {"center", "standardize"}:
         raise ValueError("residual_transform must be 'center' or 'standardize'.")
+    residual_shrinkage = float(residual_shrinkage)
+    if not np.isfinite(residual_shrinkage) or residual_shrinkage < 0.0:
+        raise ValueError("residual_shrinkage must be a finite nonnegative number.")
+    if forecast_scenario == "direct" and residual_shrinkage != 1.0:
+        raise ValueError("residual_shrinkage is only defined for residual-correction scenarios.")
     input_feature_path = feature_path
     if input_feature_path is not None:
         if feature_source == "tsfeatures":
@@ -1438,6 +1446,7 @@ def run_vara_forecast(
         max_cpus_per_task=max_cpus_per_task,
         ray_debug=ray_debug,
         clip_nonnegative=clip_nonnegative,
+        residual_shrinkage=residual_shrinkage,
     )
     input_path = config.input_path
     wide = load_panel_data(
@@ -1690,6 +1699,12 @@ def run_vara_forecast(
     baseline_variance = np.vstack(baseline_variances) if baseline_variances else np.full_like(forecast, np.nan, dtype=float)
     residual_variance = np.vstack(residual_variances) if residual_variances else np.full_like(forecast, np.nan, dtype=float)
 
+    if forecast_scenario != "direct" and residual_shrinkage != 1.0:
+        residual_forecast = residual_shrinkage * residual_forecast
+        residual_variance = (residual_shrinkage ** 2) * residual_variance
+        forecast = baseline_forecast + residual_forecast
+        forecast_variance = baseline_variance + residual_variance
+
     clip_nonnegative = bool(clip_nonnegative)
     if clip_nonnegative:
         forecast = np.maximum(forecast, 0.0)
@@ -1762,6 +1777,7 @@ def run_vara_forecast(
         "max_cpus_per_task": int(max_cpus_per_task),
         "forecast_scenario": forecast_scenario,
         "clip_nonnegative": bool(clip_nonnegative),
+        "residual_shrinkage": float(residual_shrinkage),
         "residual_baseline": _residual_baseline_name(forecast_scenario),
         "residual_transform": residual_transform if forecast_scenario != "direct" else "",
         "baseline_config_model": baseline_config.get("model", ""),
@@ -1844,6 +1860,7 @@ def _vara_config_from_args(args: argparse.Namespace) -> VARAForecastConfig:
         max_cpus_per_task=args.max_cpus_per_task,
         ray_debug=args.ray_debug,
         clip_nonnegative=args.clip_nonnegative,
+        residual_shrinkage=args.residual_shrinkage,
     )
 
 
@@ -1958,6 +1975,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         default=default_config.clip_nonnegative,
         help="Clip final VARA forecasts at zero before writing outputs and computing metrics.",
+    )
+    parser.add_argument(
+        "--residual-shrinkage",
+        type=float,
+        default=default_config.residual_shrinkage,
+        help="Multiply VARA residual forecasts by this scalar before adding them back to the baseline.",
     )
     parser.add_argument(
         "--y-transform",
