@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from itertools import cycle
 from pathlib import Path
 
@@ -112,7 +113,7 @@ def _plot_method_line(ax, sub: pd.DataFrame, col: str, method: str, colors: dict
     )
 
 
-def _add_panel_legends(axes, plot_metrics: list[tuple[str, str]]) -> None:
+def _add_panel_legends(axes, plot_metrics: list[tuple[str, str]], *, legend_ncol: int = 2) -> None:
     for ax, (metric, _) in zip(axes, plot_metrics):
         handles, labels = ax.get_legend_handles_labels()
         if handles:
@@ -120,7 +121,7 @@ def _add_panel_legends(axes, plot_metrics: list[tuple[str, str]]) -> None:
                 handles,
                 labels,
                 loc="lower right" if metric == "bias" else "upper right",
-                ncol=2,
+                ncol=legend_ncol,
                 frameon=True,
                 framealpha=0.88,
                 facecolor="white",
@@ -133,9 +134,29 @@ def _add_panel_legends(axes, plot_metrics: list[tuple[str, str]]) -> None:
             )
 
 
-def _format_log_axis_ticks(ax) -> None:
+def _dense_log_ticks_from_limits(ymin: float, ymax: float) -> list[float]:
+    if ymin <= 0.0 or ymax <= 0.0 or not math.isfinite(ymin) or not math.isfinite(ymax):
+        return []
+    mantissas = (1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0)
+    lo_exp = math.floor(math.log10(ymin)) - 1
+    hi_exp = math.ceil(math.log10(ymax)) + 1
+    ticks: list[float] = []
+    for exp in range(lo_exp, hi_exp + 1):
+        scale = 10.0 ** exp
+        ticks.extend(value for value in (m * scale for m in mantissas) if ymin * 0.98 <= value <= ymax * 1.02)
+    return ticks
+
+
+def _format_log_axis_ticks(ax, *, dense: bool = False) -> None:
+    if dense:
+        ticks = _dense_log_ticks_from_limits(*ax.get_ylim())
+        if len(ticks) >= 4:
+            ax.set_yticks(ticks)
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.2f}"))
+            ax.yaxis.set_minor_formatter(NullFormatter())
+            return
     ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 3.0, 5.0)))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.2f}"))
     ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=(1.5, 2.5, 4.0, 6.0, 7.0, 8.0, 9.0)))
     ax.yaxis.set_minor_formatter(NullFormatter())
 
@@ -150,6 +171,7 @@ def plot_horizon_metrics(
     title: str = "",
     note: str = "",
     log_positive_metrics: bool = False,
+    legend_ncol: int = 2,
 ) -> None:
     plot_metrics = [(col, label) for col, label in metric_labels.items() if col in metrics.columns]
     if not plot_metrics:
@@ -186,13 +208,15 @@ def plot_horizon_metrics(
         ax.grid(True, alpha=0.25)
         if log_positive_metrics and col != "bias" and (metrics[col].dropna() > 0.0).all():
             ax.set_yscale("log")
-            _format_log_axis_ticks(ax)
+            _format_log_axis_ticks(ax, dense=col == "rmse")
             panel_title = f"{label} (log scale)"
         if col == "bias":
             ax.axhline(0.0, color="0.4", linewidth=0.9, alpha=0.8)
+        if not (log_positive_metrics and col != "bias" and (metrics[col].dropna() > 0.0).all()):
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.2f}"))
         ax.set_title(panel_title, fontsize=12)
 
-    _add_panel_legends(axes, plot_metrics)
+    _add_panel_legends(axes, plot_metrics, legend_ncol=legend_ncol)
     if note:
         fig.text(0.01, 0.015, note, fontsize=10, color="0.25")
 
@@ -260,6 +284,7 @@ def plot_relative_metrics(
     method_order: list[str] | None = None,
     title: str = "",
     note: str = "",
+    legend_ncol: int = 2,
 ) -> None:
     if relative.empty:
         raise ValueError("Relative metrics table is empty.")
@@ -307,9 +332,10 @@ def plot_relative_metrics(
         ax.set_xticks(range(1, max_horizon + 1))
         ax.set_xlabel("Horizon")
         ax.set_ylabel("Relative change (%)")
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.2f}"))
         ax.grid(True, alpha=0.25)
 
-    _add_panel_legends(axes, plot_metrics)
+    _add_panel_legends(axes, plot_metrics, legend_ncol=legend_ncol)
     if note:
         fig.text(0.01, 0.015, note, fontsize=10, color="0.25")
 
@@ -376,6 +402,7 @@ def main() -> None:
         action="store_true",
         help="Use a log y-axis for strictly positive absolute metric panels except bias.",
     )
+    parser.add_argument("--legend-ncol", type=int, default=2, help="Number of columns in each panel legend.")
     parser.add_argument(
         "--relative-baseline",
         type=str,
@@ -421,6 +448,7 @@ def main() -> None:
         title=args.title,
         note=args.note,
         log_positive_metrics=args.log_positive_metrics,
+        legend_ncol=max(1, args.legend_ncol),
     )
 
     if args.relative_baseline:
@@ -442,6 +470,7 @@ def main() -> None:
             method_order=method_order,
             title=args.title,
             note=args.note,
+            legend_ncol=max(1, args.legend_ncol),
         )
         print(f"Saved relative horizon metrics to: {relative_output_csv}")
         print(f"Saved relative horizon metrics plot to: {relative_output_pdf}")

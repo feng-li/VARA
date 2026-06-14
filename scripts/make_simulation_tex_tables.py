@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Generate LaTeX simulation tables from VARA simulation CSV outputs.
 
+The default output matches the simulation table layout used in
+``docs/VAR_Atten.tex``: one design table, two low-dimensional tables split by
+innovation distribution, and one combined high-dimensional table.
+
 Example
 -------
 python scripts/make_simulation_tex_tables.py \
-    --results-dir outputs/paper_simulation \
+    --results-dir outputs/paper_final_low_screened_z_p8_12_16_G2_3_4_actual \
+                  outputs/paper_final_high_screened_z_gamma_a_design \
     --tex-dir docs/generated_tables
-
-Then merge the generated tables into the manuscript with
-``\\input{generated_tables/simulation_tables.tex}`` from ``docs/VAR_Atten.tex``.
 """
 
 from __future__ import annotations
@@ -23,11 +25,10 @@ from pandas.errors import EmptyDataError
 
 
 TABLE_PREFIXES = {
-    "simulation_design": ["table_simulation_setup_"],
-    "simulation_low_rmse": ["table_simulation_low_rmse_"],
-    "simulation_low_ecp": ["table_simulation_low_ecp_"],
-    "simulation_high_rmse": ["table_simulation_high_rmse_"],
-    "simulation_high_ecp": ["table_simulation_high_ecp_"],
+    "simulation_design": ["table_simulation_setup_", "summary_full_simulation_"],
+    "simulation_low_normal": ["summary_full_simulation_", "table_simulation_publication_wide_"],
+    "simulation_low_laplace": ["summary_full_simulation_", "table_simulation_publication_wide_"],
+    "simulation_high_combined": ["summary_full_simulation_", "table_simulation_publication_wide_"],
     "simulation_xhigh_diagnostics": [
         "table_simulation_publication_wide_",
         "summary_full_simulation_",
@@ -38,12 +39,32 @@ TABLE_PREFIXES = {
 
 OUTPUT_FILES = {
     "simulation_design": "simulation_design.tex",
-    "simulation_low_rmse": "simulation_low_rmse.tex",
-    "simulation_low_ecp": "simulation_low_ecp.tex",
-    "simulation_high_rmse": "simulation_high_rmse.tex",
-    "simulation_high_ecp": "simulation_high_ecp.tex",
+    "simulation_low_normal": "simulation_low_normal.tex",
+    "simulation_low_laplace": "simulation_low_laplace.tex",
+    "simulation_high_combined": "simulation_high_combined.tex",
     "simulation_xhigh_diagnostics": "simulation_xhigh_diagnostics.tex",
 }
+
+
+DEFAULT_TABLES = [
+    "simulation_design",
+    "simulation_low_normal",
+    "simulation_low_laplace",
+    "simulation_high_combined",
+]
+
+
+LEGACY_TABLE_ALIASES = {
+    "simulation_low_rmse": "simulation_low_normal",
+    "simulation_low_ecp": "simulation_low_laplace",
+    "simulation_high_rmse": "simulation_high_combined",
+    "simulation_high_ecp": "simulation_high_combined",
+}
+
+
+METRIC_COLS = ["RMSE_gamma", "RMSE_alpha", "RMSE_beta", "RMSE_sigma2"]
+ECP_COLS = ["ECP_gamma", "ECP_alpha", "ECP_beta", "ECP_sigma2"]
+HIGH_ECP_COLS = ["ECP_alpha", "ECP_beta", "ECP_sigma2"]
 
 
 def _latex_escape(value: object) -> str:
@@ -74,7 +95,7 @@ def _is_missing(value: object) -> bool:
         return False
 
 
-def _format_number(value: object, digits: int = 4) -> str:
+def _format_number(value: object, digits: int = 3) -> str:
     if _is_missing(value):
         return "--"
     try:
@@ -83,9 +104,19 @@ def _format_number(value: object, digits: int = 4) -> str:
         return _latex_escape(value)
     if not math.isfinite(number):
         return "--"
-    if number.is_integer() and abs(number) >= 10:
-        return str(int(number))
-    return f"{number:.{digits}f}".rstrip("0").rstrip(".")
+    return f"{number:.{digits}f}"
+
+
+def _format_time(value: object) -> str:
+    if _is_missing(value):
+        return "--"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _latex_escape(value)
+    if not math.isfinite(number):
+        return "--"
+    return f"{number:.2f}"
 
 
 def _format_int(value: object) -> str:
@@ -97,19 +128,12 @@ def _format_int(value: object) -> str:
         return _latex_escape(value)
 
 
-def _metric_table_g(row: pd.Series) -> object:
-    if "G" in row and not _is_missing(row.get("G")):
-        return row.get("G")
-    setting = str(row.get("setting", "")).lower()
-    try:
-        T = int(float(row.get("T")))
-    except (TypeError, ValueError):
-        return ""
-    if setting == "low":
-        return 2
-    if setting == "high":
-        return {100: 5, 200: 10, 500: 15}.get(T, "")
-    return ""
+def _format_set(values: Sequence[object]) -> str:
+    clean = []
+    for value in values:
+        if not _is_missing(value):
+            clean.append(_format_int(value))
+    return ", ".join(dict.fromkeys(clean)) if clean else "--"
 
 
 def _dist_label(value: object) -> str:
@@ -121,41 +145,17 @@ def _dist_label(value: object) -> str:
     return labels.get(str(value).lower(), _latex_escape(value))
 
 
+def _ordered_dists(values: Sequence[object]) -> List[object]:
+    order = {"normal": 0, "laplace": 1}
+    return sorted(values, key=lambda x: order.get(str(x).lower(), 99))
+
+
 def _method_label(value: object) -> str:
     labels = {
         "qmle": "QMLE",
         "two_stage": "Two-stage",
     }
     return labels.get(str(value).lower(), _latex_escape(value))
-
-
-def _setting_label(setting: object, attention_mode: object = "") -> str:
-    if str(attention_mode).lower() == "topk":
-        return "Extra-high-dimensional"
-    labels = {
-        "low": "Low-dimensional",
-        "high": "High-dimensional",
-    }
-    return labels.get(str(setting).lower(), _latex_escape(setting))
-
-
-def _p_rule_label(value: object) -> str:
-    text = str(value)
-    if text == "floor(sqrt(T))":
-        return r"$[\sqrt T]$"
-    if text == "floor(T^1.5)":
-        return r"$[T^{1.5}]$"
-    return _latex_escape(value)
-
-
-def _attention_label(row: pd.Series) -> str:
-    mode = str(row.get("attention_mode", "dense")).lower()
-    if mode == "topk":
-        k = row.get("attention_top_k", "")
-        if not _is_missing(k) and str(k) != "":
-            return f"Sparse top-$K$ ($K={_format_int(k)}$)"
-        return "Sparse top-$K$"
-    return "Dense"
 
 
 def _read_csv(path: Optional[Path]) -> pd.DataFrame:
@@ -168,17 +168,45 @@ def _read_csv(path: Optional[Path]) -> pd.DataFrame:
 
 
 def _latest_matching_csv(results_dir: Path, prefixes: Sequence[str], config_tag: Optional[str] = None) -> Optional[Path]:
-    candidates: List[Path] = []
+    # Prefix order is meaningful. For example, metric tables prefer
+    # summary_full_simulation_* because it contains cpu_sec_mean;
+    # publication_wide is only a fallback for older outputs.
     for prefix in prefixes:
+        candidates: List[Path] = []
         if config_tag:
             path = results_dir / f"{prefix}{config_tag}.csv"
             if path.exists():
                 candidates.append(path)
         else:
             candidates.extend(results_dir.glob(f"{prefix}*.csv"))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
+        if candidates:
+            return max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
+    return None
+
+
+def _latest_matching_csvs(
+    results_dirs: Sequence[Path],
+    prefixes: Sequence[str],
+    config_tag: Optional[str] = None,
+) -> List[Path]:
+    paths: List[Path] = []
+    for results_dir in results_dirs:
+        path = _latest_matching_csv(results_dir, prefixes, config_tag=config_tag)
+        if path is not None:
+            paths.append(path)
+    return paths
+
+
+def _read_and_concat(paths: Sequence[Path]) -> pd.DataFrame:
+    frames = [_read_csv(path) for path in paths]
+    frames = [df for df in frames if not df.empty]
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True, sort=False)
+    if "setting" in df.columns and "dist" in df.columns and "T" in df.columns:
+        subset = [col for col in ["setting", "dist", "T", "p", "q", "G", "method"] if col in df.columns]
+        df = df.drop_duplicates(subset=subset, keep="last")
+    return df.reset_index(drop=True)
 
 
 def _sort_table(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
@@ -190,10 +218,12 @@ def _sort_table(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
     return df.sort_values(existing, kind="stable").reset_index(drop=True)
 
 
-def _table_environment(label: str, caption: str, body: str) -> str:
+def _table_environment(label: str, caption: str, body: str, *, color_red: bool = False) -> str:
+    color = "\\color{red}\n" if color_red else ""
     return (
-        "\\begin{table}[htbp]\n"
+        "\\begin{table}[!htbp]\n"
         "\\centering\n"
+        f"{color}"
         f"\\caption{{{caption}}}\n"
         f"\\label{{{label}}}\n"
         f"{body}\n"
@@ -204,116 +234,176 @@ def _table_environment(label: str, caption: str, body: str) -> str:
 def render_design_table(setup: pd.DataFrame) -> str:
     if setup.empty:
         rows = [
-            r"Low-dimensional & 100, 200, 500 & 5, 10, 20 & 50 & 2 & Normal, Laplace & QMLE, two-stage & Dense \\",
-            r"High-dimensional & 100, 200, 500 & 100, 300, 1000 & 50 & 5, 10, 15 & Normal, Laplace & Two-stage & Dense \\",
-            r"Extra-high-dimensional & TBD & TBD & 50 & TBD & Normal & Two-stage & Sparse top-$K$ \\",
+            r"Low & 100, 200, 500 & $8, 12, 16$ & 50 & $2, 3, 4$ & Normal, Laplace & QMLE, two-stage  \\",
+            r"High & 100, 200, 500 & $100, 300, 1000$ & 50 & $5, 10, 15$ & Normal, Laplace & Two-stage  \\",
         ]
     else:
-        group_cols = ["setting", "q", "attention_mode", "attention_top_k"]
-        existing_group_cols = [c for c in group_cols if c in setup.columns]
         rows = []
-        grouped = setup.groupby(existing_group_cols, dropna=False, sort=False) if existing_group_cols else [((), setup)]
-        for _, group in grouped:
-            first = group.iloc[0]
-            setting = _setting_label(first.get("setting", ""), first.get("attention_mode", ""))
-            t_values = ", ".join(_format_int(v) for v in sorted(group["T"].dropna().unique())) if "T" in group else "--"
-            p_values = ", ".join(_format_int(v) for v in sorted(group["p"].dropna().unique())) if "p" in group else _p_rule_label(first.get("p_rule", ""))
-            q_values = ", ".join(_format_int(v) for v in sorted(group["q"].dropna().unique())) if "q" in group else "--"
-            g_values = ", ".join(_format_int(v) for v in sorted(group["G"].dropna().unique())) if "G" in group else "--"
-            innovations = ", ".join(_dist_label(v) for v in sorted(group["dist"].dropna().unique())) if "dist" in group else "--"
-            estimator = "QMLE, two-stage" if str(first.get("setting", "")).lower() == "low" else "Two-stage"
+        for setting in ["low", "high"]:
+            group = setup.loc[setup["setting"].astype(str).str.lower() == setting] if "setting" in setup else pd.DataFrame()
+            if group.empty:
+                continue
+            t_values = _format_set(sorted(group["T"].dropna().unique())) if "T" in group else "--"
+            p_values = _format_set(sorted(group["p"].dropna().unique())) if "p" in group else "--"
+            q_values = _format_set(sorted(group["q"].dropna().unique())) if "q" in group else "--"
+            g_values = _format_set(sorted(group["G"].dropna().unique())) if "G" in group else "--"
+            dist_values = ", ".join(_dist_label(v) for v in _ordered_dists(group["dist"].dropna().unique())) if "dist" in group else "--"
+            method = "QMLE, two-stage" if setting == "low" else "Two-stage"
             rows.append(
                 " & ".join([
-                    setting,
+                    "Low" if setting == "low" else "High",
                     t_values,
-                    p_values,
+                    f"${p_values}$" if "," in p_values else p_values,
                     q_values,
-                    g_values,
-                    innovations,
-                    estimator,
-                    _attention_label(first),
-                ]) + r" \\"
+                    f"${g_values}$" if "," in g_values else g_values,
+                    dist_values,
+                    method,
+                ]) + r"  \\" 
             )
-
     body = (
-        "\\begin{threeparttable}\n"
-        "\\small\n"
-        "\\setlength{\\tabcolsep}{3pt}\n"
-        "\\renewcommand{\\arraystretch}{1.15}\n"
-        "\\begin{tabular}{@{}>{\\RaggedRight\\arraybackslash}p{0.18\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.12\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.12\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.05\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.05\\textwidth}\n"
-        ">{\\RaggedRight\\arraybackslash}p{0.13\\textwidth}\n"
-        ">{\\RaggedRight\\arraybackslash}p{0.14\\textwidth}\n"
-        ">{\\RaggedRight\\arraybackslash}p{0.12\\textwidth}@{}}\n"
-        "\\toprule\n"
-        "Setting & $T$ & $p$ & $q$ & $G$ & Innovations & Estimator & Attention design \\\\\n"
-        "\\midrule\n"
-        + "\n".join(rows)
+        "\\resizebox{\\textwidth}{!}{%\n"
+        "  \\begin{tabular}{ccccccc}\n"
+        "    \\toprule\n"
+        "    Dimension & $T$ & $p$ & $q$ & $G$ & Innovations & Method \\\\\n"
+        "    \\midrule\n"
+        + "\n".join(f"    {row}" for row in rows)
         + "\n\\bottomrule\n"
         "\\end{tabular}\n"
-        "\\begin{tablenotes}\n"
-        "\\footnotesize\n"
-        "\\item Notes: The table is generated from the simulation setup CSV. The paper uses $\\gamma$ for code ``eta\\_a'', $\\alpha$ for code ``beta'', and $\\beta$ for code ``gamma\\_a''.\n"
-        "\\end{tablenotes}\n"
-        "\\end{threeparttable}"
+        "}"
     )
     return _table_environment("tab:simulation_design", "Simulation designs.", body)
 
 
-def _metric_rows(
-    df: pd.DataFrame,
-    metric_cols: Sequence[str],
-    include_method: bool,
-) -> List[str]:
-    if df.empty:
-        width = 6 + len(metric_cols) if include_method else 5 + len(metric_cols)
-        return [" & ".join(["--"] * width) + r" \\"]
+def _filter_summary(df: pd.DataFrame, *, setting: str, dist: Optional[str] = None) -> pd.DataFrame:
+    if df.empty or "setting" not in df.columns:
+        return pd.DataFrame()
+    out = df.loc[df["setting"].astype(str).str.lower() == setting].copy()
+    if dist is not None and "dist" in out.columns:
+        out = out.loc[out["dist"].astype(str).str.lower() == dist].copy()
+    return out
 
-    rows = []
-    sort_cols = ["dist", "T", "method"] if include_method else ["dist", "T"]
-    df = _sort_table(df, sort_cols)
-    for _, row in df.iterrows():
-        cells = [_dist_label(row.get("dist", ""))]
-        if include_method:
-            cells.append(_method_label(row.get("method", "")))
-        cells.append(_format_int(row.get("T", "")))
-        cells.append(_format_int(row.get("p", "")))
-        cells.append(_format_int(row.get("q", "")))
-        cells.append(_format_int(_metric_table_g(row)))
-        cells.extend(_format_number(row.get(col, math.nan)) for col in metric_cols)
-        rows.append(" & ".join(cells) + r" \\")
+
+def _method_order_key(method: object) -> int:
+    order = {"qmle": 0, "two_stage": 1}
+    return order.get(str(method).lower(), 99)
+
+
+def _low_group_rows(group: pd.DataFrame, *, include_cmidrule: bool) -> List[str]:
+    rows: List[str] = []
+    group = group.sort_values("method", key=lambda s: s.map(_method_order_key), kind="stable")
+    n_methods = len(group)
+    multirow = 2 * n_methods
+    first_data_row = True
+    tpg = f"$({_format_int(group.iloc[0].get('T'))},{_format_int(group.iloc[0].get('p'))},{_format_int(group.iloc[0].get('G'))})$"
+    for _, row in group.iterrows():
+        prefix = f"\\multirow{{{multirow}}}{{*}}{{{tpg}}}" if first_data_row else ""
+        rows.append(
+            " & ".join([
+                prefix,
+                _method_label(row.get("method", "")),
+                *[_format_number(row.get(col)) for col in METRIC_COLS],
+                _format_time(row.get("cpu_sec_mean")),
+            ]) + r" \\"
+        )
+        rows.append(
+            " & ".join([
+                "",
+                "",
+                *[f"({_format_number(row.get(col))})" for col in ECP_COLS],
+                "",
+            ]) + r" \\"
+        )
+        first_data_row = False
+    if include_cmidrule:
+        rows.append(r"\cmidrule(l){2-7}")
     return rows
 
 
-def render_metric_table(
-    df: pd.DataFrame,
-    *,
-    label: str,
-    caption: str,
-    metric_cols: Sequence[str],
-    headers: Sequence[str],
-    include_method: bool,
-) -> str:
-    column_spec = "ll" if include_method else "l"
-    column_spec += "c" * (4 + len(metric_cols))
-    header_cells = ["Innovation"]
-    if include_method:
-        header_cells.append("Method")
-    header_cells.extend(["$T$", "$p$", "$q$", "$G$", *headers])
+def render_low_innovation_table(df: pd.DataFrame, *, dist: str) -> str:
+    filtered = _filter_summary(df, setting="low", dist=dist)
+    filtered = _sort_table(filtered, ["T", "p", "G", "method"])
+    rows: List[str] = []
+    if filtered.empty:
+        rows = [r"-- & -- & -- & -- & -- & -- & -- \\"]
+    else:
+        groups = list(filtered.groupby(["T", "p", "G"], sort=True, dropna=False))
+        for idx, (_, group) in enumerate(groups):
+            rows.extend(_low_group_rows(group, include_cmidrule=idx < len(groups) - 1))
+    dist_label = str(dist).lower()
+    label = f"tab:simulation_low_{dist_label}"
+    caption = f"Low-dimensional setting under {dist_label} innovations: RMSEs, ECPs reported below in parentheses, and average computation time."
     body = (
-        f"\\begin{{tabular}}{{{column_spec}}}\n"
+        "\\begin{tabular*}{\\textwidth}{@{\\extracolsep{\\fill}}llccccc}\n"
         "\\toprule\n"
-        + " & ".join(header_cells)
-        + " \\\\\n"
+        "$(T,p,G)$ & Method & $\\gamma$ & $\\balpha$ & $\\bbeta$ & $\\bsigma^2$ & Time (sec.) \\\\\n"
         "\\midrule\n"
-        + "\n".join(_metric_rows(df, metric_cols, include_method=include_method))
+        + "\n".join(rows)
         + "\n\\bottomrule\n"
-        "\\end{tabular}"
+        "\\end{tabular*}"
     )
-    return _table_environment(label, caption, body)
+    return _table_environment(label, caption, body, color_red=True)
+
+
+def _high_dist_rows(group: pd.DataFrame, *, include_midrule: bool) -> List[str]:
+    rows: List[str] = []
+    group = _sort_table(group, ["T", "p", "G"])
+    n_settings = len(group)
+    first_data_row = True
+    dist = _dist_label(group.iloc[0].get("dist", ""))
+    for _, row in group.iterrows():
+        prefix = f"\\multirow{{{2 * n_settings}}}{{*}}{{{dist}}}" if first_data_row else ""
+        tpg = f"$({_format_int(row.get('T'))},{_format_int(row.get('p'))},{_format_int(row.get('G'))})$"
+        rows.append(
+            " & ".join([
+                prefix,
+                tpg,
+                *[_format_number(row.get(col)) for col in METRIC_COLS],
+                _format_time(row.get("cpu_sec_mean")),
+            ]) + r" \\"
+        )
+        rows.append(
+            " & ".join([
+                "",
+                "",
+                "",
+                *[f"({_format_number(row.get(col))})" for col in HIGH_ECP_COLS],
+                "",
+            ]) + r" \\"
+        )
+        first_data_row = False
+    if include_midrule:
+        rows.append(r"\midrule")
+    return rows
+
+
+def render_high_combined_table(df: pd.DataFrame) -> str:
+    filtered = _filter_summary(df, setting="high")
+    filtered = _sort_table(filtered, ["dist", "T", "p", "G"])
+    rows: List[str] = []
+    if filtered.empty:
+        rows = [r"-- & -- & -- & -- & -- & -- & -- \\"]
+    else:
+        # Match the manuscript order: normal first, then Laplace.
+        order = {"normal": 0, "laplace": 1}
+        dists = _ordered_dists(filtered["dist"].dropna().unique())
+        for idx, dist in enumerate(dists):
+            group = filtered.loc[filtered["dist"].astype(str).str.lower() == str(dist).lower()]
+            rows.extend(_high_dist_rows(group, include_midrule=idx < len(dists) - 1))
+    body = (
+        "\\begin{tabular*}{\\textwidth}{@{\\extracolsep{\\fill}}llccccc}\n"
+        "\\toprule\n"
+        "Innovation & $(T,p,G)$ & $\\gamma$ & $\\balpha$ & $\\bbeta$ & $\\bsigma^2$ & Time (sec.) \\\\\n"
+        "\\midrule\n"
+        + "\n".join(rows)
+        + "\n\\bottomrule\n"
+        "\\end{tabular*}"
+    )
+    return _table_environment(
+        "tab:simulation_high_combined",
+        "High-dimensional setting: RMSEs, ECPs reported below in parentheses, and average computation time.",
+        body,
+        color_red=True,
+    )
 
 
 def _format_pair(row: pd.Series, pos_col: str, neg_col: str) -> str:
@@ -345,11 +435,7 @@ def render_xhigh_diagnostics(df: pd.DataFrame) -> str:
         df = _sort_table(df, ["T", "p", "dist", "method"])
         for _, row in df.iterrows():
             cache_recall = _format_pair(row, "TopK_cache_recall_pos_mean", "TopK_cache_recall_neg_mean")
-            score_loss = _format_pair(
-                row,
-                "TopK_cache_score_loss_pos_abs_mean",
-                "TopK_cache_score_loss_neg_abs_mean",
-            )
+            score_loss = _format_pair(row, "TopK_cache_score_loss_pos_abs_mean", "TopK_cache_score_loss_neg_abs_mean")
             rows.append(
                 " & ".join([
                     _format_int(row.get("T", "")),
@@ -363,28 +449,13 @@ def render_xhigh_diagnostics(df: pd.DataFrame) -> str:
             )
 
     body = (
-        "\\begin{threeparttable}\n"
-        "\\small\n"
-        "\\setlength{\\tabcolsep}{3pt}\n"
-        "\\renewcommand{\\arraystretch}{1.15}\n"
-        "\\begin{tabular}{@{}>{\\centering\\arraybackslash}p{0.09\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.12\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.07\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.14\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.15\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.15\\textwidth}\n"
-        ">{\\centering\\arraybackslash}p{0.13\\textwidth}@{}}\n"
+        "\\begin{tabular}{ccccccc}\n"
         "\\toprule\n"
         "$T$ & $p$ & $K$ & $\\RMSE_{\\gamma}$ & Boundary rate & Cache recall & Score loss \\\\\n"
         "\\midrule\n"
         + "\n".join(rows)
         + "\n\\bottomrule\n"
-        "\\end{tabular}\n"
-        "\\begin{tablenotes}\n"
-        "\\footnotesize\n"
-        "\\item Notes: Cache recall and score loss are reported as positive/negative eta-direction diagnostics, computed by comparing the sparse top-$K$ cache with exact row-to-all top-$K$ attention on sampled rows.\n"
-        "\\end{tablenotes}\n"
-        "\\end{threeparttable}"
+        "\\end{tabular}"
     )
     return _table_environment(
         "tab:simulation_xhigh_diagnostics",
@@ -394,48 +465,15 @@ def render_xhigh_diagnostics(df: pd.DataFrame) -> str:
 
 
 def render_table(table_name: str, df: pd.DataFrame) -> str:
-    gamma = r"$\gamma$"
-    alpha = r"$\balpha$"
-    beta = r"$\bbeta$"
-    sigma2 = r"$\bsigma^2$"
+    table_name = LEGACY_TABLE_ALIASES.get(table_name, table_name)
     if table_name == "simulation_design":
         return render_design_table(df)
-    if table_name == "simulation_low_rmse":
-        return render_metric_table(
-            df,
-            label="tab:simulation_low_rmse",
-            caption="Low-dimensional setting: RMSE.",
-            metric_cols=["RMSE_gamma", "RMSE_alpha", "RMSE_beta", "RMSE_sigma2"],
-            headers=[gamma, alpha, beta, sigma2],
-            include_method=True,
-        )
-    if table_name == "simulation_low_ecp":
-        return render_metric_table(
-            df,
-            label="tab:simulation_low_ecp",
-            caption="Low-dimensional setting: empirical coverage probabilities.",
-            metric_cols=["ECP_gamma", "ECP_alpha", "ECP_beta", "ECP_sigma2"],
-            headers=[gamma, alpha, beta, sigma2],
-            include_method=True,
-        )
-    if table_name == "simulation_high_rmse":
-        return render_metric_table(
-            df,
-            label="tab:simulation_high_rmse",
-            caption="High-dimensional setting: RMSE.",
-            metric_cols=["RMSE_gamma", "RMSE_alpha", "RMSE_beta", "RMSE_sigma2"],
-            headers=[gamma, alpha, beta, sigma2],
-            include_method=False,
-        )
-    if table_name == "simulation_high_ecp":
-        return render_metric_table(
-            df,
-            label="tab:simulation_high_ecp",
-            caption="High-dimensional setting: empirical coverage probabilities.",
-            metric_cols=["ECP_alpha", "ECP_beta", "ECP_sigma2"],
-            headers=[alpha, beta, sigma2],
-            include_method=False,
-        )
+    if table_name == "simulation_low_normal":
+        return render_low_innovation_table(df, dist="normal")
+    if table_name == "simulation_low_laplace":
+        return render_low_innovation_table(df, dist="laplace")
+    if table_name == "simulation_high_combined":
+        return render_high_combined_table(df)
     if table_name == "simulation_xhigh_diagnostics":
         return render_xhigh_diagnostics(df)
     raise ValueError(f"Unknown table name: {table_name}")
@@ -443,22 +481,24 @@ def render_table(table_name: str, df: pd.DataFrame) -> str:
 
 def generate_tex_tables(
     *,
-    results_dir: Path,
+    results_dirs: Sequence[Path],
     tex_dir: Path,
     config_tag: Optional[str] = None,
     table_names: Optional[Iterable[str]] = None,
 ) -> Dict[str, Path]:
     tex_dir.mkdir(parents=True, exist_ok=True)
-    selected_tables = list(table_names) if table_names is not None else list(OUTPUT_FILES)
+    selected_tables = list(table_names) if table_names is not None else list(DEFAULT_TABLES)
     written: Dict[str, Path] = {}
-    for table_name in selected_tables:
+    for requested_name in selected_tables:
+        table_name = LEGACY_TABLE_ALIASES.get(requested_name, requested_name)
         if table_name not in OUTPUT_FILES:
-            raise ValueError(f"Unknown table name: {table_name}")
-        csv_path = _latest_matching_csv(results_dir, TABLE_PREFIXES[table_name], config_tag=config_tag)
-        df = _read_csv(csv_path)
+            raise ValueError(f"Unknown table name: {requested_name}")
+        csv_paths = _latest_matching_csvs(results_dirs, TABLE_PREFIXES[table_name], config_tag=config_tag)
+        df = _read_and_concat(csv_paths)
         tex = "% Auto-generated by scripts/make_simulation_tex_tables.py\n"
-        if csv_path is not None:
-            tex += f"% Source: {csv_path}\n"
+        if csv_paths:
+            for csv_path in csv_paths:
+                tex += f"% Source: {csv_path}\n"
         else:
             tex += "% Source: no matching CSV found; placeholder emitted\n"
         tex += render_table(table_name, df)
@@ -473,9 +513,12 @@ def generate_tex_tables(
         "% \\input{generated_tables/simulation_tables.tex}",
         "",
     ]
-    for table_name in selected_tables:
-        combined_lines.append((tex_dir / OUTPUT_FILES[table_name]).read_text(encoding="utf-8"))
-        combined_lines.append("")
+    for requested_name in selected_tables:
+        table_name = LEGACY_TABLE_ALIASES.get(requested_name, requested_name)
+        out_file = tex_dir / OUTPUT_FILES[table_name]
+        if out_file.exists():
+            combined_lines.append(out_file.read_text(encoding="utf-8"))
+            combined_lines.append("")
     combined.write_text("\n".join(combined_lines), encoding="utf-8")
     written["combined"] = combined
     return written
@@ -483,7 +526,8 @@ def generate_tex_tables(
 
 def _parse_table_list(text: str) -> List[str]:
     values = [item.strip() for item in text.split(",") if item.strip()]
-    unknown = sorted(set(values) - set(OUTPUT_FILES))
+    valid = set(OUTPUT_FILES) | set(LEGACY_TABLE_ALIASES)
+    unknown = sorted(set(values) - valid)
     if unknown:
         raise argparse.ArgumentTypeError(f"Unknown table name(s): {', '.join(unknown)}")
     return values
@@ -491,7 +535,13 @@ def _parse_table_list(text: str) -> List[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate LaTeX VARA simulation tables from CSV outputs.")
-    parser.add_argument("--results-dir", type=Path, default=Path("outputs/results"))
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        nargs="+",
+        default=[Path("outputs/results")],
+        help="One or more result folders. Latest matching CSVs are combined across folders.",
+    )
     parser.add_argument("--tex-dir", type=Path, default=Path("docs/generated_tables"))
     parser.add_argument(
         "--config-tag",
@@ -502,13 +552,13 @@ def main() -> None:
     parser.add_argument(
         "--tables",
         type=_parse_table_list,
-        default=list(OUTPUT_FILES),
+        default=list(DEFAULT_TABLES),
         help=f"Comma-separated table names. Choices: {','.join(OUTPUT_FILES)}",
     )
     args = parser.parse_args()
 
     written = generate_tex_tables(
-        results_dir=args.results_dir,
+        results_dirs=args.results_dir,
         tex_dir=args.tex_dir,
         config_tag=args.config_tag,
         table_names=args.tables,
