@@ -15,9 +15,35 @@ Keep the following files if you want to reproduce the full M5 application from s
 
 The first three files are the raw inputs. The long parquet file is generated from `sales_train_evaluation.parquet` and `calendar.parquet`, but it is kept because it is the direct input used by the forecasting scripts.
 
+## Fetching the raw CSV files
+
+The original M5 CSV files can be downloaded from the Kaggle M5 Forecasting Accuracy competition data page:
+
+```text
+https://www.kaggle.com/c/m5-forecasting-accuracy/data
+```
+
+The essential CSV files for the full M5 application are:
+
+```text
+data/m5/sales_train_evaluation.csv
+data/m5/calendar.csv
+data/m5/sell_prices.csv
+```
+
+Convert them to the raw parquet files expected by the repository with:
+
+```bash
+python scripts/prepare_m5_raw_parquet.py \
+  --csv-dir data/m5/ \
+  --output-dir data/m5 \
+  --files sales_train_evaluation,calendar,sell_prices \
+  --overwrite
+```
+
 ## Scripts that generate M5 parquet files
 
-The repository assumes the raw M5 parquet files already exist under `data/m5`:
+The raw M5 parquet files under `data/m5` are generated from the extracted M5 CSV files:
 
 ```text
 data/m5/sales_train_evaluation.parquet
@@ -25,12 +51,11 @@ data/m5/calendar.parquet
 data/m5/sell_prices.parquet
 ```
 
-There is currently no dedicated script in `scripts/` that converts the original Kaggle/M5 CSV files into these three raw parquet files. They are treated as prepared raw inputs.
-
-The scripts that generate derived parquet files are:
+The scripts that generate raw and derived parquet files are:
 
 | Script | Inputs | Outputs | Purpose |
 | --- | --- | --- | --- |
+| `scripts/prepare_m5_raw_parquet.py` | Extracted M5 CSV files from Kaggle, especially `sales_train_evaluation.csv`, `calendar.csv`, and `sell_prices.csv` | `sales_train_evaluation.parquet`, `calendar.parquet`, `sell_prices.parquet`, and `m5_raw_parquet_metadata.json` | Converts the original M5 CSV files into the raw parquet inputs used by the forecasting and feature-preparation scripts. |
 | `scripts/prepare_m5_long.py` | `sales_train_evaluation.parquet`, `sales_train_validation.parquet`, and `calendar.parquet` | `long/sales_train_evaluation_long.parquet`, `long/sales_train_validation_long.parquet`, and matching `*_series_metadata.parquet` files | Converts the wide M5 sales matrices with `d_*` columns into forecasting-ready long panels with `date`, `series_id`, `value`, `d`, and hierarchy columns. |
 | `scripts/prepare_m5_attention_features.py` | `sales_train_evaluation.parquet`, `calendar.parquet`, and `sell_prices.parquet` | M5 attention feature parquet files, plus `.metadata.json` companions | Computes domain-feature rows for VARA attention, including demand summaries, calendar/event/SNAP response, price summaries, release timing, and hierarchy indicators. Supports `direct`, `seasonal_naive`, and `auto_ets` filters. |
 | `scripts/prepare_m5_features.py` | Same as `scripts/prepare_m5_attention_features.py` | Same as `scripts/prepare_m5_attention_features.py` | Compatibility wrapper for the attention-feature preparation script. |
@@ -39,7 +64,7 @@ For the current paper-style M5 application, `scripts/prepare_m5_long.py` is used
 
 ## Regenerating the long panel
 
-If `long/sales_train_evaluation_long.parquet` is missing, regenerate it with:
+If `long/sales_train_evaluation_long.parquet` is missing, first make sure the raw parquet files have been created from the CSV files, then regenerate the long panel with:
 
 ```bash
 python scripts/prepare_m5_long.py \
