@@ -102,18 +102,6 @@ python scripts/prepare_m5_attention_features.py \
   --standardize-output
 ```
 
-## Optional files
-
-The following files are useful for other experiments but are not essential for the current full M5 application based on the evaluation split.
-
-| File | Reason optional |
-| --- | --- |
-| `sales_train_validation.parquet` | Raw official validation-split sales history. Only needed for validation-split experiments or official competition-style comparisons. |
-| `long/sales_train_validation_long.parquet` | Long-format version of the validation split. Regenerable from `sales_train_validation.parquet` and `calendar.parquet`. |
-| `long/sales_train_validation_series_metadata.parquet` | Series metadata for the validation split. |
-| `long/sales_train_evaluation_series_metadata.parquet` | Useful metadata for the evaluation split, but the main long panel already includes hierarchy columns. |
-| `sample_submission.parquet` | Official competition submission template. Not used by the current forecasting scripts. |
-
 ## Minimal keep list
 
 For the full paper-style M5 application, the minimal data inputs are:
