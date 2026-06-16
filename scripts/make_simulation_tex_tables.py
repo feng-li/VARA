@@ -329,8 +329,9 @@ def render_low_innovation_table(df: pd.DataFrame, *, dist: str) -> str:
         groups = list(filtered.groupby(["T", "p", "G"], sort=True, dropna=False))
         for idx, (_, group) in enumerate(groups):
             rows.extend(_low_group_rows(group, include_cmidrule=idx < len(groups) - 1))
-    dist_label = str(dist).lower()
-    label = f"tab:simulation_low_{dist_label}"
+    dist_key = str(dist).lower()
+    dist_label = _dist_label(dist_key)
+    label = f"tab:simulation_low_{dist_key}"
     caption = f"Low-dimensional setting under {dist_label} innovations: RMSEs, ECPs reported below in parentheses, and average computation time."
     body = (
         "\\begin{tabular*}{\\textwidth}{@{\\extracolsep{\\fill}}llccccc}\n"
@@ -341,7 +342,7 @@ def render_low_innovation_table(df: pd.DataFrame, *, dist: str) -> str:
         + "\n\\bottomrule\n"
         "\\end{tabular*}"
     )
-    return _table_environment(label, caption, body, color_red=True)
+    return _table_environment(label, caption, body)
 
 
 def _high_dist_rows(group: pd.DataFrame, *, include_midrule: bool) -> List[str]:
@@ -402,7 +403,6 @@ def render_high_combined_table(df: pd.DataFrame) -> str:
         "tab:simulation_high_combined",
         "High-dimensional setting: RMSEs, ECPs reported below in parentheses, and average computation time.",
         body,
-        color_red=True,
     )
 
 
