@@ -16,8 +16,10 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 import pandas as pd
 
+from vara.forecast_metrics import out_of_sample_r2, out_of_sample_r2_zero
 
-DEFAULT_METRICS = "rmse=RMSE,crps=CRPS,bias=Bias"
+
+DEFAULT_METRICS = "rmse=RMSE,oos_r2=OOS R2,oos_r2_zero=OOS R2 Zero,crps=CRPS,bias=Bias"
 
 
 def _parse_mapping(value: str) -> dict[str, str]:
@@ -40,6 +42,68 @@ def _parse_results_dirs(value: str, search_root: Path) -> list[Path]:
     return sorted(path.parent for path in search_root.glob("*/metrics_by_origin.csv"))
 
 
+def _result_test_path(results_dir: Path) -> Path | None:
+    for name in ("test.csv", "tourism_test.csv"):
+        path = results_dir / name
+        if path.exists():
+            return path
+    return None
+
+
+def _result_forecast_path(results_dir: Path, model: str) -> Path | None:
+    candidates = (
+        [results_dir / "forecast.csv", results_dir / "forecast_transformed.csv"]
+        if model == "vara"
+        else [results_dir / f"forecast_{model}.csv"]
+    )
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _add_oos_r2_by_horizon(df: pd.DataFrame, results_dir: Path) -> pd.DataFrame:
+    missing_metrics = [col for col in ("oos_r2", "oos_r2_zero") if col not in df.columns]
+    if not missing_metrics:
+        return df
+    test_path = _result_test_path(results_dir)
+    if test_path is None:
+        return df
+
+    test_wide = pd.read_csv(test_path)
+    series_cols = list(test_wide.columns[1:])
+    test = test_wide.loc[:, series_cols].to_numpy(dtype=float)
+
+    frames = []
+    for model in df["model"].dropna().astype(str).unique():
+        forecast_path = _result_forecast_path(results_dir, model)
+        if forecast_path is None:
+            continue
+        forecast_wide = pd.read_csv(forecast_path)
+        date_col = forecast_wide.columns[0]
+        forecast_wide["date"] = pd.to_datetime(forecast_wide[date_col])
+        if any(col not in forecast_wide.columns for col in series_cols):
+            continue
+        forecast = forecast_wide.loc[:, series_cols].to_numpy(dtype=float)
+        if forecast.shape != test.shape:
+            continue
+        values = {
+            "model": model,
+            "date": forecast_wide["date"],
+        }
+        error = forecast - test
+        if "oos_r2" in missing_metrics:
+            values["oos_r2"] = out_of_sample_r2(error, test, axis=1)
+        if "oos_r2_zero" in missing_metrics:
+            values["oos_r2_zero"] = out_of_sample_r2_zero(error, test, axis=1)
+        frames.append(pd.DataFrame(values))
+
+    if not frames:
+        return df
+    oos = pd.concat(frames, ignore_index=True)
+    return df.merge(oos, on=["model", "date"], how="left")
+
+
 def _load_metrics_by_horizon(
     results_dirs: list[Path],
     *,
@@ -54,6 +118,7 @@ def _load_metrics_by_horizon(
         if "model" not in df.columns or "date" not in df.columns:
             raise ValueError(f"{path} must contain model and date columns.")
         df["date"] = pd.to_datetime(df["date"])
+        df = _add_oos_r2_by_horizon(df, results_dir)
         df["source_dir"] = results_dir.as_posix()
         df["method"] = df["model"].map(model_labels).fillna(df["model"])
         frames.append(df)
@@ -77,6 +142,8 @@ def _load_metrics_by_horizon(
         "mase",
         "rmsse",
         "bias",
+        "oos_r2",
+        "oos_r2_zero",
         "crps",
         "forecast_variance_mean",
     ]
@@ -97,6 +164,10 @@ def _is_vara_method(method: str) -> bool:
     return str(method).strip().startswith("VARA")
 
 
+def _is_signed_metric(metric: str) -> bool:
+    return metric in {"bias", "oos_r2", "oos_r2_zero"}
+
+
 def _plot_method_line(ax, sub: pd.DataFrame, col: str, method: str, colors: dict, markers: dict, linestyles: dict) -> None:
     is_vara = _is_vara_method(method)
     ax.plot(
@@ -113,28 +184,41 @@ def _plot_method_line(ax, sub: pd.DataFrame, col: str, method: str, colors: dict
     )
 
 
-def _add_panel_legends(axes, plot_metrics: list[tuple[str, str]], *, legend_ncol: int = 2) -> None:
+def _legend_columns(labels: list[str], *, legend_ncol: int | None, legend_rows: int) -> int:
+    if legend_ncol is not None:
+        return max(1, int(legend_ncol))
+    return max(1, math.ceil(len(labels) / max(1, int(legend_rows))))
+
+
+def _add_panel_legends(
+    axes,
+    plot_metrics: list[tuple[str, str]],
+    *,
+    legend_ncol: int | None = None,
+    legend_rows: int = 2,
+) -> None:
     for ax, (metric, _) in zip(axes, plot_metrics):
         handles, labels = ax.get_legend_handles_labels()
         if handles:
+            ncol = _legend_columns(labels, legend_ncol=legend_ncol, legend_rows=legend_rows)
             ax.legend(
                 handles,
                 labels,
-                loc="lower right" if metric == "bias" else "upper right",
-                ncol=legend_ncol,
+                loc="lower right" if _is_signed_metric(metric) else "upper right",
+                ncol=ncol,
                 frameon=True,
                 framealpha=0.88,
                 facecolor="white",
                 edgecolor="0.75",
-                fontsize=7.2,
-                columnspacing=0.65,
-                handlelength=1.8,
-                handletextpad=0.4,
+                fontsize=6.6 if ncol > 4 else 7.2,
+                columnspacing=0.45 if ncol > 4 else 0.65,
+                handlelength=1.35 if ncol > 4 else 1.8,
+                handletextpad=0.25 if ncol > 4 else 0.4,
                 borderpad=0.35,
             )
 
 
-def _dense_log_ticks_from_limits(ymin: float, ymax: float) -> list[float]:
+def _dense_log_ticks_from_limits(ymin: float, ymax: float, *, max_ticks: int = 6) -> list[float]:
     if ymin <= 0.0 or ymax <= 0.0 or not math.isfinite(ymin) or not math.isfinite(ymax):
         return []
     mantissas = (1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0)
@@ -144,7 +228,22 @@ def _dense_log_ticks_from_limits(ymin: float, ymax: float) -> list[float]:
     for exp in range(lo_exp, hi_exp + 1):
         scale = 10.0 ** exp
         ticks.extend(value for value in (m * scale for m in mantissas) if ymin * 0.98 <= value <= ymax * 1.02)
-    return ticks
+    if len(ticks) <= max_ticks:
+        return ticks
+
+    log_min = math.log10(ticks[0])
+    log_max = math.log10(ticks[-1])
+    targets = [log_min + i * (log_max - log_min) / (max_ticks - 1) for i in range(max_ticks)]
+    selected: list[float] = []
+    for target in targets:
+        tick = min(ticks, key=lambda value: abs(math.log10(value) - target))
+        if tick not in selected:
+            selected.append(tick)
+
+    if len(selected) < max_ticks:
+        remaining = [tick for tick in ticks if tick not in selected]
+        selected.extend(remaining[: max_ticks - len(selected)])
+    return sorted(selected[:max_ticks])
 
 
 def _format_log_axis_ticks(ax, *, dense: bool = False) -> None:
@@ -171,7 +270,8 @@ def plot_horizon_metrics(
     title: str = "",
     note: str = "",
     log_positive_metrics: bool = False,
-    legend_ncol: int = 2,
+    legend_ncol: int | None = None,
+    legend_rows: int = 2,
 ) -> None:
     plot_metrics = [(col, label) for col, label in metric_labels.items() if col in metrics.columns]
     if not plot_metrics:
@@ -206,17 +306,17 @@ def plot_horizon_metrics(
         ax.set_xticks(range(1, max_horizon + 1))
         ax.set_xlabel("Horizon")
         ax.grid(True, alpha=0.25)
-        if log_positive_metrics and col != "bias" and (metrics[col].dropna() > 0.0).all():
+        if log_positive_metrics and not _is_signed_metric(col) and (metrics[col].dropna() > 0.0).all():
             ax.set_yscale("log")
             _format_log_axis_ticks(ax, dense=col == "rmse")
             panel_title = f"{label} (log scale)"
-        if col == "bias":
+        if _is_signed_metric(col):
             ax.axhline(0.0, color="0.4", linewidth=0.9, alpha=0.8)
-        if not (log_positive_metrics and col != "bias" and (metrics[col].dropna() > 0.0).all()):
+        if not (log_positive_metrics and not _is_signed_metric(col) and (metrics[col].dropna() > 0.0).all()):
             ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.2f}"))
         ax.set_title(panel_title, fontsize=12)
 
-    _add_panel_legends(axes, plot_metrics, legend_ncol=legend_ncol)
+    _add_panel_legends(axes, plot_metrics, legend_ncol=legend_ncol, legend_rows=legend_rows)
     if note:
         fig.text(0.01, 0.015, note, fontsize=10, color="0.25")
 
@@ -284,7 +384,8 @@ def plot_relative_metrics(
     method_order: list[str] | None = None,
     title: str = "",
     note: str = "",
-    legend_ncol: int = 2,
+    legend_ncol: int | None = None,
+    legend_rows: int = 2,
 ) -> None:
     if relative.empty:
         raise ValueError("Relative metrics table is empty.")
@@ -335,7 +436,7 @@ def plot_relative_metrics(
         ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.2f}"))
         ax.grid(True, alpha=0.25)
 
-    _add_panel_legends(axes, plot_metrics, legend_ncol=legend_ncol)
+    _add_panel_legends(axes, plot_metrics, legend_ncol=legend_ncol, legend_rows=legend_rows)
     if note:
         fig.text(0.01, 0.015, note, fontsize=10, color="0.25")
 
@@ -402,7 +503,18 @@ def main() -> None:
         action="store_true",
         help="Use a log y-axis for strictly positive absolute metric panels except bias.",
     )
-    parser.add_argument("--legend-ncol", type=int, default=2, help="Number of columns in each panel legend.")
+    parser.add_argument(
+        "--legend-ncol",
+        type=int,
+        default=0,
+        help="Number of columns in each panel legend. Use 0 to derive columns from --legend-rows.",
+    )
+    parser.add_argument(
+        "--legend-rows",
+        type=int,
+        default=2,
+        help="Target number of rows in each panel legend when --legend-ncol is 0.",
+    )
     parser.add_argument(
         "--relative-baseline",
         type=str,
@@ -448,7 +560,8 @@ def main() -> None:
         title=args.title,
         note=args.note,
         log_positive_metrics=args.log_positive_metrics,
-        legend_ncol=max(1, args.legend_ncol),
+        legend_ncol=None if args.legend_ncol <= 0 else args.legend_ncol,
+        legend_rows=max(1, args.legend_rows),
     )
 
     if args.relative_baseline:
@@ -470,7 +583,8 @@ def main() -> None:
             method_order=method_order,
             title=args.title,
             note=args.note,
-            legend_ncol=max(1, args.legend_ncol),
+            legend_ncol=None if args.legend_ncol <= 0 else args.legend_ncol,
+            legend_rows=max(1, args.legend_rows),
         )
         print(f"Saved relative horizon metrics to: {relative_output_csv}")
         print(f"Saved relative horizon metrics plot to: {relative_output_pdf}")

@@ -82,6 +82,8 @@ class TourismBenchmarkTests(unittest.TestCase):
             self.assertTrue(np.isfinite(long_variance["ar1"]).all())
             self.assertIn("crps", summary.columns)
             self.assertIn("forecast_variance_mean", summary.columns)
+            self.assertIn("oos_r2", summary.columns)
+            self.assertIn("oos_r2_zero", summary.columns)
 
             seasonal_wide = pd.read_csv(output_dir / "forecast_seasonal_naive.csv")
             self.assertEqual(list(seasonal_wide["AAAAll"]), [32.0, 33.0])

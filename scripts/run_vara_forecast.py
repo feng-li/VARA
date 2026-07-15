@@ -138,6 +138,7 @@ class VARAForecastConfig:
     ray_debug: bool = False
     clip_nonnegative: bool = False
     residual_shrinkage: float = 1.0
+    residual_shrinkage_file: Path | None = None
 
     @property
     def input_path(self) -> Path:
@@ -174,6 +175,7 @@ class VARAForecastConfig:
             "ray_debug": self.ray_debug,
             "clip_nonnegative": self.clip_nonnegative,
             "residual_shrinkage": self.residual_shrinkage,
+            "residual_shrinkage_file": self.residual_shrinkage_file,
         }
 
 
@@ -1307,6 +1309,81 @@ def _write_wide_output(
     return frame
 
 
+def _load_residual_shrinkage_by_series(
+    path: Path,
+    series_ids: Sequence[str],
+) -> pd.DataFrame:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Residual shrinkage file does not exist: {path}")
+    frame = pd.read_parquet(path) if path.suffix.lower() == ".parquet" else pd.read_csv(path)
+    required = {"series_id", "residual_shrinkage"}
+    missing_columns = sorted(required.difference(frame.columns))
+    if missing_columns:
+        raise ValueError(
+            f"Residual shrinkage file {path} is missing required columns: {missing_columns}"
+        )
+
+    frame = frame.copy()
+    if frame["series_id"].isna().any():
+        raise ValueError(f"Residual shrinkage file {path} contains missing series_id values.")
+    frame["series_id"] = frame["series_id"].astype(str)
+    duplicate_ids = sorted(
+        frame.loc[frame["series_id"].duplicated(keep=False), "series_id"].unique()
+    )
+    if duplicate_ids:
+        raise ValueError(
+            f"Residual shrinkage file {path} contains duplicate series_id values: {duplicate_ids[:10]}"
+        )
+
+    try:
+        frame["residual_shrinkage"] = pd.to_numeric(
+            frame["residual_shrinkage"], errors="raise"
+        ).astype(float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Residual shrinkage file {path} contains nonnumeric residual_shrinkage values."
+        ) from exc
+    weights = frame["residual_shrinkage"].to_numpy(dtype=float)
+    if not np.isfinite(weights).all() or np.any((weights < 0.0) | (weights > 1.0)):
+        raise ValueError(
+            f"Residual shrinkage file {path} must contain finite weights between 0 and 1."
+        )
+
+    selected_ids = [str(series_id) for series_id in series_ids]
+    indexed = frame.set_index("series_id", drop=False)
+    missing_ids = [series_id for series_id in selected_ids if series_id not in indexed.index]
+    if missing_ids:
+        raise ValueError(
+            f"Residual shrinkage file {path} is missing selected series: {missing_ids[:10]}"
+        )
+    return indexed.loc[selected_ids].reset_index(drop=True)
+
+
+def _apply_residual_shrinkage(
+    baseline_forecast: np.ndarray,
+    residual_forecast: np.ndarray,
+    baseline_variance: np.ndarray,
+    residual_variance: np.ndarray,
+    residual_shrinkage: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    weights = np.asarray(residual_shrinkage, dtype=float)
+    if weights.ndim != 1 or weights.shape[0] != residual_forecast.shape[1]:
+        raise ValueError(
+            "residual_shrinkage must contain one weight for each forecast series; "
+            f"got shape {weights.shape} for {residual_forecast.shape[1]} series."
+        )
+    if not np.isfinite(weights).all() or np.any(weights < 0.0):
+        raise ValueError("residual_shrinkage weights must be finite and nonnegative.")
+
+    scale = weights[None, :]
+    scaled_residual = residual_forecast * scale
+    scaled_residual_variance = residual_variance * (scale ** 2)
+    forecast = baseline_forecast + scaled_residual
+    forecast_variance = baseline_variance + scaled_residual_variance
+    return forecast, scaled_residual, forecast_variance, scaled_residual_variance
+
+
 def _feature_function_label(feature_functions: str | Sequence[str]) -> str:
     if isinstance(feature_functions, str):
         return feature_functions
@@ -1357,6 +1434,9 @@ def run_vara_forecast(
     ray_debug: bool = DEFAULT_VARA_FORECAST_CONFIG.ray_debug,
     clip_nonnegative: bool = DEFAULT_VARA_FORECAST_CONFIG.clip_nonnegative,
     residual_shrinkage: float = DEFAULT_VARA_FORECAST_CONFIG.residual_shrinkage,
+    residual_shrinkage_file: Path | None = (
+        DEFAULT_VARA_FORECAST_CONFIG.residual_shrinkage_file
+    ),
 ) -> dict:
     if forecast_scenario not in set(FORECAST_SCENARIOS):
         raise ValueError(f"forecast_scenario must be one of {FORECAST_SCENARIOS}.")
@@ -1366,7 +1446,16 @@ def run_vara_forecast(
     residual_shrinkage = float(residual_shrinkage)
     if not np.isfinite(residual_shrinkage) or residual_shrinkage < 0.0:
         raise ValueError("residual_shrinkage must be a finite nonnegative number.")
-    if forecast_scenario == "direct" and residual_shrinkage != 1.0:
+    residual_shrinkage_file = (
+        None if residual_shrinkage_file is None else Path(residual_shrinkage_file)
+    )
+    if residual_shrinkage_file is not None and residual_shrinkage != 1.0:
+        raise ValueError(
+            "Use either residual_shrinkage or residual_shrinkage_file, not both."
+        )
+    if forecast_scenario == "direct" and (
+        residual_shrinkage != 1.0 or residual_shrinkage_file is not None
+    ):
         raise ValueError("residual_shrinkage is only defined for residual-correction scenarios.")
     input_feature_path = feature_path
     if input_feature_path is not None:
@@ -1447,6 +1536,7 @@ def run_vara_forecast(
         ray_debug=ray_debug,
         clip_nonnegative=clip_nonnegative,
         residual_shrinkage=residual_shrinkage,
+        residual_shrinkage_file=residual_shrinkage_file,
     )
     input_path = config.input_path
     wide = load_panel_data(
@@ -1463,6 +1553,22 @@ def run_vara_forecast(
         raise ValueError("Need at least two series for VARA forecasting.")
     if horizon < 1 or horizon >= len(wide):
         raise ValueError("horizon must be positive and smaller than the number of observations.")
+
+    if residual_shrinkage_file is None:
+        shrinkage_by_series = pd.DataFrame({
+            "series_id": series_ids,
+            "residual_shrinkage": np.full(len(series_ids), residual_shrinkage, dtype=float),
+        })
+        residual_shrinkage_mode = "scalar"
+    else:
+        shrinkage_by_series = _load_residual_shrinkage_by_series(
+            residual_shrinkage_file,
+            series_ids,
+        )
+        residual_shrinkage_mode = "per_series"
+    residual_shrinkage_weights = shrinkage_by_series["residual_shrinkage"].to_numpy(
+        dtype=float
+    )
 
     Y_raw = wide[series_ids].to_numpy(dtype=float)
     train = Y_raw[:-horizon]
@@ -1698,12 +1804,19 @@ def run_vara_forecast(
     forecast_variance = np.vstack(forecast_variances) if forecast_variances else np.full_like(forecast, np.nan, dtype=float)
     baseline_variance = np.vstack(baseline_variances) if baseline_variances else np.full_like(forecast, np.nan, dtype=float)
     residual_variance = np.vstack(residual_variances) if residual_variances else np.full_like(forecast, np.nan, dtype=float)
+    residual_forecast_unshrunk = residual_forecast.copy()
+    residual_variance_unshrunk = residual_variance.copy()
 
-    if forecast_scenario != "direct" and residual_shrinkage != 1.0:
-        residual_forecast = residual_shrinkage * residual_forecast
-        residual_variance = (residual_shrinkage ** 2) * residual_variance
-        forecast = baseline_forecast + residual_forecast
-        forecast_variance = baseline_variance + residual_variance
+    if forecast_scenario != "direct":
+        forecast, residual_forecast, forecast_variance, residual_variance = (
+            _apply_residual_shrinkage(
+                baseline_forecast,
+                residual_forecast,
+                baseline_variance,
+                residual_variance,
+                residual_shrinkage_weights,
+            )
+        )
 
     clip_nonnegative = bool(clip_nonnegative)
     if clip_nonnegative:
@@ -1715,6 +1828,7 @@ def run_vara_forecast(
     mae = float(np.mean(np.abs(errors)))
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    shrinkage_by_series.to_csv(output_dir / "residual_shrinkage_by_series.csv", index=False)
     attention_feature_output_path = output_dir / "attention_features.csv"
     pd.concat(feature_frames, ignore_index=True, sort=False).to_csv(attention_feature_output_path, index=False)
     if rolling_diagnostics:
@@ -1724,10 +1838,24 @@ def run_vara_forecast(
     _write_wide_output(output_dir, "forecast.csv", forecast, forecast_dates, series_ids)
     _write_wide_output(output_dir, "baseline_forecast.csv", baseline_forecast, forecast_dates, series_ids)
     _write_wide_output(output_dir, "residual_forecast.csv", residual_forecast, forecast_dates, series_ids)
+    _write_wide_output(
+        output_dir,
+        "residual_forecast_unshrunk.csv",
+        residual_forecast_unshrunk,
+        forecast_dates,
+        series_ids,
+    )
     _write_wide_output(output_dir, "forecast_transformed.csv", forecast_transformed, forecast_dates, series_ids)
     _write_wide_output(output_dir, "forecast_variance.csv", forecast_variance, forecast_dates, series_ids)
     _write_wide_output(output_dir, "baseline_forecast_variance.csv", baseline_variance, forecast_dates, series_ids)
     _write_wide_output(output_dir, "residual_forecast_variance.csv", residual_variance, forecast_dates, series_ids)
+    _write_wide_output(
+        output_dir,
+        "residual_forecast_variance_unshrunk.csv",
+        residual_variance_unshrunk,
+        forecast_dates,
+        series_ids,
+    )
     _write_wide_output(output_dir, "test.csv", test, forecast_dates, series_ids)
     _write_wide_output(output_dir, "errors.csv", errors, forecast_dates, series_ids)
 
@@ -1777,7 +1905,14 @@ def run_vara_forecast(
         "max_cpus_per_task": int(max_cpus_per_task),
         "forecast_scenario": forecast_scenario,
         "clip_nonnegative": bool(clip_nonnegative),
-        "residual_shrinkage": float(residual_shrinkage),
+        "residual_shrinkage": float(np.mean(residual_shrinkage_weights)),
+        "residual_shrinkage_mode": residual_shrinkage_mode,
+        "residual_shrinkage_file": (
+            "" if residual_shrinkage_file is None else str(residual_shrinkage_file)
+        ),
+        "residual_shrinkage_min": float(np.min(residual_shrinkage_weights)),
+        "residual_shrinkage_median": float(np.median(residual_shrinkage_weights)),
+        "residual_shrinkage_max": float(np.max(residual_shrinkage_weights)),
         "residual_baseline": _residual_baseline_name(forecast_scenario),
         "residual_transform": residual_transform if forecast_scenario != "direct" else "",
         "baseline_config_model": baseline_config.get("model", ""),
@@ -1815,6 +1950,8 @@ def run_vara_forecast(
         "mase": float(summary["mase"].iloc[0]),
         "rmsse": float(summary["rmsse"].iloc[0]),
         "bias": float(summary["bias"].iloc[0]),
+        "oos_r2": float(summary["oos_r2"].iloc[0]),
+        "oos_r2_zero": float(summary["oos_r2_zero"].iloc[0]),
         "crps": float(summary["crps"].iloc[0]),
         "forecast_variance_mean": float(summary["forecast_variance_mean"].iloc[0]),
         **fit_diagnostics,
@@ -1861,6 +1998,7 @@ def _vara_config_from_args(args: argparse.Namespace) -> VARAForecastConfig:
         ray_debug=args.ray_debug,
         clip_nonnegative=args.clip_nonnegative,
         residual_shrinkage=args.residual_shrinkage,
+        residual_shrinkage_file=args.residual_shrinkage_file,
     )
 
 
@@ -1981,6 +2119,15 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=default_config.residual_shrinkage,
         help="Multiply VARA residual forecasts by this scalar before adding them back to the baseline.",
+    )
+    parser.add_argument(
+        "--residual-shrinkage-file",
+        type=Path,
+        default=default_config.residual_shrinkage_file,
+        help=(
+            "CSV/parquet file with series_id and residual_shrinkage columns. "
+            "Weights must be between 0 and 1 and cover every selected series."
+        ),
     )
     parser.add_argument(
         "--y-transform",
