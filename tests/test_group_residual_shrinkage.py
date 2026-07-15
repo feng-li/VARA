@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.run_forecast_workflow import (
+    DATASET_DEFAULTS,
     _learn_group_residual_shrinkage_from_validation,
     _load_residual_shrinkage_group_mapping,
     _select_residual_shrinkage_score,
@@ -18,6 +19,13 @@ from scripts.run_vara_forecast import (
 
 
 class GroupResidualShrinkageTests(unittest.TestCase):
+    def test_one_standard_error_rule_is_disabled_by_default(self):
+        for dataset, defaults in DATASET_DEFAULTS.items():
+            with self.subTest(dataset=dataset):
+                self.assertFalse(
+                    defaults["residual_shrinkage_group_one_standard_error"]
+                )
+
     def test_load_residual_shrinkage_aligns_weights_by_series_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "weights.csv"

@@ -169,7 +169,7 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "residual_shrinkage_group_cols": "dept_id,store_id",
         "residual_shrinkage_min_group_series": 50,
         "residual_shrinkage_objective": "rmse",
-        "residual_shrinkage_group_one_standard_error": True,
+        "residual_shrinkage_group_one_standard_error": False,
         "grid_size": 7,
         "ridge": 0.01,
         "attention_mode": "dense",
@@ -212,7 +212,7 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "residual_shrinkage_group_cols": "",
         "residual_shrinkage_min_group_series": 50,
         "residual_shrinkage_objective": "rmse",
-        "residual_shrinkage_group_one_standard_error": True,
+        "residual_shrinkage_group_one_standard_error": False,
         "grid_size": 7,
         "ridge": 0.01,
         "attention_mode": "dense",
@@ -1451,7 +1451,10 @@ def _parse_args() -> argparse.Namespace:
         "--residual-shrinkage-group-one-standard-error",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Prefer the smallest group weight within one standard error of the best validation loss.",
+        help=(
+            "Prefer the smallest group weight within one standard error of the best "
+            "validation loss. Disabled by default."
+        ),
     )
 
     parser.add_argument("--grid-size", type=int, default=None)
