@@ -62,6 +62,11 @@ M5_MODEL_LABELS = {
 
 
 WORKFLOW_CONFIG_FILENAME = "config_forecast_workflow.json"
+RESIDUAL_SHRINKAGE_MODES = ("full", "fixed", "global", "group", "file")
+LEGACY_SHRINKAGE_CONFIG_KEYS = (
+    "learn_residual_shrinkage",
+    "learn_group_residual_shrinkage",
+)
 WORKFLOW_CONFIG_KEYS = (
     "config_json",
     "dataset",
@@ -99,9 +104,11 @@ WORKFLOW_CONFIG_KEYS = (
     "y_transform",
     "residual_shrinkage",
     "residual_shrinkage_file",
+    "residual_shrinkage_mode",
     "learn_residual_shrinkage",
     "learn_group_residual_shrinkage",
     "residual_shrinkage_grid",
+    "residual_shrinkage_validation_origins",
     "residual_shrinkage_group_file",
     "residual_shrinkage_group_cols",
     "residual_shrinkage_min_group_series",
@@ -162,9 +169,11 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "y_transform": "none",
         "residual_shrinkage": 1.0,
         "residual_shrinkage_file": None,
+        "residual_shrinkage_mode": "full",
         "learn_residual_shrinkage": False,
         "learn_group_residual_shrinkage": False,
         "residual_shrinkage_grid": "0,0.05,0.1,0.2,0.3,0.35,0.4,0.45,0.5,0.6,0.75,1",
+        "residual_shrinkage_validation_origins": 1,
         "residual_shrinkage_group_file": None,
         "residual_shrinkage_group_cols": "dept_id,store_id",
         "residual_shrinkage_min_group_series": 50,
@@ -205,12 +214,14 @@ DATASET_DEFAULTS: dict[str, dict[str, Any]] = {
         "y_transform": "none",
         "residual_shrinkage": 1.0,
         "residual_shrinkage_file": None,
+        "residual_shrinkage_mode": "full",
         "learn_residual_shrinkage": False,
         "learn_group_residual_shrinkage": False,
         "residual_shrinkage_grid": "0,0.05,0.1,0.2,0.3,0.35,0.4,0.45,0.5,0.6,0.75,1",
+        "residual_shrinkage_validation_origins": 1,
         "residual_shrinkage_group_file": None,
-        "residual_shrinkage_group_cols": "",
-        "residual_shrinkage_min_group_series": 50,
+        "residual_shrinkage_group_cols": "hierarchy_level_1",
+        "residual_shrinkage_min_group_series": 5,
         "residual_shrinkage_objective": "rmse",
         "residual_shrinkage_group_one_standard_error": False,
         "grid_size": 7,
@@ -249,6 +260,26 @@ def _load_config_json_defaults(path: str | Path) -> dict[str, Any]:
         elif key in WORKFLOW_OPTIONAL_PATH_CONFIG_KEYS and value == "":
             value = None
         defaults[key] = value
+    if "residual_shrinkage_mode" not in defaults:
+        learn_global = bool(defaults.get("learn_residual_shrinkage"))
+        learn_group = bool(defaults.get("learn_group_residual_shrinkage"))
+        if learn_global and learn_group:
+            raise ValueError(
+                "Saved workflow config enables both legacy residual shrinkage learners."
+            )
+        if learn_group:
+            mode = "group"
+        elif learn_global:
+            mode = "global"
+        elif defaults.get("residual_shrinkage_file") is not None:
+            mode = "file"
+        elif float(defaults.get("residual_shrinkage", 1.0)) != 1.0:
+            mode = "fixed"
+        else:
+            mode = "full"
+        defaults["residual_shrinkage_mode"] = mode
+    for key in LEGACY_SHRINKAGE_CONFIG_KEYS:
+        defaults.pop(key, None)
     return defaults
 
 
@@ -259,6 +290,8 @@ def _workflow_config_values(
 ) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for key in WORKFLOW_CONFIG_KEYS:
+        if key in LEGACY_SHRINKAGE_CONFIG_KEYS:
+            continue
         if key in config:
             values[key] = _as_config_value(config[key])
         elif hasattr(args, key):
@@ -287,6 +320,47 @@ def _save_workflow_config(
 def _arg_value(args: argparse.Namespace, defaults: dict[str, Any], name: str) -> Any:
     value = getattr(args, name)
     return defaults[name] if value is None else value
+
+
+def _resolve_residual_shrinkage_mode(
+    args: argparse.Namespace,
+    defaults: dict[str, Any],
+) -> str:
+    mode_arg = getattr(args, "residual_shrinkage_mode", None)
+    mode = str(
+        defaults["residual_shrinkage_mode"] if mode_arg is None else mode_arg
+    )
+    if mode not in RESIDUAL_SHRINKAGE_MODES:
+        raise ValueError(
+            "Residual shrinkage mode must be one of "
+            f"{', '.join(RESIDUAL_SHRINKAGE_MODES)}."
+        )
+
+    legacy_global = bool(_arg_value(args, defaults, "learn_residual_shrinkage"))
+    legacy_group = bool(
+        _arg_value(args, defaults, "learn_group_residual_shrinkage")
+    )
+    if legacy_global and legacy_group:
+        raise ValueError(
+            "Legacy global and group residual shrinkage flags cannot both be enabled."
+        )
+    legacy_mode = "global" if legacy_global else "group" if legacy_group else None
+    if legacy_mode is not None:
+        if mode_arg is not None and mode != legacy_mode:
+            raise ValueError(
+                "Do not combine --residual-shrinkage-mode with a legacy residual "
+                "shrinkage learning flag."
+            )
+        mode = legacy_mode
+    elif mode_arg is None:
+        if getattr(args, "residual_shrinkage_file", None) is not None:
+            mode = "file"
+        elif (
+            getattr(args, "residual_shrinkage", None) is not None
+            and float(args.residual_shrinkage) != 1.0
+        ):
+            mode = "fixed"
+    return mode
 
 
 def _run(cmd: list[str], *, dry_run: bool = False) -> None:
@@ -473,18 +547,47 @@ def _write_table(frame: pd.DataFrame, path: Path) -> None:
         frame.to_csv(path, index=False)
 
 
-def _validation_panel_path(config: dict[str, Any]) -> Path:
+def _validation_origin_root(
+    config: dict[str, Any],
+    *,
+    origin_index: int = 1,
+    n_origins: int = 1,
+) -> Path:
+    if n_origins == 1:
+        return config["output_dir"] / "validation"
+    return (
+        config["output_dir"]
+        / "validation"
+        / "origins"
+        / f"origin_{origin_index:03d}"
+    )
+
+
+def _validation_panel_path(
+    config: dict[str, Any],
+    *,
+    origin_index: int = 1,
+    n_origins: int = 1,
+) -> Path:
     data_path = Path(config["data_path"])
     suffix = data_path.suffix or ".csv"
-    return config["output_dir"] / "validation" / "data" / f"validation_panel{suffix}"
+    root = _validation_origin_root(
+        config,
+        origin_index=origin_index,
+        n_origins=n_origins,
+    )
+    return root / "data" / f"validation_panel{suffix}"
 
 
-def _write_validation_panel(config: dict[str, Any], *, overwrite: bool = False) -> Path:
-    out = _validation_panel_path(config)
-    if out.exists() and not overwrite:
-        print(f"Using existing validation panel: {out}", flush=True)
-        return out
-
+def _write_validation_panels(
+    config: dict[str, Any],
+    n_origins: int,
+    *,
+    overwrite: bool = False,
+) -> list[dict[str, Any]]:
+    n_origins = int(n_origins)
+    if n_origins < 1:
+        raise ValueError("residual_shrinkage_validation_origins must be at least 1.")
     frame = _read_table(Path(config["data_path"]))
     date_col = str(config["date_col"])
     if date_col not in frame.columns:
@@ -492,36 +595,122 @@ def _write_validation_panel(config: dict[str, Any], *, overwrite: bool = False) 
     dates = pd.to_datetime(frame[date_col])
     unique_dates = pd.Series(dates.dropna().unique()).sort_values().reset_index(drop=True)
     horizon = int(config["horizon"])
-    if len(unique_dates) <= 2 * horizon:
+    required_dates = (n_origins + 1) * horizon
+    if len(unique_dates) <= required_dates:
         raise ValueError(
-            "Need more than two forecast horizons of observations to learn residual shrinkage "
-            f"on validation; got {len(unique_dates)} dates and horizon={horizon}."
+            "Need more observations than the requested validation origins plus the "
+            "final test horizon; got "
+            f"{len(unique_dates)} dates, horizon={horizon}, and "
+            f"validation_origins={n_origins} (requires > {required_dates})."
         )
-    cutoff = unique_dates.iloc[-horizon - 1]
-    validation_frame = frame.loc[dates <= cutoff].copy()
-    _write_table(validation_frame, out)
+    records: list[dict[str, Any]] = []
+    final_test_start = unique_dates.iloc[-horizon]
+    final_test_end = unique_dates.iloc[-1]
+    for origin_index in range(1, n_origins + 1):
+        validation_start_position = len(unique_dates) - (
+            n_origins - origin_index + 2
+        ) * horizon
+        validation_end_position = validation_start_position + horizon
+        validation_start = unique_dates.iloc[validation_start_position]
+        validation_end = unique_dates.iloc[validation_end_position - 1]
+        inner_train_end = unique_dates.iloc[validation_start_position - 1]
+        feature_holdout = len(unique_dates) - validation_start_position
+        out = _validation_panel_path(
+            config,
+            origin_index=origin_index,
+            n_origins=n_origins,
+        )
+        metadata_path = out.with_suffix(out.suffix + ".metadata.json")
+        existing_metadata = (
+            json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata_path.exists()
+            else {}
+        )
+        expected_boundaries = {
+            "horizon": horizon,
+            "validation_start": str(validation_start),
+            "validation_end": str(validation_end),
+        }
+        can_reuse = (
+            out.exists()
+            and not overwrite
+            and all(
+                existing_metadata.get(key) == value
+                for key, value in expected_boundaries.items()
+            )
+        )
+        if can_reuse:
+            print(f"Using existing validation panel: {out}", flush=True)
+        else:
+            validation_frame = frame.loc[dates <= validation_end].copy()
+            _write_table(validation_frame, out)
 
-    info = {
-        "source_data_path": str(config["data_path"]),
-        "validation_panel_path": str(out),
-        "horizon": horizon,
-        "inner_train_start": str(unique_dates.iloc[0]),
-        "inner_train_end": str(unique_dates.iloc[-2 * horizon - 1]),
-        "validation_start": str(unique_dates.iloc[-2 * horizon]),
-        "validation_end": str(unique_dates.iloc[-horizon - 1]),
-        "final_test_start": str(unique_dates.iloc[-horizon]),
-        "final_test_end": str(unique_dates.iloc[-1]),
-    }
-    out.with_suffix(out.suffix + ".metadata.json").write_text(json.dumps(info, indent=2) + "\n")
-    return out
+        origin_root = _validation_origin_root(
+            config,
+            origin_index=origin_index,
+            n_origins=n_origins,
+        )
+        info = {
+            "origin_index": origin_index,
+            "n_validation_origins": n_origins,
+            "source_data_path": str(config["data_path"]),
+            "validation_panel_path": str(out),
+            "validation_vara_dir": str(origin_root / "vara"),
+            "horizon": horizon,
+            "feature_holdout": feature_holdout,
+            "inner_train_start": str(unique_dates.iloc[0]),
+            "inner_train_end": str(inner_train_end),
+            "validation_start": str(validation_start),
+            "validation_end": str(validation_end),
+            "final_test_start": str(final_test_start),
+            "final_test_end": str(final_test_end),
+        }
+        metadata_path.write_text(
+            json.dumps(info, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        records.append({
+            **info,
+            "origin_root": origin_root,
+            "panel_path": out,
+            "vara_dir": origin_root / "vara",
+        })
+
+    manifest_path = config["output_dir"] / "validation" / "validation_origins.csv"
+    manifest = pd.DataFrame([
+        {
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in record.items()
+            if key not in {"origin_root", "panel_path", "vara_dir"}
+        }
+        for record in records
+    ])
+    _write_table(manifest, manifest_path)
+    return records
 
 
-def _validation_feature_path(config: dict[str, Any]) -> Path | None:
+def _write_validation_panel(config: dict[str, Any], *, overwrite: bool = False) -> Path:
+    """Write the legacy single validation panel."""
+    return Path(
+        _write_validation_panels(config, 1, overwrite=overwrite)[0]["panel_path"]
+    )
+
+
+def _validation_feature_path(
+    config: dict[str, Any],
+    *,
+    validation_root: Path | None = None,
+) -> Path | None:
     feature_path = config.get("feature_path")
     if feature_path is None:
         return None
     feature_path = Path(feature_path)
-    return config["output_dir"] / "validation" / "features" / f"{feature_path.stem}_validation{feature_path.suffix}"
+    root = (
+        config["output_dir"] / "validation"
+        if validation_root is None
+        else Path(validation_root)
+    )
+    return root / "features" / f"{feature_path.stem}_validation{feature_path.suffix}"
 
 
 def _align_validation_feature_file(validation_feature_path: Path, final_feature_path: Path) -> None:
@@ -554,6 +743,9 @@ def _prepare_validation_feature_cmd(
     args: argparse.Namespace,
     config: dict[str, Any],
     ray_args: list[str],
+    *,
+    validation_root: Path | None = None,
+    holdout_periods: int | None = None,
 ) -> tuple[list[str] | None, Path | None]:
     if config["feature_source"] != "file":
         return None, config.get("feature_path")
@@ -563,14 +755,29 @@ def _prepare_validation_feature_cmd(
     if final_feature_path is None:
         raise ValueError("M5 file-based validation shrinkage requires a final feature path.")
 
-    validation_feature_path = _validation_feature_path(config)
+    validation_feature_path = _validation_feature_path(
+        config,
+        validation_root=validation_root,
+    )
     if validation_feature_path is None:
         raise ValueError("Could not resolve validation feature path.")
     metadata_path = _feature_metadata_path(validation_feature_path)
+    expected_holdout = (
+        2 * int(config["horizon"])
+        if holdout_periods is None
+        else int(holdout_periods)
+    )
     if validation_feature_path.exists() and metadata_path.exists() and not args.recompute_features:
-        print(f"Using existing validation feature file: {validation_feature_path}", flush=True)
-        _align_validation_feature_file(validation_feature_path, Path(final_feature_path))
-        return None, validation_feature_path
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if int(metadata.get("holdout", -1)) == expected_holdout:
+            print(f"Using existing validation feature file: {validation_feature_path}", flush=True)
+            _align_validation_feature_file(validation_feature_path, Path(final_feature_path))
+            return None, validation_feature_path
+        print(
+            "Regenerating validation features because the holdout changed: "
+            f"{metadata.get('holdout')} -> {expected_holdout}",
+            flush=True,
+        )
     if args.skip_features:
         raise FileNotFoundError(
             f"Validation feature file is missing: {validation_feature_path}. "
@@ -584,7 +791,7 @@ def _prepare_validation_feature_cmd(
         "--out",
         validation_feature_path.as_posix(),
         "--holdout",
-        str(2 * int(config["horizon"])),
+        str(expected_holdout),
         "--filter-method",
         args.feature_filter_method,
         "--seasonal-lag",
@@ -605,42 +812,64 @@ def _read_forecast_block(path: Path) -> tuple[list[str], np.ndarray]:
     return cols, frame.loc[:, cols].to_numpy(dtype=float)
 
 
+def _normalize_validation_dirs(
+    validation_dirs: Path | str | list[Path] | tuple[Path, ...],
+) -> list[Path]:
+    if isinstance(validation_dirs, (str, Path)):
+        out = [Path(validation_dirs)]
+    else:
+        out = [Path(path) for path in validation_dirs]
+    if not out:
+        raise ValueError("At least one validation directory is required.")
+    return out
+
+
 def _read_validation_forecast_arrays(
-    validation_dir: Path,
+    validation_dir: Path | str | list[Path] | tuple[Path, ...],
     forecast_mode: str,
 ) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
+    validation_dirs = _normalize_validation_dirs(validation_dir)
     modes = _forecast_modes(forecast_mode)
     if not modes:
         raise ValueError("At least one validation forecast mode is required.")
-    mode_dirs = (
-        [(mode, validation_dir / mode) for mode in modes]
-        if len(modes) > 1
-        else [(modes[0], validation_dir)]
-    )
     series_ids: list[str] | None = None
     tests = []
     baselines = []
     residuals = []
-    for mode, mode_dir in mode_dirs:
-        if not (mode_dir / "test.csv").exists():
-            raise FileNotFoundError(f"Missing validation VARA outputs for mode={mode}: {mode_dir}")
-        test_cols, test = _read_forecast_block(mode_dir / "test.csv")
-        base_cols, baseline = _read_forecast_block(mode_dir / "baseline_forecast.csv")
-        resid_cols, residual = _read_forecast_block(mode_dir / "residual_forecast.csv")
-        if test_cols != base_cols or test_cols != resid_cols:
-            raise ValueError(f"Validation output columns do not match in {mode_dir}")
-        if series_ids is None:
-            series_ids = test_cols
-        elif series_ids != test_cols:
-            raise ValueError(
-                f"Validation series columns for mode={mode} do not match the other forecast modes."
+    for root in validation_dirs:
+        mode_dirs = (
+            [(mode, root / mode) for mode in modes]
+            if len(modes) > 1
+            else [(modes[0], root)]
+        )
+        for mode, mode_dir in mode_dirs:
+            if not (mode_dir / "test.csv").exists():
+                raise FileNotFoundError(
+                    f"Missing validation VARA outputs for mode={mode}: {mode_dir}"
+                )
+            test_cols, test = _read_forecast_block(mode_dir / "test.csv")
+            base_cols, baseline = _read_forecast_block(
+                mode_dir / "baseline_forecast.csv"
             )
-        tests.append(test)
-        baselines.append(baseline)
-        residuals.append(residual)
+            residual_path = mode_dir / "residual_forecast_unshrunk.csv"
+            if not residual_path.exists():
+                residual_path = mode_dir / "residual_forecast.csv"
+            resid_cols, residual = _read_forecast_block(residual_path)
+            if test_cols != base_cols or test_cols != resid_cols:
+                raise ValueError(f"Validation output columns do not match in {mode_dir}")
+            if series_ids is None:
+                series_ids = test_cols
+            elif series_ids != test_cols:
+                raise ValueError(
+                    f"Validation series columns for mode={mode} do not match the "
+                    "other forecast modes or origins."
+                )
+            tests.append(test)
+            baselines.append(baseline)
+            residuals.append(residual)
 
     if not series_ids:
-        raise ValueError(f"No validation series were found in {validation_dir}")
+        raise ValueError(f"No validation series were found in {validation_dirs}")
     return series_ids, np.vstack(tests), np.vstack(baselines), np.vstack(residuals)
 
 
@@ -767,15 +996,27 @@ def _select_residual_shrinkage_score(
 
 
 def _learn_residual_shrinkage_from_validation(
-    validation_dir: Path,
+    validation_dir: Path | str | list[Path] | tuple[Path, ...],
     forecast_mode: str,
     *,
     clip_nonnegative: bool,
     grid: list[float],
     objective: str = "rmse",
     one_standard_error: bool = False,
+    output_dir: Path | None = None,
 ) -> float:
-    _, y, baseline, residual = _read_validation_forecast_arrays(validation_dir, forecast_mode)
+    validation_dirs = _normalize_validation_dirs(validation_dir)
+    if output_dir is None:
+        if len(validation_dirs) != 1:
+            raise ValueError(
+                "output_dir is required when learning from multiple validation origins."
+            )
+        output_dir = validation_dirs[0]
+    output_dir = Path(output_dir)
+    _, y, baseline, residual = _read_validation_forecast_arrays(
+        validation_dirs,
+        forecast_mode,
+    )
     scores, closed_form = _score_residual_shrinkage_candidates(
         y,
         baseline,
@@ -796,8 +1037,8 @@ def _learn_residual_shrinkage_from_validation(
     scores = scores.sort_values(
         [loss_col, "residual_shrinkage"]
     ).reset_index(drop=True)
-    validation_dir.mkdir(parents=True, exist_ok=True)
-    scores.to_csv(validation_dir / "residual_shrinkage_validation_scores.csv", index=False)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scores.to_csv(output_dir / "residual_shrinkage_validation_scores.csv", index=False)
     report = {
         "selected_residual_shrinkage": float(best["residual_shrinkage"]),
         "validation_rmse": float(best["rmse"]),
@@ -808,9 +1049,14 @@ def _learn_residual_shrinkage_from_validation(
         "one_standard_error": bool(one_standard_error),
         "clip_nonnegative": bool(clip_nonnegative),
         "forecast_mode": str(forecast_mode),
-        "validation_dir": str(validation_dir),
+        "n_validation_origins": len(validation_dirs),
+        "validation_dirs": [str(path) for path in validation_dirs],
+        "output_dir": str(output_dir),
     }
-    (validation_dir / "residual_shrinkage.json").write_text(json.dumps(report, indent=2) + "\n")
+    (output_dir / "residual_shrinkage.json").write_text(
+        json.dumps(report, indent=2) + "\n",
+        encoding="utf-8",
+    )
     print(
         "Learned residual shrinkage from validation: "
         f"lambda={report['selected_residual_shrinkage']:.6g}, "
@@ -888,6 +1134,53 @@ def _load_residual_shrinkage_group_mapping(config: dict[str, Any]) -> pd.DataFra
             group_columns=group_columns if "group_id" not in mapping.columns else None,
         )
 
+    if config.get("dataset") == "tourism" and group_columns == ["hierarchy_level_1"]:
+        data_path = Path(config["data_path"])
+        if data_path.suffix.lower() == ".parquet":
+            columns = list(pd.read_parquet(data_path).columns)
+        else:
+            columns = list(pd.read_csv(data_path, nrows=0).columns)
+        date_col = str(config["date_col"])
+        suffix = str(config.get("series_suffix") or "")
+        raw_depth = config.get("series_depth")
+        series_depth = (
+            None
+            if raw_depth is None or int(raw_depth) < 0
+            else int(raw_depth)
+        )
+        series_ids = []
+        hierarchy_codes = []
+        for column in columns:
+            series_id = str(column)
+            if series_id == date_col or (suffix and not series_id.endswith(suffix)):
+                continue
+            code = series_id[: -len(suffix)] if suffix else series_id
+            depth = 0 if code == "Total" else len(code)
+            if series_depth is not None and depth != series_depth:
+                continue
+            if not code:
+                raise ValueError(
+                    f"Cannot derive a Tourism hierarchy group from series {series_id!r}."
+                )
+            series_ids.append(series_id)
+            hierarchy_codes.append(code[0])
+        if not series_ids:
+            raise ValueError(
+                "No Tourism series matched the configured suffix and hierarchy depth."
+            )
+        mapping = pd.DataFrame({
+            "series_id": series_ids,
+            "hierarchy_level_1": hierarchy_codes,
+        })
+        print(
+            "Using Tourism hierarchy level 1 for residual shrinkage groups.",
+            flush=True,
+        )
+        return _validate_residual_shrinkage_group_mapping(
+            mapping,
+            group_columns=group_columns,
+        )
+
     if not group_columns:
         raise ValueError(
             "Group-specific residual shrinkage requires --residual-shrinkage-group-file "
@@ -940,7 +1233,7 @@ def _load_residual_shrinkage_group_mapping(config: dict[str, Any]) -> pd.DataFra
 
 
 def _learn_group_residual_shrinkage_from_validation(
-    validation_dir: Path,
+    validation_dir: Path | str | list[Path] | tuple[Path, ...],
     forecast_mode: str,
     group_mapping: pd.DataFrame,
     *,
@@ -949,15 +1242,25 @@ def _learn_group_residual_shrinkage_from_validation(
     min_group_series: int,
     objective: str = "rmse",
     one_standard_error: bool = True,
+    output_dir: Path | None = None,
 ) -> dict[str, Any]:
     if int(min_group_series) < 1:
         raise ValueError("residual_shrinkage_min_group_series must be at least 1.")
     if any(not np.isfinite(weight) or weight < 0.0 or weight > 1.0 for weight in grid):
         raise ValueError("Group residual shrinkage grid values must be between 0 and 1.")
     group_grid = sorted(set([0.0, 1.0, *[float(weight) for weight in grid]]))
+    validation_dirs = _normalize_validation_dirs(validation_dir)
+    if output_dir is None:
+        if len(validation_dirs) != 1:
+            raise ValueError(
+                "output_dir is required when learning groups from multiple "
+                "validation origins."
+            )
+        output_dir = validation_dirs[0]
+    output_dir = Path(output_dir)
     mapping = _validate_residual_shrinkage_group_mapping(group_mapping)
     series_ids, y, baseline, residual = _read_validation_forecast_arrays(
-        validation_dir,
+        validation_dirs,
         forecast_mode,
     )
     indexed_mapping = mapping.set_index("series_id", drop=False)
@@ -970,12 +1273,13 @@ def _learn_group_residual_shrinkage_from_validation(
     selected_mapping = indexed_mapping.loc[series_ids].reset_index(drop=True)
 
     global_shrinkage = _learn_residual_shrinkage_from_validation(
-        validation_dir,
+        validation_dirs,
         forecast_mode,
         clip_nonnegative=clip_nonnegative,
         grid=group_grid,
         objective=objective,
         one_standard_error=one_standard_error,
+        output_dir=output_dir,
     )
 
     group_rows = []
@@ -1071,9 +1375,9 @@ def _learn_group_residual_shrinkage_from_validation(
     )
     series_table["used_global_fallback"] = series_table["group_id"].isin(fallback_groups)
 
-    group_path = validation_dir / "group_residual_shrinkage.csv"
-    group_scores_path = validation_dir / "group_residual_shrinkage_validation_scores.csv"
-    series_path = validation_dir / "residual_shrinkage_by_series.csv"
+    group_path = output_dir / "group_residual_shrinkage.csv"
+    group_scores_path = output_dir / "group_residual_shrinkage_validation_scores.csv"
+    series_path = output_dir / "residual_shrinkage_by_series.csv"
     group_table.to_csv(group_path, index=False)
     group_scores.to_csv(group_scores_path, index=False)
     series_table.to_csv(series_path, index=False)
@@ -1086,11 +1390,13 @@ def _learn_group_residual_shrinkage_from_validation(
         "one_standard_error": bool(one_standard_error),
         "clip_nonnegative": bool(clip_nonnegative),
         "forecast_mode": str(forecast_mode),
+        "n_validation_origins": len(validation_dirs),
+        "validation_dirs": [str(path) for path in validation_dirs],
         "group_path": str(group_path),
         "group_scores_path": str(group_scores_path),
         "series_path": str(series_path),
     }
-    (validation_dir / "group_residual_shrinkage.json").write_text(
+    (output_dir / "group_residual_shrinkage.json").write_text(
         json.dumps(report, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -1130,6 +1436,298 @@ def _nanmean_or_nan(values: np.ndarray, axis=None):
     if axis is None:
         return float(total / count) if int(count) > 0 else np.nan
     return np.divide(total, count, out=np.full_like(total, np.nan, dtype=float), where=count > 0)
+
+
+def _read_validation_forecast_variances(
+    validation_dir: Path,
+    forecast_mode: str,
+    series_ids: list[str],
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    modes = _forecast_modes(forecast_mode)
+    mode_dirs = (
+        [validation_dir / mode for mode in modes]
+        if len(modes) > 1
+        else [validation_dir]
+    )
+    baseline_variances = []
+    residual_variances = []
+    for mode_dir in mode_dirs:
+        baseline_path = mode_dir / "baseline_forecast_variance.csv"
+        residual_path = mode_dir / "residual_forecast_variance_unshrunk.csv"
+        if not residual_path.exists():
+            residual_path = mode_dir / "residual_forecast_variance.csv"
+        if not baseline_path.exists() or not residual_path.exists():
+            return None, None
+        baseline_cols, baseline_variance = _read_forecast_block(baseline_path)
+        residual_cols, residual_variance = _read_forecast_block(residual_path)
+        if baseline_cols != series_ids or residual_cols != series_ids:
+            raise ValueError(f"Validation variance columns do not match in {mode_dir}")
+        baseline_variances.append(baseline_variance)
+        residual_variances.append(residual_variance)
+    return np.vstack(baseline_variances), np.vstack(residual_variances)
+
+
+def _validation_test_date_range(
+    validation_dir: Path,
+    forecast_mode: str,
+) -> tuple[str, str]:
+    modes = _forecast_modes(forecast_mode)
+    mode_dirs = (
+        [validation_dir / mode for mode in modes]
+        if len(modes) > 1
+        else [validation_dir]
+    )
+    dates = []
+    for mode_dir in mode_dirs:
+        frame = pd.read_csv(mode_dir / "test.csv", usecols=[0])
+        dates.extend(pd.to_datetime(frame.iloc[:, 0]).tolist())
+    if not dates:
+        return "", ""
+    return str(min(dates)), str(max(dates))
+
+
+def _nested_forecast_metric_row(
+    model: str,
+    forecast: np.ndarray,
+    actual: np.ndarray,
+    variance: np.ndarray | None,
+) -> dict[str, Any]:
+    error = np.asarray(forecast, dtype=float) - np.asarray(actual, dtype=float)
+    squared_error = error ** 2
+    absolute_error = np.abs(error)
+    crps = (
+        np.full(error.shape, np.nan, dtype=float)
+        if variance is None
+        else _normal_crps(forecast, variance, actual)
+    )
+    return {
+        "model": model,
+        "n_observations": int(np.isfinite(error).sum()),
+        "rmse": float(np.sqrt(_nanmean_or_nan(squared_error))),
+        "mae": float(_nanmean_or_nan(absolute_error)),
+        "bias": float(_nanmean_or_nan(error)),
+        "oos_r2": float(out_of_sample_r2(error, actual)),
+        "oos_r2_zero": float(out_of_sample_r2_zero(error, actual)),
+        "crps": float(_nanmean_or_nan(crps)),
+        "forecast_variance_mean": (
+            np.nan if variance is None else float(_nanmean_or_nan(variance))
+        ),
+    }
+
+
+def _write_nested_residual_shrinkage_backtest(
+    validation_dirs: list[Path] | tuple[Path, ...],
+    final_dir: Path,
+    forecast_mode: str,
+    output_dir: Path,
+    *,
+    clip_nonnegative: bool,
+    grid: list[float],
+    objective: str,
+    group_mapping: pd.DataFrame | None = None,
+    min_group_series: int = 1,
+    one_standard_error: bool = False,
+) -> dict[str, Any]:
+    """Evaluate expanding-window shrinkage without using an outer fold to tune it."""
+    validation_dirs = _normalize_validation_dirs(validation_dirs)
+    final_dir = Path(final_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    outer_folds = [
+        {
+            "training_dirs": validation_dirs[:outer_index],
+            "test_dir": validation_dirs[outer_index],
+            "outer_origin": f"validation_origin_{outer_index + 1:03d}",
+        }
+        for outer_index in range(1, len(validation_dirs))
+    ]
+    outer_folds.append({
+        "training_dirs": validation_dirs,
+        "test_dir": final_dir,
+        "outer_origin": "final_test",
+    })
+
+    fold_rows = []
+    lambda_frames = []
+    pooled: dict[str, dict[str, Any]] = {
+        model: {"actual": [], "forecast": [], "variance": [], "variance_complete": True}
+        for model in ("baseline", "full_vara", "selected_shrinkage")
+    }
+    for fold_index, fold in enumerate(outer_folds, start=1):
+        training_dirs = list(fold["training_dirs"])
+        test_dir = Path(fold["test_dir"])
+        learning_dir = output_dir / f"fold_{fold_index:03d}" / "learning"
+        if group_mapping is None:
+            selected_lambda = _learn_residual_shrinkage_from_validation(
+                training_dirs,
+                forecast_mode,
+                clip_nonnegative=clip_nonnegative,
+                grid=grid,
+                objective=objective,
+                one_standard_error=one_standard_error,
+                output_dir=learning_dir,
+            )
+            lambda_table = pd.DataFrame({
+                "group_id": ["__global__"],
+                "residual_shrinkage": [selected_lambda],
+            })
+            global_lambda = selected_lambda
+            series_weights = None
+        else:
+            group_result = _learn_group_residual_shrinkage_from_validation(
+                training_dirs,
+                forecast_mode,
+                group_mapping,
+                clip_nonnegative=clip_nonnegative,
+                grid=grid,
+                min_group_series=min_group_series,
+                objective=objective,
+                one_standard_error=one_standard_error,
+                output_dir=learning_dir,
+            )
+            lambda_table = group_result["group_table"].copy()
+            global_lambda = float(group_result["global_residual_shrinkage"])
+            series_weights = group_result["series_table"].set_index("series_id")[
+                "residual_shrinkage"
+            ]
+
+        series_ids, actual, baseline, residual = _read_validation_forecast_arrays(
+            test_dir,
+            forecast_mode,
+        )
+        if series_weights is None:
+            weights = np.full(len(series_ids), selected_lambda, dtype=float)
+        else:
+            missing = [series_id for series_id in series_ids if series_id not in series_weights.index]
+            if missing:
+                raise ValueError(
+                    "Nested shrinkage weights are missing outer-fold series: "
+                    f"{missing[:10]}"
+                )
+            weights = series_weights.loc[series_ids].to_numpy(dtype=float)
+
+        baseline_variance, residual_variance = _read_validation_forecast_variances(
+            test_dir,
+            forecast_mode,
+            series_ids,
+        )
+        forecasts = {
+            "baseline": baseline,
+            "full_vara": baseline + residual,
+            "selected_shrinkage": baseline + residual * weights[None, :],
+        }
+        if clip_nonnegative:
+            forecasts = {
+                model: np.maximum(forecast, 0.0)
+                for model, forecast in forecasts.items()
+            }
+        variances: dict[str, np.ndarray | None]
+        if baseline_variance is None or residual_variance is None:
+            variances = {model: None for model in forecasts}
+        else:
+            variances = {
+                "baseline": baseline_variance,
+                "full_vara": baseline_variance + residual_variance,
+                "selected_shrinkage": (
+                    baseline_variance + residual_variance * weights[None, :] ** 2
+                ),
+            }
+
+        test_start, test_end = _validation_test_date_range(test_dir, forecast_mode)
+        fold_context = {
+            "fold_index": fold_index,
+            "outer_origin": fold["outer_origin"],
+            "test_start": test_start,
+            "test_end": test_end,
+            "n_training_origins": len(training_dirs),
+            "training_dirs": json.dumps([str(path) for path in training_dirs]),
+            "global_residual_shrinkage": global_lambda,
+            "selected_shrinkage_min": float(np.min(weights)),
+            "selected_shrinkage_mean": float(np.mean(weights)),
+            "selected_shrinkage_max": float(np.max(weights)),
+        }
+        for model, forecast in forecasts.items():
+            fold_rows.append({
+                **fold_context,
+                **_nested_forecast_metric_row(
+                    model,
+                    forecast,
+                    actual,
+                    variances[model],
+                ),
+            })
+            pooled[model]["actual"].append(actual)
+            pooled[model]["forecast"].append(forecast)
+            if variances[model] is None:
+                pooled[model]["variance_complete"] = False
+            else:
+                pooled[model]["variance"].append(variances[model])
+
+        lambda_table.insert(0, "fold_index", fold_index)
+        lambda_table.insert(1, "outer_origin", fold["outer_origin"])
+        lambda_table.insert(2, "test_start", test_start)
+        lambda_table.insert(3, "test_end", test_end)
+        lambda_table.insert(4, "n_training_origins", len(training_dirs))
+        lambda_table["global_residual_shrinkage"] = global_lambda
+        lambda_frames.append(lambda_table)
+
+    fold_metrics = pd.DataFrame(fold_rows)
+    group_lambdas = pd.concat(lambda_frames, ignore_index=True, sort=False)
+    summary_rows = []
+    metric_columns = ["rmse", "mae", "bias", "oos_r2", "oos_r2_zero", "crps"]
+    for model, blocks in pooled.items():
+        actual = np.vstack(blocks["actual"])
+        forecast = np.vstack(blocks["forecast"])
+        variance = (
+            np.vstack(blocks["variance"])
+            if blocks["variance_complete"] and blocks["variance"]
+            else None
+        )
+        row = _nested_forecast_metric_row(model, forecast, actual, variance)
+        model_folds = fold_metrics.loc[fold_metrics["model"] == model]
+        row["n_outer_folds"] = int(len(model_folds))
+        for metric in metric_columns:
+            row[f"{metric}_fold_mean"] = float(
+                _nanmean_or_nan(model_folds[metric].to_numpy(dtype=float))
+            )
+        summary_rows.append(row)
+    summary = pd.DataFrame(summary_rows)
+
+    fold_metrics_path = output_dir / "fold_metrics.csv"
+    summary_path = output_dir / "summary.csv"
+    group_lambdas_path = output_dir / "group_lambdas.csv"
+    fold_metrics.to_csv(fold_metrics_path, index=False)
+    summary.to_csv(summary_path, index=False)
+    group_lambdas.to_csv(group_lambdas_path, index=False)
+    report = {
+        "n_validation_origins": len(validation_dirs),
+        "n_outer_folds": len(outer_folds),
+        "validation_dirs": [str(path) for path in validation_dirs],
+        "final_dir": str(final_dir),
+        "forecast_mode": forecast_mode,
+        "shrinkage_level": "group" if group_mapping is not None else "global",
+        "fold_metrics_path": str(fold_metrics_path),
+        "summary_path": str(summary_path),
+        "group_lambdas_path": str(group_lambdas_path),
+    }
+    (output_dir / "nested_backtest.json").write_text(
+        json.dumps(report, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print("\nNested residual-shrinkage backtest:", flush=True)
+    print(
+        summary.loc[:, ["model", "n_outer_folds", *metric_columns]].to_string(
+            index=False
+        ),
+        flush=True,
+    )
+    return {
+        **report,
+        "fold_metrics": fold_metrics,
+        "summary": summary,
+        "group_lambdas": group_lambdas,
+    }
 
 
 def _benchmark_needs_series_subset(benchmark_dir: Path, max_series: int) -> bool:
@@ -1403,22 +2001,42 @@ def _parse_args() -> argparse.Namespace:
         help="Apply a precomputed per-series residual shrinkage CSV/parquet file.",
     )
     parser.add_argument(
+        "--residual-shrinkage-mode",
+        choices=RESIDUAL_SHRINKAGE_MODES,
+        default=None,
+        help=(
+            "Residual correction strategy: full uses lambda=1; fixed uses "
+            "--residual-shrinkage; global learns one lambda; group learns one "
+            "lambda per configured group; file uses --residual-shrinkage-file."
+        ),
+    )
+    parser.add_argument(
         "--learn-residual-shrinkage",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Learn one global residual shrinkage value on the validation window before the final VARA run.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--learn-group-residual-shrinkage",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Learn one validation residual shrinkage weight per series group.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--residual-shrinkage-grid",
         type=str,
         default=None,
         help="Comma-separated candidate lambdas used when learning residual shrinkage on validation.",
+    )
+    parser.add_argument(
+        "--residual-shrinkage-validation-origins",
+        type=int,
+        default=None,
+        help=(
+            "Number of consecutive historical forecast horizons used to learn "
+            "residual shrinkage. Multiple origins are pooled for the final lambda "
+            "and evaluated with an expanding-window nested backtest."
+        ),
     )
     parser.add_argument(
         "--residual-shrinkage-group-file",
@@ -1433,7 +2051,10 @@ def _parse_args() -> argparse.Namespace:
         "--residual-shrinkage-group-cols",
         type=str,
         default=None,
-        help="Comma-separated metadata columns used to build group_id values.",
+        help=(
+            "Comma-separated metadata columns used to build group_id values. "
+            "Tourism also supports hierarchy_level_1 derived from series names."
+        ),
     )
     parser.add_argument(
         "--residual-shrinkage-min-group-series",
@@ -1475,6 +2096,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
     defaults = DATASET_DEFAULTS[args.dataset]
+    residual_shrinkage_mode = _resolve_residual_shrinkage_mode(args, defaults)
     output_dir = args.output_dir or defaults["output_dir"]
     feature_source = _arg_value(args, defaults, "feature_source")
     feature_path = args.feature_path
@@ -1518,11 +2140,11 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "y_transform": _arg_value(args, defaults, "y_transform"),
         "residual_shrinkage": _arg_value(args, defaults, "residual_shrinkage"),
         "residual_shrinkage_file": _arg_value(args, defaults, "residual_shrinkage_file"),
-        "learn_residual_shrinkage": _arg_value(args, defaults, "learn_residual_shrinkage"),
-        "learn_group_residual_shrinkage": _arg_value(
-            args, defaults, "learn_group_residual_shrinkage"
-        ),
+        "residual_shrinkage_mode": residual_shrinkage_mode,
         "residual_shrinkage_grid": _arg_value(args, defaults, "residual_shrinkage_grid"),
+        "residual_shrinkage_validation_origins": _arg_value(
+            args, defaults, "residual_shrinkage_validation_origins"
+        ),
         "residual_shrinkage_group_file": _arg_value(
             args, defaults, "residual_shrinkage_group_file"
         ),
@@ -1762,6 +2384,51 @@ def _plot_cmd(config: dict[str, Any]) -> list[str]:
     return cmd
 
 
+def _prepare_residual_shrinkage_mode(
+    config: dict[str, Any],
+) -> tuple[bool, bool]:
+    mode = str(config["residual_shrinkage_mode"])
+    scalar = float(config["residual_shrinkage"])
+    shrinkage_file = config.get("residual_shrinkage_file")
+    if not np.isfinite(scalar) or scalar < 0.0:
+        raise ValueError("--residual-shrinkage must be finite and nonnegative.")
+
+    if mode == "full":
+        if scalar != 1.0 or shrinkage_file is not None:
+            raise ValueError(
+                "--residual-shrinkage-mode full requires lambda=1 and no "
+                "--residual-shrinkage-file."
+            )
+    elif mode == "fixed":
+        if shrinkage_file is not None:
+            raise ValueError(
+                "--residual-shrinkage-mode fixed cannot use "
+                "--residual-shrinkage-file."
+            )
+    elif mode == "file":
+        if shrinkage_file is None:
+            raise ValueError(
+                "--residual-shrinkage-mode file requires "
+                "--residual-shrinkage-file."
+            )
+        if scalar != 1.0:
+            raise ValueError(
+                "--residual-shrinkage-mode file cannot be combined with a fixed "
+                "--residual-shrinkage value."
+            )
+    elif mode in {"global", "group"}:
+        if shrinkage_file is not None:
+            raise ValueError(
+                f"--residual-shrinkage-mode {mode} cannot be combined with "
+                "--residual-shrinkage-file."
+            )
+        config["residual_shrinkage"] = 1.0
+    else:
+        raise ValueError(f"Unknown residual shrinkage mode: {mode!r}.")
+
+    return mode == "global", mode == "group"
+
+
 def main() -> None:
     args = _parse_args()
     if (
@@ -1772,25 +2439,9 @@ def main() -> None:
     ):
         raise ValueError("M5 --forecast-scenario auto_ets requires --feature-filter-method auto_ets.")
     config = _resolved_config(args)
-    learn_global_shrinkage = bool(config.get("learn_residual_shrinkage"))
-    learn_group_shrinkage = bool(config.get("learn_group_residual_shrinkage"))
-    if learn_global_shrinkage and learn_group_shrinkage:
-        raise ValueError(
-            "Choose either --learn-residual-shrinkage or "
-            "--learn-group-residual-shrinkage, not both."
-        )
-    if config.get("residual_shrinkage_file") is not None and (
-        learn_global_shrinkage or learn_group_shrinkage
-    ):
-        raise ValueError(
-            "A precomputed --residual-shrinkage-file cannot be combined with shrinkage learning."
-        )
-    if config.get("residual_shrinkage_file") is not None and float(
-        config["residual_shrinkage"]
-    ) != 1.0:
-        raise ValueError(
-            "Use either --residual-shrinkage or --residual-shrinkage-file, not both."
-        )
+    learn_global_shrinkage, learn_group_shrinkage = (
+        _prepare_residual_shrinkage_mode(config)
+    )
     if config["forecast_scenario"] == "direct" and (
         learn_global_shrinkage
         or learn_group_shrinkage
@@ -1800,6 +2451,8 @@ def main() -> None:
         raise ValueError("Residual shrinkage is only available for residual-correction scenarios.")
     if int(config["residual_shrinkage_min_group_series"]) < 1:
         raise ValueError("--residual-shrinkage-min-group-series must be at least 1.")
+    if int(config["residual_shrinkage_validation_origins"]) < 1:
+        raise ValueError("--residual-shrinkage-validation-origins must be at least 1.")
     group_mapping = None
     if learn_group_shrinkage and not args.skip_vara and not args.dry_run:
         group_mapping = _load_residual_shrinkage_group_mapping(config)
@@ -1830,44 +2483,74 @@ def main() -> None:
     if config.get("include_full_tsfeatures_vara"):
         vara_outputs.append((full_vara_dir, "VARA on AutoETS residuals, full tsfeatures"))
 
+    validation_vara_dirs: list[Path] = []
+    shrinkage_grid: list[float] | None = None
     if (learn_global_shrinkage or learn_group_shrinkage) and not args.skip_vara:
         if args.dry_run:
             print(
-                "Dry run: residual shrinkage would be learned on the validation window "
-                "before the final VARA run.",
+                "Dry run: residual shrinkage would be learned from "
+                f"{config['residual_shrinkage_validation_origins']} historical "
+                "validation origin(s) before the final VARA run.",
                 flush=True,
             )
         else:
-            validation_panel = _write_validation_panel(config, overwrite=args.recompute_features)
-            validation_config = dict(config)
-            validation_config["data_path"] = validation_panel
-            validation_config["clip_nonnegative"] = False
-            validation_config["residual_shrinkage"] = 1.0
-            validation_config["residual_shrinkage_file"] = None
-            validation_feature_cmd, validation_feature_path = _prepare_validation_feature_cmd(
-                args,
+            validation_origins = _write_validation_panels(
                 config,
-                ray_args,
+                int(config["residual_shrinkage_validation_origins"]),
+                overwrite=args.recompute_features,
             )
-            if validation_feature_cmd is not None:
-                _run(validation_feature_cmd, dry_run=False)
-                if validation_feature_path is not None and config.get("feature_path") is not None:
-                    _align_validation_feature_file(validation_feature_path, Path(config["feature_path"]))
-            validation_config["feature_path"] = validation_feature_path
-            validation_panel_args = _common_panel_args(validation_config)
-            validation_vara_dir = output_dir / "validation" / "vara"
-            _run(
-                _vara_cmd(args, validation_config, validation_panel_args, ray_args, output_dir=validation_vara_dir),
-                dry_run=False,
-            )
+            validation_feature_paths: list[Path | None] = []
+            for origin in validation_origins:
+                validation_panel = Path(origin["panel_path"])
+                validation_vara_dir = Path(origin["vara_dir"])
+                validation_config = dict(config)
+                validation_config["data_path"] = validation_panel
+                validation_config["clip_nonnegative"] = False
+                validation_config["residual_shrinkage"] = 1.0
+                validation_config["residual_shrinkage_file"] = None
+                validation_feature_cmd, validation_feature_path = (
+                    _prepare_validation_feature_cmd(
+                        args,
+                        config,
+                        ray_args,
+                        validation_root=Path(origin["origin_root"]),
+                        holdout_periods=int(origin["feature_holdout"]),
+                    )
+                )
+                if validation_feature_cmd is not None:
+                    _run(validation_feature_cmd, dry_run=False)
+                    if (
+                        validation_feature_path is not None
+                        and config.get("feature_path") is not None
+                    ):
+                        _align_validation_feature_file(
+                            validation_feature_path,
+                            Path(config["feature_path"]),
+                        )
+                validation_config["feature_path"] = validation_feature_path
+                validation_panel_args = _common_panel_args(validation_config)
+                _run(
+                    _vara_cmd(
+                        args,
+                        validation_config,
+                        validation_panel_args,
+                        ray_args,
+                        output_dir=validation_vara_dir,
+                    ),
+                    dry_run=False,
+                )
+                validation_vara_dirs.append(validation_vara_dir)
+                validation_feature_paths.append(validation_feature_path)
+
             shrinkage_grid = _parse_residual_shrinkage_grid(
                 str(config["residual_shrinkage_grid"])
             )
+            shrinkage_learning_dir = output_dir / "validation" / "vara"
             if learn_group_shrinkage:
                 if group_mapping is None:
                     raise RuntimeError("Residual shrinkage group mapping was not initialized.")
                 group_result = _learn_group_residual_shrinkage_from_validation(
-                    validation_vara_dir,
+                    validation_vara_dirs,
                     str(config["forecast_mode"]),
                     group_mapping,
                     clip_nonnegative=bool(config["clip_nonnegative"]),
@@ -1877,6 +2560,7 @@ def main() -> None:
                     one_standard_error=bool(
                         config["residual_shrinkage_group_one_standard_error"]
                     ),
+                    output_dir=shrinkage_learning_dir,
                 )
                 config["residual_shrinkage"] = 1.0
                 config["residual_shrinkage_file"] = Path(group_result["series_path"])
@@ -1892,18 +2576,39 @@ def main() -> None:
                 })
             else:
                 learned_lambda = _learn_residual_shrinkage_from_validation(
-                    validation_vara_dir,
+                    validation_vara_dirs,
                     str(config["forecast_mode"]),
                     clip_nonnegative=bool(config["clip_nonnegative"]),
                     grid=shrinkage_grid,
                     objective=str(config["residual_shrinkage_objective"]),
+                    output_dir=shrinkage_learning_dir,
                 )
                 config["residual_shrinkage"] = learned_lambda
                 workflow_extra["learned_residual_shrinkage"] = learned_lambda
             workflow_extra.update({
-                "residual_shrinkage_validation_dir": validation_vara_dir.as_posix(),
-                "residual_shrinkage_validation_panel": validation_panel.as_posix(),
-                "residual_shrinkage_validation_feature_path": "" if validation_feature_path is None else validation_feature_path.as_posix(),
+                "residual_shrinkage_validation_dir": shrinkage_learning_dir.as_posix(),
+                "residual_shrinkage_validation_dirs": [
+                    path.as_posix() for path in validation_vara_dirs
+                ],
+                "residual_shrinkage_validation_panel": Path(
+                    validation_origins[-1]["panel_path"]
+                ).as_posix(),
+                "residual_shrinkage_validation_panels": [
+                    Path(origin["panel_path"]).as_posix()
+                    for origin in validation_origins
+                ],
+                "residual_shrinkage_validation_feature_path": (
+                    ""
+                    if validation_feature_paths[-1] is None
+                    else validation_feature_paths[-1].as_posix()
+                ),
+                "residual_shrinkage_validation_feature_paths": [
+                    "" if path is None else path.as_posix()
+                    for path in validation_feature_paths
+                ],
+                "residual_shrinkage_validation_origins_manifest": (
+                    output_dir / "validation" / "validation_origins.csv"
+                ).as_posix(),
             })
             _write_workflow_config()
 
@@ -1921,6 +2626,37 @@ def main() -> None:
                 ),
                 dry_run=args.dry_run,
             )
+        if validation_vara_dirs and not args.dry_run:
+            if shrinkage_grid is None:
+                raise RuntimeError("Residual shrinkage grid was not initialized.")
+            nested_result = _write_nested_residual_shrinkage_backtest(
+                validation_vara_dirs,
+                config["vara_dir"],
+                str(config["forecast_mode"]),
+                output_dir / "validation" / "nested_backtest",
+                clip_nonnegative=bool(config["clip_nonnegative"]),
+                grid=shrinkage_grid,
+                objective=str(config["residual_shrinkage_objective"]),
+                group_mapping=group_mapping if learn_group_shrinkage else None,
+                min_group_series=int(config["residual_shrinkage_min_group_series"]),
+                one_standard_error=(
+                    bool(config["residual_shrinkage_group_one_standard_error"])
+                    if learn_group_shrinkage
+                    else False
+                ),
+            )
+            workflow_extra.update({
+                "residual_shrinkage_nested_fold_metrics_path": nested_result[
+                    "fold_metrics_path"
+                ],
+                "residual_shrinkage_nested_summary_path": nested_result[
+                    "summary_path"
+                ],
+                "residual_shrinkage_nested_group_lambdas_path": nested_result[
+                    "group_lambdas_path"
+                ],
+            })
+            _write_workflow_config()
 
     have_comparison_benchmark = (not args.dry_run) and _benchmark_outputs_exist(comparison_benchmark_dir)
     if not args.dry_run and have_comparison_benchmark:

@@ -1,3 +1,5 @@
+import argparse
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,8 +10,14 @@ import pandas as pd
 from scripts.run_forecast_workflow import (
     DATASET_DEFAULTS,
     _learn_group_residual_shrinkage_from_validation,
+    _learn_residual_shrinkage_from_validation,
+    _load_config_json_defaults,
     _load_residual_shrinkage_group_mapping,
+    _prepare_residual_shrinkage_mode,
+    _resolve_residual_shrinkage_mode,
     _select_residual_shrinkage_score,
+    _write_nested_residual_shrinkage_backtest,
+    _write_validation_panels,
 )
 from scripts.run_vara_forecast import (
     _apply_residual_shrinkage,
@@ -18,13 +26,232 @@ from scripts.run_vara_forecast import (
 )
 
 
+def _write_validation_outputs(
+    output_dir: Path,
+    dates: pd.DatetimeIndex,
+    actual: np.ndarray,
+    baseline: np.ndarray,
+    residual: np.ndarray,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    series_ids = [f"s{index + 1}" for index in range(actual.shape[1])]
+    for name, values in (
+        ("test.csv", actual),
+        ("baseline_forecast.csv", baseline),
+        ("residual_forecast.csv", residual),
+        ("residual_forecast_unshrunk.csv", residual),
+        ("baseline_forecast_variance.csv", np.ones_like(actual)),
+        ("residual_forecast_variance_unshrunk.csv", np.ones_like(actual)),
+    ):
+        frame = pd.DataFrame(values, columns=series_ids)
+        frame.insert(0, "date", dates)
+        frame.to_csv(output_dir / name, index=False)
+
+
 class GroupResidualShrinkageTests(unittest.TestCase):
+    def test_unified_residual_shrinkage_modes(self):
+        defaults = DATASET_DEFAULTS["m5"]
+        for mode in ("full", "global", "group"):
+            with self.subTest(mode=mode):
+                args = argparse.Namespace(
+                    residual_shrinkage_mode=mode,
+                    residual_shrinkage=None,
+                    residual_shrinkage_file=None,
+                    learn_residual_shrinkage=None,
+                    learn_group_residual_shrinkage=None,
+                )
+                self.assertEqual(
+                    _resolve_residual_shrinkage_mode(args, defaults),
+                    mode,
+                )
+
+    def test_legacy_learning_config_is_migrated_to_unified_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy_config.json"
+            path.write_text(
+                json.dumps({
+                    "dataset": "tourism",
+                    "residual_shrinkage": 0.6,
+                    "learn_residual_shrinkage": True,
+                    "learn_group_residual_shrinkage": False,
+                }),
+                encoding="utf-8",
+            )
+
+            defaults = _load_config_json_defaults(path)
+
+        self.assertEqual(defaults["residual_shrinkage_mode"], "global")
+        self.assertNotIn("learn_residual_shrinkage", defaults)
+        self.assertNotIn("learn_group_residual_shrinkage", defaults)
+
+    def test_prepare_group_mode_enables_only_group_learning(self):
+        config = {
+            "residual_shrinkage_mode": "group",
+            "residual_shrinkage": 0.4,
+            "residual_shrinkage_file": None,
+        }
+
+        learn_global, learn_group = _prepare_residual_shrinkage_mode(config)
+
+        self.assertFalse(learn_global)
+        self.assertTrue(learn_group)
+        self.assertEqual(config["residual_shrinkage"], 1.0)
+
     def test_one_standard_error_rule_is_disabled_by_default(self):
         for dataset, defaults in DATASET_DEFAULTS.items():
             with self.subTest(dataset=dataset):
                 self.assertFalse(
                     defaults["residual_shrinkage_group_one_standard_error"]
                 )
+
+    def test_tourism_group_defaults_use_top_level_hierarchy(self):
+        defaults = DATASET_DEFAULTS["tourism"]
+        self.assertEqual(
+            defaults["residual_shrinkage_group_cols"],
+            "hierarchy_level_1",
+        )
+        self.assertEqual(defaults["residual_shrinkage_min_group_series"], 5)
+        self.assertEqual(defaults["residual_shrinkage_validation_origins"], 1)
+
+    def test_multiple_validation_panels_are_chronological_and_nonoverlapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_path = root / "panel.csv"
+            dates = pd.date_range("2018-01-01", periods=72, freq="MS")
+            pd.DataFrame({
+                "date": dates,
+                "s1": np.arange(72, dtype=float),
+                "s2": np.arange(72, dtype=float) + 10.0,
+            }).to_csv(data_path, index=False)
+            config = {
+                "data_path": data_path,
+                "output_dir": root / "output",
+                "date_col": "date",
+                "horizon": 12,
+            }
+
+            origins = _write_validation_panels(config, 3)
+
+            self.assertEqual(len(origins), 3)
+            self.assertEqual(
+                [pd.Timestamp(origin["validation_start"]) for origin in origins],
+                [dates[24], dates[36], dates[48]],
+            )
+            self.assertEqual(
+                [pd.Timestamp(origin["validation_end"]) for origin in origins],
+                [dates[35], dates[47], dates[59]],
+            )
+            self.assertEqual(
+                [origin["feature_holdout"] for origin in origins],
+                [48, 36, 24],
+            )
+            self.assertEqual(
+                [len(pd.read_csv(origin["panel_path"])) for origin in origins],
+                [36, 48, 60],
+            )
+            self.assertTrue(
+                (root / "output" / "validation" / "validation_origins.csv").exists()
+            )
+
+    def test_global_learning_pools_multiple_validation_origins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = np.full((4, 2), 10.0)
+            residual = np.full((4, 2), 2.0)
+            first = root / "origin_1"
+            second = root / "origin_2"
+            _write_validation_outputs(
+                first,
+                pd.date_range("2021-01-01", periods=4, freq="D"),
+                baseline,
+                baseline,
+                residual,
+            )
+            _write_validation_outputs(
+                second,
+                pd.date_range("2022-01-01", periods=4, freq="D"),
+                baseline + residual,
+                baseline,
+                residual,
+            )
+            learning_dir = root / "learning"
+
+            selected = _learn_residual_shrinkage_from_validation(
+                [first, second],
+                "rolling-origin",
+                clip_nonnegative=False,
+                grid=[0.0, 1.0],
+                output_dir=learning_dir,
+            )
+
+            self.assertAlmostEqual(selected, 0.5)
+            report = json.loads(
+                (learning_dir / "residual_shrinkage.json").read_text()
+            )
+            self.assertEqual(report["n_validation_origins"], 2)
+
+    def test_nested_group_backtest_uses_only_earlier_origins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = np.full((4, 2), 10.0)
+            residual = np.full((4, 2), 2.0)
+            first = root / "origin_1"
+            second = root / "origin_2"
+            final = root / "final"
+            _write_validation_outputs(
+                first,
+                pd.date_range("2020-01-01", periods=4, freq="D"),
+                baseline + residual,
+                baseline,
+                residual,
+            )
+            _write_validation_outputs(
+                second,
+                pd.date_range("2021-01-01", periods=4, freq="D"),
+                baseline,
+                baseline,
+                residual,
+            )
+            _write_validation_outputs(
+                final,
+                pd.date_range("2022-01-01", periods=4, freq="D"),
+                baseline + 0.5 * residual,
+                baseline,
+                residual,
+            )
+            mapping = pd.DataFrame({
+                "series_id": ["s1", "s2"],
+                "group_id": ["g", "g"],
+            })
+
+            result = _write_nested_residual_shrinkage_backtest(
+                [first, second],
+                final,
+                "rolling-origin",
+                root / "nested",
+                clip_nonnegative=False,
+                grid=[0.0, 0.5, 1.0],
+                objective="rmse",
+                group_mapping=mapping,
+                min_group_series=1,
+                one_standard_error=False,
+            )
+
+            lambdas = result["group_lambdas"].set_index("fold_index")
+            self.assertAlmostEqual(lambdas.loc[1, "residual_shrinkage"], 1.0)
+            self.assertAlmostEqual(lambdas.loc[2, "residual_shrinkage"], 0.5)
+            self.assertEqual(lambdas.loc[1, "n_training_origins"], 1)
+            self.assertEqual(lambdas.loc[2, "n_training_origins"], 2)
+            first_fold = result["fold_metrics"].query("fold_index == 1").set_index(
+                "model"
+            )
+            self.assertAlmostEqual(first_fold.loc["baseline", "rmse"], 0.0)
+            self.assertAlmostEqual(
+                first_fold.loc["selected_shrinkage", "rmse"],
+                2.0,
+            )
+            self.assertEqual(len(result["fold_metrics"]), 6)
+            self.assertTrue((root / "nested" / "summary.csv").exists())
 
     def test_load_residual_shrinkage_aligns_weights_by_series_id(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,6 +392,37 @@ class GroupResidualShrinkageTests(unittest.TestCase):
 
         self.assertEqual(mapping.loc["s1", "group_id"], "dept_id=FOODS_3|store_id=WI_2")
         self.assertEqual(mapping.loc["s2", "group_id"], "dept_id=FOODS_3|store_id=CA_1")
+
+    def test_tourism_group_mapping_is_derived_from_top_level_hierarchy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tourism.csv"
+            pd.DataFrame({
+                "date": pd.date_range("2020-01-01", periods=2, freq="MS"),
+                "AAAAll": [1.0, 2.0],
+                "ABAAll": [3.0, 4.0],
+                "BAAAll": [5.0, 6.0],
+                "AAAll": [7.0, 8.0],
+                "AAAHol": [9.0, 10.0],
+            }).to_csv(path, index=False)
+            config = {
+                "dataset": "tourism",
+                "data_path": path,
+                "data_format": "wide",
+                "date_col": "date",
+                "series_col": "series_id",
+                "series_suffix": "All",
+                "series_depth": 3,
+                "residual_shrinkage_group_file": None,
+                "residual_shrinkage_group_cols": "hierarchy_level_1",
+            }
+
+            mapping = _load_residual_shrinkage_group_mapping(config).set_index(
+                "series_id"
+            )
+
+        self.assertEqual(set(mapping.index), {"AAAAll", "ABAAll", "BAAAll"})
+        self.assertEqual(mapping.loc["AAAAll", "group_id"], "hierarchy_level_1=A")
+        self.assertEqual(mapping.loc["BAAAll", "group_id"], "hierarchy_level_1=B")
 
     def test_vara_runner_applies_per_series_shrinkage_file(self):
         with tempfile.TemporaryDirectory() as tmp:

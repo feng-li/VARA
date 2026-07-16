@@ -880,11 +880,12 @@ def _new_forecaster(
     ridge: float,
     attention_mode: str = "dense",
     attention_top_k: int | None = None,
+    eta_bounds: tuple[float, float] = (-2.0, 2.0),
 ):
     _, VARAForecaster = _runtime_imports()
     return VARAForecaster(
         grid_size=grid_size,
-        eta_bounds=(-2.0, 2.0),
+        eta_bounds=eta_bounds,
         ridge=ridge,
         dense_threshold=2500,
         attention_mode=attention_mode,
@@ -932,6 +933,7 @@ def _fit_vara_origin_step(
     feature_source_train_end: str,
     origin_train: np.ndarray | None = None,
     train_end_override=None,
+    eta_bounds: tuple[float, float] = (-2.0, 2.0),
 ) -> dict:
     jnp, _ = _runtime_imports()
     origin = int(step) + 1
@@ -956,7 +958,13 @@ def _fit_vara_origin_step(
         model_transform = residual_transform
 
     Y_train, fitted_y_transform = _fit_y_transform(model_train, model_transform, seasonal_lag)
-    forecaster = _new_forecaster(grid_size, ridge, attention_mode, attention_top_k)
+    forecaster = _new_forecaster(
+        grid_size,
+        ridge,
+        attention_mode,
+        attention_top_k,
+        eta_bounds=eta_bounds,
+    )
     forecaster.fit(jnp.asarray(Y_train), jnp.asarray(Z))
     forecast_model_scale = np.asarray(forecaster.predict(h=1))
     transformed_one = _unscale_y_transform(forecast_model_scale, fitted_y_transform)
@@ -1033,6 +1041,7 @@ def _fit_vara_origin_remote(
     forecast_scenario: str,
     residual_transform: str,
     ray_debug: bool,
+    eta_bounds: tuple[float, float] = (-2.0, 2.0),
 ) -> dict:
     start = time.time()
     origin = int(step) + 1
@@ -1074,6 +1083,7 @@ def _fit_vara_origin_remote(
         feature_exact=feature_exact,
         feature_source_origin=source_origin,
         feature_source_train_end=_feature_train_end(feature_df, fallback_train_end),
+        eta_bounds=eta_bounds,
     )
     if ray_debug:
         _print_progress(f"[Ray VARA origin done] origin={origin}, elapsed_sec={time.time() - start:.2f}")
