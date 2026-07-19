@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from scripts.run_vara_forecast import run_vara_forecast
+from scripts.run_vara_forecast import _validate_baseline_feature_metadata, run_vara_forecast
 from vara.hierarchical_features import make_m5_attention_features, make_m5_attention_features_from_files
 from vara.series_features import load_series_feature_matrix
 
@@ -105,7 +105,7 @@ class M5FeatureTests(unittest.TestCase):
             saved = pd.read_parquet(output_path)
             self.assertEqual(saved["transform"].tolist(), ["m5_attention_auto_ets"] * 2)
 
-    def test_auto_ets_forecast_rejects_non_auto_ets_feature_metadata(self):
+    def test_auto_ets_forecast_accepts_raw_demand_feature_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_path = root / "panel.csv"
@@ -124,19 +124,14 @@ class M5FeatureTests(unittest.TestCase):
                 "seasonal_lag": 1,
             }))
 
-            with self.assertRaisesRegex(ValueError, "auto_ets-filtered feature file"):
-                run_vara_forecast(
-                    data_path=data_path,
-                    output_dir=root / "out",
-                    horizon=2,
-                    seasonal_lag=1,
-                    series_depth=None,
-                    series_suffix=None,
-                    feature_path=feature_path,
-                    forecast_scenario="auto_ets",
-                    y_transform="none",
-                    grid_size=3,
-                )
+            checked = _validate_baseline_feature_metadata(
+                feature_path=feature_path,
+                forecast_scenario="auto_ets",
+                seasonal_lag=1,
+            )
+
+            self.assertTrue(checked["checked"])
+            self.assertEqual(checked["filter_method"], "direct")
 
     def test_auto_ets_forecast_rejects_auto_ets_feature_fallback_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:

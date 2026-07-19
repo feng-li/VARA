@@ -1991,7 +1991,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seasonal-lag", type=int, default=None)
     parser.add_argument("--feature-freq", type=int, default=None)
     parser.add_argument("--forecast-scenario", choices=["direct", "seasonal-naive-residual", "auto_ets", "statsmodels_ets", "seasonal_ets"], default=None)
-    parser.add_argument("--residual-transform", choices=["center", "standardize"], default=None)
+    parser.add_argument(
+        "--residual-transform",
+        choices=["center", "standardize", "robust-standardize"],
+        default=None,
+    )
     parser.add_argument("--y-transform", default=None)
     parser.add_argument("--residual-shrinkage", type=float, default=None)
     parser.add_argument(

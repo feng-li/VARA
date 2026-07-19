@@ -52,19 +52,28 @@ class VARAForecaster:
         if not lower < upper:
             raise ValueError("eta_bounds must satisfy lower < upper.")
 
-        eta_hat, eta_info = estimate_eta_concentrated(
-            Y=Y,
-            Z=Z,
-            params_scale=self.params_scale,
-            eta_bounds=self.eta_bounds,
-            grid_size=self.grid_size,
-            ridge=self.ridge,
-            batch_size=self.batch_size,
-            dense_threshold=self.dense_threshold,
-            attention_mode=self.attention_mode,
-            attention_top_k=self.attention_top_k,
-            attention_cache=self.attention_cache,
-        )
+        if self.attention_mode == "uniform":
+            eta_hat = jnp.asarray(0.0)
+            eta_info = {
+                "grid_best_eta": 0.0,
+                "grid_best_obj": jnp.nan,
+                "objective": jnp.nan,
+                "on_boundary": False,
+            }
+        else:
+            eta_hat, eta_info = estimate_eta_concentrated(
+                Y=Y,
+                Z=Z,
+                params_scale=self.params_scale,
+                eta_bounds=self.eta_bounds,
+                grid_size=self.grid_size,
+                ridge=self.ridge,
+                batch_size=self.batch_size,
+                dense_threshold=self.dense_threshold,
+                attention_mode=self.attention_mode,
+                attention_top_k=self.attention_top_k,
+                attention_cache=self.attention_cache,
+            )
         fit = fit_all_components_two_stage(
             Y=Y,
             Z=Z,

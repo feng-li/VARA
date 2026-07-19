@@ -56,6 +56,43 @@ class AttentionTests(unittest.TestCase):
 
         np.testing.assert_allclose(np.asarray(batched), np.asarray(dense), rtol=1e-6, atol=1e-6)
 
+    def test_uniform_attention_matches_dense_zero_eta_without_diagonal(self):
+        v = jnp.arange(5.0)
+        Y_lag = jnp.stack((v, 2.0 * v))
+        dense = build_attention(self.Z, eta=0.0, scale=1.0)
+        uniform = build_attention(
+            self.Z,
+            eta=9.0,
+            scale=1.0,
+            attention_mode="uniform",
+        )
+
+        np.testing.assert_allclose(np.asarray(uniform), np.asarray(dense), rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(attention_matvec(
+                self.Z,
+                9.0,
+                v,
+                self.params_scale,
+                attention_mode="uniform",
+            )),
+            np.asarray(dense @ v),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(attention_weighted_lags(
+                Y_lag,
+                self.Z,
+                9.0,
+                self.params_scale,
+                attention_mode="uniform",
+            )),
+            np.asarray(Y_lag @ dense.T),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
     def test_topk_attention_is_sparse_and_row_stochastic(self):
         W = build_attention(self.Z, eta=0.7, scale=1.0, attention_mode="topk", top_k=2)
 

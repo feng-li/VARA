@@ -22,6 +22,11 @@ from scripts.run_full_simulation import (
     make_simulation_reporting_tables,
     make_simulation_setup_table,
 )
+from scripts.run_m5_local_vara import (
+    _evaluation_origin_offsets,
+    _recover_sales_forecast,
+    _transform_sales,
+)
 from scripts.run_vara_forecast import (
     _baseline_config_for_scenario,
     _baseline_forecast_and_residual_panel,
@@ -40,6 +45,38 @@ from scripts.run_vara_forecast import (
 
 
 class ScriptHelperTests(unittest.TestCase):
+    def test_m5_log1p_sales_transform_and_recovery_add_residual_before_inverse(self):
+        sales = np.asarray([[0.0, 3.0], [8.0, 15.0]])
+        np.testing.assert_allclose(_transform_sales(sales, "log1p"), np.log1p(sales))
+
+        baseline_log = np.log1p(np.asarray([[3.0, 8.0]]))
+        residual_log = np.log(np.asarray([[2.0, 0.5]]))
+        baseline, residual = _recover_sales_forecast(
+            baseline_log,
+            residual_log,
+            "log1p",
+        )
+        np.testing.assert_allclose(baseline, [[3.0, 8.0]], atol=1e-12)
+        np.testing.assert_allclose(
+            baseline + residual,
+            np.expm1(baseline_log + residual_log),
+            atol=1e-12,
+        )
+
+    def test_m5_log1p_sales_transform_rejects_negative_values(self):
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            _transform_sales(np.asarray([[1.0, -1.0]]), "log1p")
+
+    def test_m5_sparse_origin_offsets_keep_final_validation_date(self):
+        self.assertEqual(
+            _evaluation_origin_offsets(horizon=112, origin_stride=28),
+            [27, 55, 83, 111],
+        )
+        self.assertEqual(
+            _evaluation_origin_offsets(horizon=28, origin_stride=1),
+            list(range(28)),
+        )
+
     def test_parse_forecast_modes_accepts_comma_list_and_underscore_alias(self):
         self.assertEqual(
             _parse_forecast_modes("rolling_origin,closed_loop,recursive,recursive"),
@@ -150,6 +187,26 @@ class ScriptHelperTests(unittest.TestCase):
             [22.0, 36.0],
         ])
         np.testing.assert_allclose(forecast, expected, atol=1e-10, rtol=1e-10)
+
+    def test_robust_residual_standardization_uses_training_median_and_inverts(self):
+        train = np.asarray([
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [2.0, 1.0],
+            [1_000.0, 1.0],
+        ])
+        transformed, transform = _fit_y_transform(
+            train,
+            "robust-standardize",
+            seasonal_lag=1,
+        )
+
+        self.assertEqual(transform["model_scale"], "robust_standardized")
+        self.assertTrue(np.all(np.abs(transformed) <= 10.0))
+        self.assertGreater(transform["scale"][0, 0], 0.0)
+        self.assertEqual(transform["scale"][0, 1], 1.0)
+        recovered = _inverse_y_transform(np.zeros((1, 2)), transform)
+        np.testing.assert_allclose(recovered, transform["mean"], atol=1e-10, rtol=1e-10)
 
     def test_log_first_difference_inverse_reconstructs_from_last_log_level(self):
         train = np.asarray([

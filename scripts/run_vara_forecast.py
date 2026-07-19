@@ -269,6 +269,24 @@ def _fit_y_transform(train: np.ndarray, method: str, seasonal_lag: int) -> tuple
         return (base - mean), {"method": method, "mean": mean, "scale": scale, "model_scale": "centered"}
     if method == "standardize":
         base = train
+    elif method == "robust-standardize":
+        base = np.asarray(train, dtype=float)
+        mean = np.median(base, axis=0, keepdims=True)
+        centered = base - mean
+        mad_scale = 1.4826 * np.median(np.abs(centered), axis=0, keepdims=True)
+        rms_scale = np.sqrt(np.mean(centered ** 2, axis=0, keepdims=True))
+        # The MAD can be zero for very low-variance or intermittent series.
+        # Retain a data-derived scale in that case and prevent an isolated
+        # near-constant residual from receiving an arbitrarily huge weight.
+        scale = np.maximum(mad_scale, 0.10 * rms_scale)
+        scale = np.where(scale > 1e-8, scale, 1.0)
+        standardized = np.clip(centered / scale, -10.0, 10.0)
+        return standardized, {
+            "method": method,
+            "mean": mean,
+            "scale": scale,
+            "model_scale": "robust_standardized",
+        }
     elif method == "log1p-center":
         base = np.log1p(np.maximum(train, 0.0))
     elif method == "log1p-standardize":
@@ -377,11 +395,14 @@ def _validate_baseline_feature_metadata(
         "filter_method": str(metadata.get("filter_method", "")),
         "seasonal_lag": metadata.get("seasonal_lag", ""),
     })
-    if str(metadata.get("filter_method", "")) != "auto_ets":
-        raise ValueError(
-            "--forecast-scenario auto_ets requires an auto_ets-filtered feature file. "
-            f"Got filter_method={metadata.get('filter_method')!r} in {metadata_path}."
-        )
+    filter_method = str(metadata.get("filter_method", "")).strip().lower()
+    # Attention features characterize the response panel's components; they
+    # need not be built from the same residuals that VARA forecasts.  In
+    # particular, raw-demand M5 features are valid with an AutoETS residual
+    # response.  Only a feature file that *claims* to be AutoETS-filtered must
+    # match the exact baseline configuration used for recovery.
+    if filter_method != "auto_ets":
+        return out
     if int(metadata.get("seasonal_lag", -1)) != int(seasonal_lag):
         raise ValueError(
             "AutoETS feature metadata seasonal_lag does not match forecast seasonal_lag: "
@@ -1451,8 +1472,10 @@ def run_vara_forecast(
     if forecast_scenario not in set(FORECAST_SCENARIOS):
         raise ValueError(f"forecast_scenario must be one of {FORECAST_SCENARIOS}.")
     forecast_mode = _normalize_forecast_mode(forecast_mode)
-    if residual_transform not in {"center", "standardize"}:
-        raise ValueError("residual_transform must be 'center' or 'standardize'.")
+    if residual_transform not in {"center", "standardize", "robust-standardize"}:
+        raise ValueError(
+            "residual_transform must be 'center', 'standardize', or 'robust-standardize'."
+        )
     residual_shrinkage = float(residual_shrinkage)
     if not np.isfinite(residual_shrinkage) or residual_shrinkage < 0.0:
         raise ValueError("residual_shrinkage must be a finite nonnegative number.")
@@ -2054,7 +2077,7 @@ def _parse_args() -> argparse.Namespace:
         "--residual-transform",
         type=str,
         default=default_config.residual_transform,
-        choices=["center", "standardize"],
+        choices=["center", "standardize", "robust-standardize"],
         help="Transform used for VARA when fitting residual-correction scenarios.",
     )
     parser.add_argument(

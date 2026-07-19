@@ -35,8 +35,10 @@ def _top_k_size(p: int, top_k: Optional[int]) -> int:
 
 
 def _check_attention_mode(attention_mode: str) -> str:
-    if attention_mode not in {"dense", "topk", "score", "score-topk"}:
-        raise ValueError("attention_mode must be 'dense', 'topk', 'score', or 'score-topk'.")
+    if attention_mode not in {"dense", "topk", "score", "score-topk", "uniform"}:
+        raise ValueError(
+            "attention_mode must be 'dense', 'topk', 'score', 'score-topk', or 'uniform'."
+        )
     return attention_mode
 
 
@@ -601,6 +603,10 @@ def build_attention(
     """
     attention_mode = _check_attention_mode(attention_mode)
     p = Z.shape[0]
+    if attention_mode == "uniform":
+        if p < 2:
+            raise ValueError("uniform attention requires at least two components.")
+        return (jnp.ones((p, p), dtype=Z.dtype) - jnp.eye(p, dtype=Z.dtype)) / (p - 1)
     if attention_mode == "topk":
         idx, weights = topk_attention_indices_weights(
             Z, eta, scale, 0, p, _top_k_size(p, top_k),
@@ -639,6 +645,11 @@ def attention_rows(
     """Return attention rows ``W[start:stop, :]`` without forming all of ``W``."""
     attention_mode = _check_attention_mode(attention_mode)
     p = Z.shape[0]
+    if attention_mode == "uniform":
+        if p < 2:
+            raise ValueError("uniform attention requires at least two components.")
+        rows = jnp.ones((stop - start, p), dtype=Z.dtype) / (p - 1)
+        return rows.at[jnp.arange(stop - start), jnp.arange(start, stop)].set(0.0)
     if attention_mode == "topk":
         idx, weights = topk_attention_indices_weights(
             Z, eta, scale, start, stop, _top_k_size(p, top_k),
@@ -682,6 +693,10 @@ def attention_matvec(
     """Compute ``W(eta) @ v`` with optional row batching for large ``p``."""
     attention_mode = _check_attention_mode(attention_mode)
     p = Z.shape[0]
+    if attention_mode == "uniform":
+        if p < 2:
+            raise ValueError("uniform attention requires at least two components.")
+        return (jnp.sum(v) - v) / (p - 1)
     if attention_mode in {"dense", "score"} and p <= dense_threshold:
         W = build_attention(Z, eta, params_scale["eta_a"], attention_mode=attention_mode)
         return W @ v
@@ -720,6 +735,10 @@ def attention_weighted_lags(
     """Compute ``X2[:, k] = sum_j W[k, j] * Y_lag[:, j]`` for all ``k``."""
     attention_mode = _check_attention_mode(attention_mode)
     T_eff, p = Y_lag.shape
+    if attention_mode == "uniform":
+        if p < 2:
+            raise ValueError("uniform attention requires at least two components.")
+        return (jnp.sum(Y_lag, axis=1, keepdims=True) - Y_lag) / (p - 1)
     if attention_mode in {"dense", "score"} and p <= dense_threshold:
         W = build_attention(Z, eta, params_scale["eta_a"], attention_mode=attention_mode)
         return Y_lag @ W.T
