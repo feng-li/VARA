@@ -1,0 +1,115 @@
+# Frozen Accounting-Signal Risk application configuration for
+# docs/VAR_Atten.tex. Paths are relative to the repository root.
+schema_version: 1
+status: frozen
+paper_source: docs/VAR_Atten.tex
+application_name: Accounting-Signal Risk
+response: next-month log squared long-short portfolio return
+
+# This workflow supplies the frozen panel, HAR baseline, benchmarks, and the
+# December 2007 formula-feature snapshot consumed by the paper model.
+source_workflow:
+  entrypoint: scripts/run_datamine_workflow.py
+  stage: run
+  executable_config: data/DataMine/full_quality_formula_topk500_exact.yml
+  output_dir: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
+  data_dir: data/DataMine
+  return_file: DataMinedLongShortReturnsEW.parquet
+  metadata_file: DataMinedSignalList.parquet
+  weighting: ew
+  return_unit: percent
+  max_series: 0
+  seed: 202407
+  series_selection_mode: quality_persistence
+  universe_window_months: 240
+  min_observed_fraction: 0.99
+  min_median_nstock: 10
+  min_nstock: 5
+  min_nstock_fraction: 0.99
+  max_missing_run: 1
+  validation_months: 60
+  test_months: 120
+  target_type: log_squared_return
+  epsilon: 1.0e-6
+  minimum_baseline_observations: 120
+  baseline_ridge_candidates: [1.0]
+  benchmark_ar1_ridge_candidates: [1.0]
+  garch_alpha_candidates: [0.03, 0.05, 0.08, 0.12, 0.18, 0.25]
+  garch_beta_candidates: [0.50, 0.65, 0.75, 0.85, 0.90, 0.94]
+  feature_set: formula
+  formula_encoding: svd
+  formula_svd_dim: 16
+  formula_svd_drop_components: 0
+  formula_type_columns_retained: 2
+  row_normalize_features: true
+  rank_score_components:
+    - log_risk_rmse
+    - log_risk_mae
+    - gaussian_return_crps
+    - absolute_log_risk_bias
+  rank_score_comparison_methods:
+    - har_vara
+    - baseline
+    - ar1
+    - garch11
+  rank_score_tie_method: average
+
+# This is the model reported in Tables 8 and 9. For a clean run, omit
+# --reuse-saved-correction; that flag in the saved contract only avoided
+# recomputing an already completed correction during final metric generation.
+final_har_vara:
+  entrypoint: scripts/run_datamine_har_vara.py
+  source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
+  output_dir: outputs/datamine_vara/ew_log_risk_har_vara_topk500_w240_refit12_lambda24
+  feature_snapshot: snapshot_200712
+  component_count: 21800
+  feature_count: 18
+  har_windows: [1, 3, 12]
+  error_window_months: 240
+  refit_frequency_months: 12
+  response_standardization: componentwise_median_mad
+  response_clip: 8.0
+  ridge: 0.001
+  attention_mode: topk
+  attention_top_k: 500
+  attention_cache_mode: exact
+  attention_batch_size: 512
+  eta: -0.0001
+  lambda_window_months: 24
+  lambda_ridge: 0.001
+  full: true
+  reuse_saved_correction: false
+
+locked_split:
+  universe_selection_end: "2007-12-31"
+  validation_start: "2008-01-31"
+  validation_end: "2012-12-31"
+  lambda_training_start: "2011-01-31"
+  lambda_training_end: "2012-12-31"
+  lambda_training_cells: 521682
+  test_start: "2013-01-31"
+  test_end: "2022-12-31"
+  test_origins: 120
+  test_cells: 2586724
+
+locked_parameters:
+  global_lambda: 0.4009686886184981
+  formula_incidence_columns: 252
+  formula_svd_explained_variation: 0.2914
+
+paper_reference:
+  output_dir: outputs/datamine_vara/ew_log_risk_har_vara_topk500_w240_refit12_lambda24
+  vara_har_lambda:
+    log_risk_rmse: 1.9759938654637366
+    log_risk_mae: 1.5864756233950255
+    crps: 0.01533621065784137
+    bias: -0.04074668395266013
+    oos_r2_vs_har: 0.010008071925298734
+    rank_score: 100.0
+  har_ridge:
+    log_risk_rmse: 1.98595665373675
+    log_risk_mae: 1.5986088174291724
+    crps: 0.015371086709209536
+    bias: -0.07127934206640403
+    oos_r2_vs_har: 0.0
+    rank_score: 58.333333333333336
