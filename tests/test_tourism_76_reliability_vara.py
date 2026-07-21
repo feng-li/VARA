@@ -9,6 +9,9 @@ from scripts.recombine_tourism_76_reliability_vara import (
     DIRECT_AUTO_ETS_VARIANCE,
     MODEL,
     MODEL_VARIANCE,
+    RAW_CORRECTION_VARIANCE,
+    RAW_OOS_MODEL,
+    RAW_OOS_MODEL_VARIANCE,
     STATE_CORRECTION_VARIANCE,
     ReliabilityCombinationConfig,
     apply_reliability_gates,
@@ -125,6 +128,7 @@ def test_plugin_variance_uses_gate_and_squared_lambda() -> None:
         "gate": [0.0, 1.0],
         "lambda": [2.0, 0.5],
         STATE_CORRECTION_VARIANCE: [4.0, 4.0],
+        RAW_CORRECTION_VARIANCE: [16.0, 25.0],
     })
     baseline_variances = pd.DataFrame({
         "date": pd.to_datetime(["2016-01-01", "2016-01-01"]),
@@ -139,6 +143,7 @@ def test_plugin_variance_uses_gate_and_squared_lambda() -> None:
 
     np.testing.assert_allclose(result[CORE_MODEL_VARIANCE], [25.0, 10.0])
     np.testing.assert_allclose(result[MODEL_VARIANCE], [9.0, 10.0])
+    np.testing.assert_allclose(result[RAW_OOS_MODEL_VARIANCE], [25.0, 34.0])
 
 
 def _state_rows() -> pd.DataFrame:
@@ -155,6 +160,7 @@ def _state_rows() -> pd.DataFrame:
                 "month": 1,
                 "actual": 10.0 + date_index,
                 "direct_auto_ets": 9.0 + date_index,
+                "vara_correction": 0.5,
                 "state_correction": 1.0,
                 "error_target": 1.0,
                 "reliability_group": reliability_group,
@@ -178,9 +184,15 @@ def test_rolling_recombine_ignores_future_rows() -> None:
     second, _, _ = rolling_recombine(changed, [target], config)
 
     np.testing.assert_allclose(first[CORE_MODEL], second[CORE_MODEL])
+    np.testing.assert_allclose(first[RAW_OOS_MODEL], second[RAW_OOS_MODEL])
+    np.testing.assert_allclose(first[RAW_OOS_MODEL], [11.5, 11.5])
     np.testing.assert_allclose(
         first[STATE_CORRECTION_VARIANCE],
         second[STATE_CORRECTION_VARIANCE],
+    )
+    np.testing.assert_allclose(
+        first[RAW_CORRECTION_VARIANCE],
+        second[RAW_CORRECTION_VARIANCE],
     )
     assert (first["calibration_end"] < first["date"]).all()
     assert first["n_calibration_months"].eq(2).all()

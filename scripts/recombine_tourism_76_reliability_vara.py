@@ -37,11 +37,14 @@ from vara.forecast_significance import panel_diebold_mariano_tests
 CORE_MODEL = "reliability_calibrated_vara_auto_ets_oos"
 MODEL = "reliability_gated_vara_auto_ets_oos"
 PAPER_MODEL = "global_shared_lambda_purpose_vara"
+RAW_OOS_MODEL = "raw_oos_vara"
 DIRECT_AUTO_ETS = "direct_auto_ets"
 DIRECT_AUTO_ETS_VARIANCE = f"{DIRECT_AUTO_ETS}_variance"
 STATE_CORRECTION_VARIANCE = "state_correction_variance"
+RAW_CORRECTION_VARIANCE = "raw_vara_correction_variance"
 CORE_MODEL_VARIANCE = f"{CORE_MODEL}_variance"
 MODEL_VARIANCE = f"{MODEL}_variance"
+RAW_OOS_MODEL_VARIANCE = f"{RAW_OOS_MODEL}_variance"
 
 
 @dataclass(frozen=True)
@@ -201,12 +204,16 @@ def learn_reliability_offsets(
     return offsets, global_location
 
 
-def learn_state_residual_variances(
+def _learn_correction_residual_variances(
     train: pd.DataFrame,
     *,
+    correction_column: str,
+    series_variance_name: str,
+    group_variance_name: str,
+    correction_label: str,
     prior_observations: float,
 ) -> tuple[pd.Series, pd.Series, float]:
-    """Estimate series variances from prior OOS state-forecast residuals.
+    """Estimate shrunken series variances from prior OOS correction residuals.
 
     Series estimates are shrunk toward their fixed reliability-group estimate,
     and group estimates are shrunk toward the panel estimate. All residuals in
@@ -216,41 +223,45 @@ def learn_state_residual_variances(
         "series_id",
         "reliability_group",
         "error_target",
-        "state_correction",
+        correction_column,
     }
     missing = sorted(required.difference(train.columns))
     if missing:
-        raise ValueError(f"State-variance input is missing columns: {missing}")
+        raise ValueError(
+            f"{correction_label}-variance input is missing columns: {missing}"
+        )
     prior = float(prior_observations)
     if prior < 0.0:
         raise ValueError("variance_prior_observations must be nonnegative.")
     if train.empty:
-        raise ValueError("State-variance input is empty.")
+        raise ValueError(f"{correction_label}-variance input is empty.")
 
     work = train.loc[:, [
         "series_id",
         "reliability_group",
         "error_target",
-        "state_correction",
+        correction_column,
     ]].copy()
-    work["state_residual"] = (
+    work["correction_residual"] = (
         work["error_target"].to_numpy(dtype=float)
-        - work["state_correction"].to_numpy(dtype=float)
+        - work[correction_column].to_numpy(dtype=float)
     )
-    if not np.isfinite(work["state_residual"].to_numpy(dtype=float)).all():
-        raise ValueError("State-variance residuals must all be finite.")
+    if not np.isfinite(work["correction_residual"].to_numpy(dtype=float)).all():
+        raise ValueError(f"{correction_label}-variance residuals must all be finite.")
     series_groups = work.groupby("series_id", observed=True)[
         "reliability_group"
     ].nunique()
     if (series_groups != 1).any():
         raise ValueError("A series changes reliability group within the variance window.")
 
-    global_variance = float(work["state_residual"].var(ddof=1))
+    global_variance = float(work["correction_residual"].var(ddof=1))
     if not np.isfinite(global_variance) or global_variance < 0.0:
-        raise ValueError("The panel state-residual variance is unavailable.")
+        raise ValueError(
+            f"The panel {correction_label}-residual variance is unavailable."
+        )
 
     group_stats = work.groupby("reliability_group", observed=True)[
-        "state_residual"
+        "correction_residual"
     ].agg(["count", "var"])
     group_information = np.maximum(
         group_stats["count"].to_numpy(dtype=float) - 1.0,
@@ -268,12 +279,12 @@ def learn_state_residual_variances(
     group_variances = pd.Series(
         np.maximum(group_values, 0.0),
         index=group_stats.index,
-        name="reliability_group_state_variance",
+        name=group_variance_name,
     )
 
     series_stats = work.groupby("series_id", observed=True).agg(
-        count=("state_residual", "count"),
-        variance=("state_residual", "var"),
+        count=("correction_residual", "count"),
+        variance=("correction_residual", "var"),
         reliability_group=("reliability_group", "first"),
     )
     series_information = np.maximum(
@@ -295,9 +306,41 @@ def learn_state_residual_variances(
     series_variances = pd.Series(
         np.maximum(series_values, 0.0),
         index=series_stats.index,
-        name=STATE_CORRECTION_VARIANCE,
+        name=series_variance_name,
     )
     return series_variances, group_variances, global_variance
+
+
+def learn_state_residual_variances(
+    train: pd.DataFrame,
+    *,
+    prior_observations: float,
+) -> tuple[pd.Series, pd.Series, float]:
+    """Estimate variances from prior OOS state-forecast residuals."""
+    return _learn_correction_residual_variances(
+        train,
+        correction_column="state_correction",
+        series_variance_name=STATE_CORRECTION_VARIANCE,
+        group_variance_name="reliability_group_state_variance",
+        correction_label="State",
+        prior_observations=prior_observations,
+    )
+
+
+def learn_raw_vara_residual_variances(
+    train: pd.DataFrame,
+    *,
+    prior_observations: float,
+) -> tuple[pd.Series, pd.Series, float]:
+    """Estimate variances from prior unshrunk OOS VARA residuals."""
+    return _learn_correction_residual_variances(
+        train,
+        correction_column="vara_correction",
+        series_variance_name=RAW_CORRECTION_VARIANCE,
+        group_variance_name="reliability_group_raw_vara_variance",
+        correction_label="Raw VARA",
+        prior_observations=prior_observations,
+    )
 
 
 def rolling_recombine(
@@ -344,6 +387,12 @@ def rolling_recombine(
                 prior_observations=config.variance_prior_observations,
             )
         )
+        raw_variances, group_raw_variances, global_raw_variance = (
+            learn_raw_vara_residual_variances(
+                train,
+                prior_observations=config.variance_prior_observations,
+            )
+        )
         row_offsets = test["reliability_group"].map(offsets)
         if row_offsets.isna().any():
             raise ValueError("A target reliability group has no learned offset.")
@@ -355,6 +404,16 @@ def rolling_recombine(
         )
         if row_group_state_variances.isna().any():
             raise ValueError("A target reliability group has no learned state variance.")
+        row_raw_variances = test["series_id"].map(raw_variances)
+        if row_raw_variances.isna().any():
+            raise ValueError("A target series has no learned raw VARA variance.")
+        row_group_raw_variances = test["reliability_group"].map(
+            group_raw_variances
+        )
+        if row_group_raw_variances.isna().any():
+            raise ValueError(
+                "A target reliability group has no learned raw VARA variance."
+            )
 
         result = test.copy()
         result["lambda"] = row_lambdas
@@ -366,8 +425,18 @@ def rolling_recombine(
             row_group_state_variances.to_numpy(dtype=float)
         )
         result["global_state_variance"] = global_state_variance
+        result[RAW_CORRECTION_VARIANCE] = row_raw_variances.to_numpy(dtype=float)
+        result["reliability_group_raw_vara_variance"] = (
+            row_group_raw_variances.to_numpy(dtype=float)
+        )
+        result["global_raw_vara_variance"] = global_raw_variance
         result[CORE_MODEL] = np.maximum(
             test_prediction + result["residual_offset"].to_numpy(dtype=float),
+            0.0,
+        )
+        result[RAW_OOS_MODEL] = np.maximum(
+            result["direct_auto_ets"].to_numpy(dtype=float)
+            + result["vara_correction"].to_numpy(dtype=float),
             0.0,
         )
         result["calibration_start"] = pd.Timestamp(prior_dates[0])
@@ -498,6 +567,7 @@ def attach_plugin_forecast_variances(
         "gate",
         "lambda",
         STATE_CORRECTION_VARIANCE,
+        RAW_CORRECTION_VARIANCE,
     }
     missing = sorted(required.difference(predictions.columns))
     if missing:
@@ -529,14 +599,18 @@ def attach_plugin_forecast_variances(
 
     baseline_variance = result[DIRECT_AUTO_ETS_VARIANCE].to_numpy(dtype=float)
     state_variance = result[STATE_CORRECTION_VARIANCE].to_numpy(dtype=float)
+    raw_variance = result[RAW_CORRECTION_VARIANCE].to_numpy(dtype=float)
     lambdas = result["lambda"].to_numpy(dtype=float)
     gates = result["gate"].to_numpy(dtype=float)
     if not np.isfinite(state_variance).all() or (state_variance < 0.0).any():
         raise ValueError("State-correction variances must be finite and nonnegative.")
+    if not np.isfinite(raw_variance).all() or (raw_variance < 0.0).any():
+        raise ValueError("Raw VARA variances must be finite and nonnegative.")
     result[CORE_MODEL_VARIANCE] = baseline_variance + lambdas ** 2 * state_variance
     result[MODEL_VARIANCE] = (
         baseline_variance + (gates * lambdas) ** 2 * state_variance
     )
+    result[RAW_OOS_MODEL_VARIANCE] = baseline_variance + raw_variance
     return result
 
 
@@ -656,6 +730,21 @@ def run_recombination(
         state_dates,
         blends=(1.0,),
     )
+    raw_corrections = panel.loc[:, [
+        "date",
+        "series_id",
+        "vara_correction",
+    ]].copy()
+    if raw_corrections.duplicated(["date", "series_id"]).any():
+        raise ValueError("VARA corrections contain duplicate date/series rows.")
+    state = state.merge(
+        raw_corrections,
+        on=["date", "series_id"],
+        how="left",
+        validate="one_to_one",
+    )
+    if state["vara_correction"].isna().any():
+        raise ValueError("Some state predictions lack a raw VARA correction.")
     state["error_target"] = (
         state["actual"].to_numpy(dtype=float)
         - state["direct_auto_ets"].to_numpy(dtype=float)
@@ -731,10 +820,12 @@ def run_recombination(
     raw["date"] = pd.to_datetime(raw["date"])
     validation_models = {
         MODEL: MODEL,
+        RAW_OOS_MODEL: RAW_OOS_MODEL,
         DIRECT_AUTO_ETS: "direct_auto_ets",
     }
     validation_variances = {
         MODEL: MODEL_VARIANCE,
+        RAW_OOS_MODEL: RAW_OOS_MODEL_VARIANCE,
         DIRECT_AUTO_ETS: DIRECT_AUTO_ETS_VARIANCE,
     }
     validation_tables = _metric_tables(
@@ -815,6 +906,8 @@ def run_recombination(
         (MODEL_VARIANCE, "forecast_variance.csv"),
         (DIRECT_AUTO_ETS_VARIANCE, "baseline_forecast_variance.csv"),
         (STATE_CORRECTION_VARIANCE, "state_correction_variance.csv"),
+        (RAW_CORRECTION_VARIANCE, "raw_vara_correction_variance.csv"),
+        (RAW_OOS_MODEL_VARIANCE, "raw_oos_forecast_variance.csv"),
     ):
         variance_wide = final.pivot(
             index="date",
@@ -841,6 +934,7 @@ def run_recombination(
         "state_training_precedes_target": True,
         "calibration_training_precedes_target": True,
         "state_variance_training_precedes_target": True,
+        "raw_vara_variance_training_precedes_target": True,
         "final_autoets_variances_complete": bool(
             final[DIRECT_AUTO_ETS_VARIANCE].notna().all()
         ),
@@ -875,6 +969,10 @@ def run_recombination(
             "autoets_variance + (reliability_gate * lambda)^2 * "
             "state_correction_variance"
         ),
+        "raw_oos_variance_formula": (
+            "autoets_variance + raw_vara_correction_variance"
+        ),
+        "raw_oos_lambda": 1.0,
         "variance_covariance_assumption": "zero",
         "variance_parameter_uncertainty_included": False,
     }

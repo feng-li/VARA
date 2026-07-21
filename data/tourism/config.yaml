@@ -111,6 +111,9 @@ final_combination:
   residual_quantile: 0.5
   offset_prior_observations: 0.0
   variance_prior_observations: 36.0
+  raw_oos_model: raw_oos_vara
+  raw_oos_lambda: 1.0
+  raw_oos_variance_formula: autoets_variance + raw_vara_correction_variance
   state_history_start: "2010-01-01"
   reliability_history_end: "2009-12-01"
   paper_final_predictions_path: null
@@ -133,3 +136,12 @@ paper_reference:
   oos_r2: 0.6139950502296774
   crps: 54.95455317893921
   bias: -3.035268670792497
+  raw_oos_comparator:
+    model: VARA--AutoETS_O
+    rmse: 121.2396484767291
+    mae: 73.56789649580581
+    mase: 0.8709907062984471
+    rmsse: 0.793324272206933
+    oos_r2: 0.5880450438385129
+    crps: 56.574346081818916
+    bias: 0.7647698249193291
