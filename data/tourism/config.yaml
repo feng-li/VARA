@@ -1,0 +1,135 @@
+# Frozen Tourism application configuration for docs/VAR_Atten.tex.
+# Paths are relative to the repository root. Runtime CPU counts may be reduced
+# without changing the statistical specification.
+schema_version: 1
+status: frozen
+paper_source: docs/VAR_Atten.tex
+application_name: Australian Tourism
+response: monthly all-purpose visitor nights for 76 depth-three geographies
+data_path: data/tourism/tourism.csv
+purpose_component_series_used: false
+
+autoets_oos_forecasts:
+  entrypoint: scripts/evaluate_tourism_76_autoets.py
+  data_path: data/tourism/tourism.csv
+  output_path: outputs/tourism_76_autoets_extended/rolling_forecasts.csv
+  first_year: 1999
+  final_year: 2016
+  series_depth: 3
+  expected_n_series: 76
+  season_length: 12
+  clip_nonnegative: true
+
+vara_oos_error_forecasts:
+  entrypoint: scripts/search_tourism_oos_error_vara.py
+  forecast_panel_path: outputs/tourism_76_autoets_extended/rolling_forecasts.csv
+  output_dir: outputs/tourism_76_vara_extended
+  validation_start: "2001-01-01"
+  validation_end: "2016-12-01"
+  selection_end: "2015-12-01"
+  skip_scoring: true
+  strategy:
+    strategy_id: predictive_avg_topk10_w24_stable05
+    feature_source: predictive-average
+    predictive_score_lags: [1, 12]
+    predictive_score_combination: equal_average
+    aligned_target_source_standardization: separate
+    directed_score_matrix: true
+    mask_self_links: true
+    attention_mode: score-topk
+    attention_top_k: 10
+    neighbor_selection_score: eta_times_predictive_score
+    attention_normalization: row_softmax
+    transform: standardize
+    history_window: 24
+    ridge: 0.01
+    grid_size: 7
+    eta_bounds: [-2.0, 2.0]
+    eta_refinement: golden_section_within_best_grid_interval
+    stability_cap: 0.5
+
+benchmark_forecasts:
+  entrypoint: scripts/run_benchmarks.py
+  data_dir: data/tourism
+  data_path: data/tourism/tourism.csv
+  output_dir: outputs/tourism_benchmark_standardized_run/rolling-origin
+  data_format: wide
+  date_col: date
+  series_col: series_id
+  value_col: value
+  forecast_mode: rolling-origin
+  horizon: 12
+  season_length: 12
+  freq: MS
+  series_depth: 3
+  series_suffix: All
+  max_series: 0
+  clip_nonnegative: true
+  forecast_variance_level: 95
+  resume: true
+  resume_csv: outputs/tourism_benchmark_standardized_run/rolling-origin/benchmark_task_results.csv
+  ray_debug: false
+  models:
+    - seasonal_naive
+    - auto_ets
+    - auto_arima
+    - nbeats
+    - ar1_auto_ets
+    - var1_auto_ets
+    - deepar
+    - ar1
+    - var1
+  neural:
+    input_size: 0
+    max_steps: 200
+    hidden_size: 64
+    num_layers: 2
+    batch_size: 32
+    learning_rate: 0.001
+    scaler_type: robust
+    random_seed: 2026
+
+final_combination:
+  entrypoint: scripts/recombine_tourism_76_reliability_vara.py
+  data_path: data/tourism/tourism.csv
+  output_dir: outputs/tourism_76_reliability_vara_autoets
+  autoets_forecasts_path: outputs/tourism_76_autoets_extended/rolling_forecasts.csv
+  autoets_variance_path: outputs/tourism_benchmark_standardized_run/rolling-origin/forecast_variance_auto_ets.csv
+  vara_results_path: outputs/tourism_76_vara_extended/origin_results.csv
+  strategy_id: predictive_avg_topk10_w24_stable05
+  validation_start: "2013-01-01"
+  validation_end: "2015-12-01"
+  final_start: "2016-01-01"
+  final_end: "2016-12-01"
+  state_window_months: 36
+  state_feature_set: vara_seasonal10
+  state_ridge_alpha: 10.0
+  calibration_window_months: 36
+  lambda_prior_strength: 3.0
+  lambda_cap: 1.25
+  reliability_bins: 7
+  residual_quantile: 0.5
+  offset_prior_observations: 0.0
+  variance_prior_observations: 36.0
+  state_history_start: "2010-01-01"
+  reliability_history_end: "2009-12-01"
+  paper_final_predictions_path: null
+
+runtime:
+  ray_num_cpus: 104
+  max_cpus_per_task: 1
+
+paper_reference:
+  model: VARA--AutoETS_lambda
+  output_dir: outputs/tourism_76_reliability_vara_autoets
+  test_start: "2016-01-01"
+  test_end: "2016-12-01"
+  test_origins: 12
+  test_cells: 912
+  rmse: 117.35895648971534
+  mae: 70.9921130086205
+  mase: 0.8337298298467648
+  rmsse: 0.7730130043798695
+  oos_r2: 0.6139950502296774
+  crps: 54.95455317893921
+  bias: -3.035268670792497

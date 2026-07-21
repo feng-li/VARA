@@ -153,7 +153,7 @@ def main() -> None:
         focal = monthly.loc[monthly["model"].eq("group_vara")]
         comparator = monthly.loc[monthly["model"].eq("baseline")]
         dm_rows = []
-        for loss in ("squared_error", "qlike"):
+        for loss in ("squared_error", "gaussian_return_crps"):
             matched = focal[["date", loss]].merge(
                 comparator[["date", loss]], on="date", suffixes=("_focal", "_baseline")
             ).dropna()

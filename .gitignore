@@ -4,7 +4,13 @@ __pycache__/
 .codex/
 docs/
 outputs/
-data/
+data/*
+!data/tourism/
+!data/DataMine/
+data/tourism/*
+!data/tourism/config.yaml
+data/DataMine/*
+!data/DataMine/config.yaml
 results_coverage_@*.csv
 *.npz
 *.pdf

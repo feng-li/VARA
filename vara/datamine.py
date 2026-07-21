@@ -13,6 +13,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from vara.forecast_metrics import add_composite_rank_score, normal_crps
+
 
 RETURN_REQUIRED_COLUMNS = {"signalid", "year", "month", "ret"}
 SIGNAL_COLUMN_ALIASES = {
@@ -1983,9 +1985,9 @@ def evaluate_risk_forecasts(
             epsilon=epsilon,
             variance_floor=variance_floor,
         )
+        gaussian_return_crps = normal_crps(0.0, variance, actual_return)
         qlike = actual_variance / variance + np.log(variance)
         variance_squared_error = np.square(actual_variance - variance)
-        pearson, spearman = _cross_sectional_correlations(actual_variance, variance)
         sse = float(np.sum(squared_error[valid]))
         benchmark_sse = float(np.sum(benchmark_squared_error[valid]))
         summary_rows.append({
@@ -1995,11 +1997,11 @@ def evaluate_risk_forecasts(
             "test_cells": int(valid.sum()),
             "log_risk_rmse": float(np.sqrt(np.mean(squared_error[valid]))),
             "log_risk_mae": float(np.mean(np.abs(error[valid]))),
+            "log_risk_bias": float(np.mean(error[valid])),
+            "gaussian_return_crps": float(np.mean(gaussian_return_crps[valid])),
             "qlike": float(np.mean(qlike[valid])),
             "variance_mse": float(np.mean(variance_squared_error[valid])),
             "oos_r2_vs_benchmark": 1.0 - sse / benchmark_sse if benchmark_sse > 0.0 else np.nan,
-            "mean_monthly_pearson": float(np.nanmean(pearson)),
-            "mean_monthly_spearman": float(np.nanmean(spearman)),
             "variance_calibration": calibrations[name],
             "mean_predicted_variance": float(np.mean(variance[valid])),
             "mean_realized_squared_return": float(np.mean(actual_variance[valid])),
@@ -2027,16 +2029,35 @@ def evaluate_risk_forecasts(
                 out=np.full(len(test_indices), np.nan),
                 where=monthly_valid > 0,
             ),
+            "log_risk_bias": np.divide(
+                np.where(valid, error, 0.0).sum(axis=1),
+                monthly_valid,
+                out=np.full(len(test_indices), np.nan),
+                where=monthly_valid > 0,
+            ),
+            "gaussian_return_crps": np.divide(
+                np.where(valid, gaussian_return_crps, 0.0).sum(axis=1),
+                monthly_valid,
+                out=np.full(len(test_indices), np.nan),
+                where=monthly_valid > 0,
+            ),
             "qlike": np.divide(
                 np.where(valid, qlike, 0.0).sum(axis=1),
                 monthly_valid,
                 out=np.full(len(test_indices), np.nan),
                 where=monthly_valid > 0,
             ),
-            "pearson": pearson,
-            "spearman": spearman,
         }))
-    return pd.DataFrame(summary_rows), pd.concat(monthly_rows, ignore_index=True), calibrations
+    summary = add_composite_rank_score(
+        pd.DataFrame(summary_rows),
+        lower_is_better=(
+            "log_risk_rmse",
+            "log_risk_mae",
+            "gaussian_return_crps",
+        ),
+        closest_to_zero=("log_risk_bias",),
+    )
+    return summary, pd.concat(monthly_rows, ignore_index=True), calibrations
 
 
 def evaluate_raw_return_forecasts(

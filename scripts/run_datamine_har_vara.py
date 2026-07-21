@@ -210,7 +210,7 @@ def main() -> None:
             if comparator_name not in forecasts:
                 continue
             comparator = monthly.loc[monthly["model"].eq(comparator_name)]
-            for loss in ("squared_error", "qlike"):
+            for loss in ("squared_error", "gaussian_return_crps"):
                 matched = focal[["date", loss]].merge(
                     comparator[["date", loss]],
                     on="date",

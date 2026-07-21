@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from math import erf, pi, sqrt
+from math import pi, sqrt
 from typing import Any
 
 import numpy as np
@@ -82,10 +82,15 @@ def out_of_sample_r2_zero(error: np.ndarray, test: np.ndarray, axis=None) -> np.
     return _one_minus_ratio(sse, sst)
 
 
-def _normal_crps(mean: np.ndarray, variance: np.ndarray, actual: np.ndarray) -> np.ndarray:
-    mean = np.asarray(mean, dtype=float)
-    actual = np.asarray(actual, dtype=float)
-    variance = np.asarray(variance, dtype=float)
+def normal_crps(mean: np.ndarray, variance: np.ndarray, actual: np.ndarray) -> np.ndarray:
+    """Return elementwise Gaussian CRPS, broadcasting all three inputs."""
+    from scipy.special import ndtr
+
+    mean, variance, actual = np.broadcast_arrays(
+        np.asarray(mean, dtype=float),
+        np.asarray(variance, dtype=float),
+        np.asarray(actual, dtype=float),
+    )
     out = np.full(mean.shape, np.nan, dtype=float)
     finite = np.isfinite(mean) & np.isfinite(actual) & np.isfinite(variance)
     degenerate = finite & (variance == 0.0)
@@ -95,10 +100,90 @@ def _normal_crps(mean: np.ndarray, variance: np.ndarray, actual: np.ndarray) -> 
         return out
     sigma = np.sqrt(variance[valid])
     z = (actual[valid] - mean[valid]) / sigma
-    cdf = 0.5 * (1.0 + np.vectorize(erf, otypes=[float])(z / sqrt(2.0)))
+    cdf = ndtr(z)
     pdf = np.exp(-0.5 * z ** 2) / sqrt(2.0 * pi)
     out[valid] = sigma * (z * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / sqrt(pi))
     return out
+
+
+# Keep existing workflow imports working while callers migrate to the public name.
+_normal_crps = normal_crps
+
+
+def add_composite_rank_score(
+    comparison: pd.DataFrame,
+    *,
+    lower_is_better: Sequence[str],
+    higher_is_better: Sequence[str] = (),
+    closest_to_zero: Sequence[str] = (),
+    method_column: str = "model",
+) -> pd.DataFrame:
+    """Add a normalized Borda rank score across the supplied metrics.
+
+    Ranks use average ties. RankScore ranges from zero to 100 within the
+    supplied method set, with larger values indicating better average rank.
+    """
+    metric_groups = {
+        "lower_is_better": tuple(lower_is_better),
+        "higher_is_better": tuple(higher_is_better),
+        "closest_to_zero": tuple(closest_to_zero),
+    }
+    metrics = tuple(metric for group in metric_groups.values() for metric in group)
+    if not metrics:
+        raise ValueError("At least one component metric is required for RankScore.")
+    if len(set(metrics)) != len(metrics):
+        raise ValueError("Each RankScore component metric must appear exactly once.")
+    required = {method_column, *metrics}
+    missing = sorted(required.difference(comparison.columns))
+    if missing:
+        raise ValueError(f"RankScore input is missing columns: {missing}")
+    if comparison.empty:
+        raise ValueError("At least one method is required to compute RankScore.")
+    if comparison[method_column].duplicated().any():
+        duplicates = sorted(
+            comparison.loc[
+                comparison[method_column].duplicated(False), method_column
+            ].astype(str).unique()
+        )
+        raise ValueError(f"RankScore input has duplicate methods: {duplicates}")
+
+    ranked = comparison.copy()
+    numeric = ranked.loc[:, metrics].apply(pd.to_numeric, errors="coerce")
+    if not np.isfinite(numeric.to_numpy(dtype=float)).all():
+        raise ValueError("RankScore component metrics must all be finite.")
+    ranked.loc[:, metrics] = numeric
+
+    rank_columns: list[str] = []
+    for metric in metric_groups["lower_is_better"]:
+        column = f"rank_{metric}"
+        ranked[column] = ranked[metric].rank(method="average", ascending=True)
+        rank_columns.append(column)
+    for metric in metric_groups["higher_is_better"]:
+        column = f"rank_{metric}"
+        ranked[column] = ranked[metric].rank(method="average", ascending=False)
+        rank_columns.append(column)
+    for metric in metric_groups["closest_to_zero"]:
+        absolute_column = f"abs_{metric}"
+        rank_column = f"rank_{absolute_column}"
+        ranked[absolute_column] = ranked[metric].abs()
+        ranked[rank_column] = ranked[absolute_column].rank(
+            method="average",
+            ascending=True,
+        )
+        rank_columns.append(rank_column)
+
+    ranked["mean_accuracy_rank"] = ranked[rank_columns].mean(axis=1)
+    method_count = len(ranked)
+    if method_count == 1:
+        ranked["rank_score"] = 100.0
+    else:
+        ranked["rank_score"] = 100.0 * (
+            method_count - ranked["mean_accuracy_rank"]
+        ) / (method_count - 1)
+    ranked["overall_rank"] = (
+        ranked["rank_score"].rank(method="min", ascending=False).astype(int)
+    )
+    return ranked
 
 
 def forecast_metric_tables(
@@ -160,7 +245,7 @@ def forecast_metric_tables(
         error = forecast - test
         abs_error = np.abs(error)
         squared_error = error ** 2
-        crps = np.full(forecast.shape, np.nan, dtype=float) if variance is None else _normal_crps(forecast, variance, test)
+        crps = np.full(forecast.shape, np.nan, dtype=float) if variance is None else normal_crps(forecast, variance, test)
         pct_error = _safe_pct(abs_error, test)
         smape = 2.0 * abs_error / np.where(
             np.abs(test) + np.abs(forecast) > 1e-12,

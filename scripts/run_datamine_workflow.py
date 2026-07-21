@@ -1003,7 +1003,7 @@ def stage_forecast(
 
 def _raw_dm_table(monthly: pd.DataFrame, focal_model: str, benchmark_model: str) -> pd.DataFrame:
     rows = []
-    for loss_column in ("squared_error", "qlike"):
+    for loss_column in ("squared_error", "gaussian_return_crps"):
         if loss_column not in monthly.columns:
             continue
         focal = monthly.loc[monthly["model"].eq(focal_model), ["date", loss_column]].rename(

@@ -17,6 +17,7 @@ from vara.datamine import (
     estimate_global_lambda,
     estimate_group_lambdas,
     estimate_series_lambdas,
+    evaluate_risk_forecasts,
     fit_robust_panel_scaler,
     fixed_garch11_grid_forecast,
     formula_feature_blocks,
@@ -192,6 +193,46 @@ class DataMineDataTests(unittest.TestCase):
         self.assertGreater(scores[0], scores[2])
 
 class DataMineForecastTests(unittest.TestCase):
+    def test_risk_metrics_include_rank_score_bias_and_gaussian_return_crps(self):
+        returns = np.asarray([
+            [0.10, -0.08, 0.06],
+            [0.20, -0.16, 0.12],
+            [0.15, -0.12, 0.09],
+            [0.25, -0.20, 0.15],
+        ])
+        epsilon = 1e-6
+        target = np.log(epsilon + np.square(returns))
+        forecasts = {
+            "baseline": target + 0.1,
+            "candidate": target - 0.2,
+        }
+
+        metrics, monthly, _ = evaluate_risk_forecasts(
+            target=target,
+            returns=returns,
+            dates=pd.date_range("2020-01-31", periods=4, freq="ME"),
+            forecasts=forecasts,
+            validation_indices=[0, 1],
+            test_indices=[2, 3],
+            benchmark_name="baseline",
+            epsilon=epsilon,
+        )
+
+        indexed = metrics.set_index("model")
+        self.assertAlmostEqual(float(indexed.loc["baseline", "log_risk_bias"]), 0.1)
+        self.assertAlmostEqual(float(indexed.loc["candidate", "log_risk_bias"]), -0.2)
+        self.assertTrue((metrics["gaussian_return_crps"] > 0.0).all())
+        self.assertIn("rank_score", metrics.columns)
+        self.assertIn("overall_rank", metrics.columns)
+        self.assertGreater(
+            float(indexed.loc["baseline", "rank_score"]),
+            float(indexed.loc["candidate", "rank_score"]),
+        )
+        self.assertNotIn("mean_monthly_spearman", metrics.columns)
+        self.assertIn("log_risk_bias", monthly.columns)
+        self.assertIn("gaussian_return_crps", monthly.columns)
+        self.assertNotIn("spearman", monthly.columns)
+
     def test_formula_svd_can_drop_leading_components(self):
         metadata = _metadata(range(1, 25))
 

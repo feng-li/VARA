@@ -3,10 +3,43 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from vara.forecast_metrics import forecast_metric_tables, out_of_sample_r2, out_of_sample_r2_zero
+from vara.forecast_metrics import (
+    add_composite_rank_score,
+    forecast_metric_tables,
+    normal_crps,
+    out_of_sample_r2,
+    out_of_sample_r2_zero,
+)
 
 
 class ForecastMetricTests(unittest.TestCase):
+    def test_composite_rank_score_supports_loss_gain_and_zero_targets(self):
+        comparison = pd.DataFrame({
+            "model": ["best", "middle", "worst"],
+            "loss": [1.0, 2.0, 3.0],
+            "gain": [3.0, 2.0, 1.0],
+            "bias": [-0.1, 0.2, 0.3],
+        })
+
+        ranked = add_composite_rank_score(
+            comparison,
+            lower_is_better=("loss",),
+            higher_is_better=("gain",),
+            closest_to_zero=("bias",),
+        ).set_index("model")
+
+        self.assertEqual(float(ranked.loc["best", "rank_score"]), 100.0)
+        self.assertEqual(float(ranked.loc["middle", "rank_score"]), 50.0)
+        self.assertEqual(float(ranked.loc["worst", "rank_score"]), 0.0)
+        self.assertEqual(int(ranked.loc["best", "overall_rank"]), 1)
+
+    def test_normal_crps_broadcasts_scalar_mean(self):
+        actual = np.asarray([0.0, 1.0])
+        result = normal_crps(0.0, np.ones(2), actual)
+
+        self.assertAlmostEqual(float(result[0]), (np.sqrt(2.0) - 1.0) / np.sqrt(np.pi))
+        self.assertTrue(np.isfinite(result).all())
+
     def test_out_of_sample_r2_uses_test_window_series_means(self):
         test = np.asarray([
             [1.0, 2.0],
