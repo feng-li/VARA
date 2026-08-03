@@ -11,6 +11,8 @@ import pandas as pd
 
 from vara.datamine import (
     DataMinePanel,
+    _fit_har_vara_profile,
+    _fixed_smallest_topk_cache,
     audit_return_file,
     build_dense_panel,
     canonical_signal_metadata,
@@ -27,6 +29,7 @@ from vara.datamine import (
     preprocess_feature_blocks,
     relative_panel_split,
     rolling_group_lambdas,
+    rolling_refit_group_lambdas,
     rolling_group_vara_corrections,
     rolling_har_vara_corrections,
     rolling_ridge_forecast,
@@ -221,6 +224,14 @@ class DataMineForecastTests(unittest.TestCase):
         indexed = metrics.set_index("model")
         self.assertAlmostEqual(float(indexed.loc["baseline", "log_risk_bias"]), 0.1)
         self.assertAlmostEqual(float(indexed.loc["candidate", "log_risk_bias"]), -0.2)
+        observed = target[[2, 3]]
+        total_sum_of_squares = float(np.sum(np.square(observed - np.mean(observed))))
+        expected_absolute_r2 = 1.0 - 0.06 / total_sum_of_squares
+        self.assertAlmostEqual(
+            float(indexed.loc["baseline", "absolute_r2"]),
+            expected_absolute_r2,
+        )
+        self.assertNotEqual(float(indexed.loc["baseline", "absolute_r2"]), 0.0)
         self.assertTrue((metrics["gaussian_return_crps"] > 0.0).all())
         self.assertIn("rank_score", metrics.columns)
         self.assertIn("overall_rank", metrics.columns)
@@ -232,6 +243,36 @@ class DataMineForecastTests(unittest.TestCase):
         self.assertIn("log_risk_bias", monthly.columns)
         self.assertIn("gaussian_return_crps", monthly.columns)
         self.assertNotIn("spearman", monthly.columns)
+
+    def test_risk_metrics_use_one_common_matched_test_set(self):
+        returns = np.asarray([
+            [0.10, 0.20],
+            [0.20, 0.30],
+            [0.30, 0.40],
+            [0.40, 0.50],
+        ])
+        epsilon = 1e-6
+        target = np.log(epsilon + np.square(returns))
+        baseline = target + 0.1
+        candidate = target + 0.2
+        baseline[2, 0] = np.nan
+        candidate[3, 1] = np.nan
+
+        metrics, _, _ = evaluate_risk_forecasts(
+            target=target,
+            returns=returns,
+            dates=pd.date_range("2020-01-31", periods=4, freq="ME"),
+            forecasts={"baseline": baseline, "candidate": candidate},
+            validation_indices=[0, 1],
+            test_indices=[2, 3],
+            benchmark_name="baseline",
+            epsilon=epsilon,
+        )
+
+        indexed = metrics.set_index("model")
+        self.assertEqual(set(metrics["test_cells"]), {2})
+        self.assertAlmostEqual(float(indexed.loc["baseline", "log_risk_rmse"]), 0.1)
+        self.assertAlmostEqual(float(indexed.loc["candidate", "log_risk_rmse"]), 0.2)
 
     def test_formula_svd_can_drop_leading_components(self):
         metadata = _metadata(range(1, 25))
@@ -432,6 +473,59 @@ class DataMineForecastTests(unittest.TestCase):
         np.testing.assert_allclose(original[3:5], perturbed[3:5], equal_nan=True)
         self.assertFalse(np.allclose(original[5], perturbed[5]))
 
+    def test_rolling_refit_lambdas_are_lse_fitted_and_held_within_block(self):
+        error = np.zeros((9, 2), dtype=float)
+        error[3:] = np.asarray([
+            [1.0, 2.0],
+            [3.0, 4.0],
+            [5.0, 6.0],
+            [7.0, 8.0],
+            [9.0, 10.0],
+            [11.0, 12.0],
+        ])
+        correction = np.full_like(error, 4.0)
+        metadata = pd.DataFrame({"formula_type": ["a", "a"]})
+        evaluation = np.arange(3, 9)
+        refit_index = np.full(9, -1, dtype=np.int64)
+        refit_index[evaluation] = [2, 2, 4, 4, 6, 6]
+
+        original, table = rolling_refit_group_lambdas(
+            error,
+            correction,
+            metadata,
+            evaluation,
+            refit_index,
+            window_months=2,
+            min_history_months=2,
+        )
+        changed_error = error.copy()
+        changed_error[5:] = -1000.0
+        perturbed, _ = rolling_refit_group_lambdas(
+            changed_error,
+            correction,
+            metadata,
+            evaluation,
+            refit_index,
+            window_months=2,
+            min_history_months=2,
+        )
+
+        np.testing.assert_allclose(original[3:5], 0.0)
+        np.testing.assert_allclose(original[5], original[6])
+        self.assertAlmostEqual(original[5, 0], 0.625)
+        np.testing.assert_allclose(original[5:7], perturbed[5:7])
+        self.assertFalse(np.allclose(original[7], perturbed[7]))
+        self.assertEqual(table["refit_index"].tolist(), [2, 4, 6])
+        self.assertEqual(table["lambda_training_months"].tolist(), [0, 2, 2])
+        self.assertEqual(
+            table["lambda_history_sufficient"].tolist(),
+            [False, True, True],
+        )
+        middle_fit = table.loc[table["refit_index"].eq(4)].iloc[0]
+        self.assertEqual(middle_fit["lambda_training_start_index"], 3)
+        self.assertEqual(middle_fit["lambda_training_end_index"], 4)
+        self.assertAlmostEqual(middle_fit["lambda"], 0.625)
+
     def test_series_lambdas_shrink_toward_global_with_stronger_prior(self):
         error = np.asarray([[1.0, -1.0], [2.0, -2.0], [3.0, -3.0]])
         correction = np.asarray([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]])
@@ -529,6 +623,95 @@ class DataMineForecastTests(unittest.TestCase):
         )
         self.assertFalse(np.allclose(original.correction[65], perturbed.correction[65]))
 
+    def test_fixed_smallest_attention_support_is_continuous_at_zero(self):
+        import jax.numpy as jnp
+
+        from vara.attention import (
+            build_topk_attention_cache,
+            topk_attention_cached_indices_weights,
+        )
+
+        rng = np.random.default_rng(31)
+        features = rng.normal(size=(8, 3))
+        features /= np.linalg.norm(features, axis=1, keepdims=True)
+        candidate_cache = build_topk_attention_cache(
+            jnp.asarray(features),
+            top_k=3,
+            batch_size=4,
+            include_negative=True,
+            cache_mode="exact",
+        )
+        cache = _fixed_smallest_topk_cache(candidate_cache)
+        outputs = [
+            topk_attention_cached_indices_weights(cache, eta, 1.0, 0, 8)
+            for eta in (-1e-7, 0.0, 1e-7)
+        ]
+
+        for indices, _ in outputs:
+            np.testing.assert_array_equal(
+                np.asarray(indices),
+                np.asarray(candidate_cache.indices_neg),
+            )
+        np.testing.assert_allclose(
+            np.asarray(outputs[0][1]),
+            np.asarray(outputs[1][1]),
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            np.asarray(outputs[1][1]),
+            np.asarray(outputs[2][1]),
+            atol=1e-7,
+        )
+
+    def test_har_profile_matches_direct_componentwise_ridge(self):
+        rng = np.random.default_rng(33)
+        response = rng.normal(size=(36, 5))
+        peer_response = rng.normal(size=(36, 5))
+        ridge = 0.01
+
+        result = _fit_har_vara_profile(
+            response,
+            peer_response,
+            windows=(1, 3, 12),
+            ridge=ridge,
+            zero_own_lag_coefficients=False,
+        )
+
+        target_rows = np.arange(12, len(response))
+        own_cumulative = np.vstack((np.zeros((1, 5)), np.cumsum(response, axis=0)))
+        peer_cumulative = np.vstack((np.zeros((1, 5)), np.cumsum(peer_response, axis=0)))
+        regressors = []
+        for values in (own_cumulative, peer_cumulative):
+            for window in (1, 3, 12):
+                regressors.append(
+                    (values[target_rows] - values[target_rows - window]) / window
+                )
+        now = response[target_rows]
+        direct_coefficients = np.empty((5, 6))
+        direct_profiled_variance = np.empty(5)
+        for component in range(5):
+            design = np.column_stack(
+                [regressor[:, component] for regressor in regressors]
+            )
+            coefficient = np.linalg.solve(
+                design.T @ design + ridge * np.eye(6),
+                design.T @ now[:, component],
+            )
+            residual = now[:, component] - design @ coefficient
+            direct_coefficients[component] = coefficient
+            direct_profiled_variance[component] = (
+                residual @ residual + ridge * (coefficient @ coefficient)
+            ) / len(residual)
+        direct_objective = -0.5 * len(target_rows) * np.sum(
+            np.log(direct_profiled_variance)
+        )
+
+        np.testing.assert_allclose(result["coefficients"], direct_coefficients)
+        np.testing.assert_allclose(
+            result["profiled_variance"], direct_profiled_variance
+        )
+        self.assertAlmostEqual(result["objective"], direct_objective)
+
     def test_har_vara_is_one_step_and_future_perturbation_safe(self):
         rng = np.random.default_rng(37)
         errors = rng.normal(size=(80, 6))
@@ -545,7 +728,9 @@ class DataMineForecastTests(unittest.TestCase):
             attention_top_k=2,
             attention_cache_mode="exact",
             attention_batch_size=8,
-            eta=-1e-4,
+            eta_bounds=(-1.0, 1.0),
+            eta_grid_size=3,
+            eta_local_tolerance=0.05,
         )
         changed = errors.copy()
         changed[63:] += 1000.0
@@ -560,7 +745,9 @@ class DataMineForecastTests(unittest.TestCase):
             attention_top_k=2,
             attention_cache_mode="exact",
             attention_batch_size=8,
-            eta=-1e-4,
+            eta_bounds=(-1.0, 1.0),
+            eta_grid_size=3,
+            eta_local_tolerance=0.05,
         )
 
         np.testing.assert_allclose(
@@ -569,6 +756,46 @@ class DataMineForecastTests(unittest.TestCase):
             equal_nan=True,
         )
         self.assertFalse(np.allclose(original.correction[65], perturbed.correction[65]))
+
+    def test_har_vara_can_fix_own_lag_coefficients_at_zero(self):
+        rng = np.random.default_rng(41)
+        errors = rng.normal(size=(80, 6))
+        features = rng.normal(size=(6, 4))
+        features /= np.linalg.norm(features, axis=1, keepdims=True)
+
+        result = rolling_har_vara_corrections(
+            baseline_errors=errors,
+            evaluation_indices=np.arange(60, 64),
+            feature_matrix=features,
+            error_window_months=40,
+            response_clip=8.0,
+            refit_frequency_months=2,
+            ridge=0.01,
+            attention_top_k=2,
+            attention_cache_mode="exact",
+            attention_batch_size=8,
+            eta_bounds=(-1.0, 1.0),
+            eta_grid_size=3,
+            eta_local_tolerance=0.05,
+            zero_own_lag_coefficients=True,
+        )
+
+        self.assertTrue(np.isfinite(result.correction[60:64]).all())
+        self.assertTrue(np.isfinite(result.fit_summary["eta_hat"]).all())
+        self.assertTrue(
+            result.fit_summary["eta_estimation"]
+            .eq("ridge_penalized_concentrated_qmle")
+            .all()
+        )
+        self.assertTrue(result.fit_summary["own_lag_coefficients_fixed_zero"].all())
+        for window in (1, 3, 12):
+            self.assertTrue(
+                result.fit_summary[f"own_mean_{window}_coefficient_abs_mean"].eq(0.0).all()
+            )
+            self.assertIn(
+                f"peer_mean_{window}_coefficient_abs_mean",
+                result.fit_summary.columns,
+            )
 
 
 if __name__ == "__main__":

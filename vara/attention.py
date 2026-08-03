@@ -103,6 +103,142 @@ def _build_exact_topk_attention_cache(
     )
 
 
+def _stable_smallest_row(
+    scores: np.ndarray,
+    top_k: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Select one row's smallest scores with a deterministic index tie-break."""
+    candidate_idx = np.argpartition(scores, kth=top_k - 1)[:top_k]
+    threshold = np.max(scores[candidate_idx])
+    strictly_smaller = np.flatnonzero(scores < threshold)
+    needed = int(top_k - strictly_smaller.size)
+    tied = np.flatnonzero(scores == threshold)
+    selected_idx = np.concatenate((strictly_smaller, tied[:needed]))
+    if selected_idx.size != top_k:
+        raise RuntimeError("Unable to select the requested number of finite neighbors.")
+
+    # Canonical ordering is not required by attention evaluation, but it makes
+    # serialized caches and regression tests byte-for-byte reproducible.
+    order = np.lexsort((selected_idx, scores[selected_idx]))
+    selected_idx = selected_idx[order]
+    return selected_idx, scores[selected_idx]
+
+
+def build_fixed_smallest_topk_attention_cache(
+    Z: jnp.ndarray,
+    top_k: int,
+    batch_size: int = 512,
+) -> TopKAttentionCache:
+    """Build an exact, deterministic cache on a fixed smallest-score graph.
+
+    The support for every row is the set of ``top_k`` smallest off-diagonal
+    inner products.  Equal scores are resolved by the smallest component
+    (column) index.  Rows of ``Z`` are expected to be normalized when these
+    inner products are intended to be cosine similarities.
+
+    Scores are computed in float64 on the host and only one row batch is held
+    at a time.  Selection uses an O(p) partition followed by tie repair, rather
+    than sorting all ``p`` scores.  This keeps construction practical for the
+    21,800-component application while avoiding backend-dependent ``top_k``
+    ordering for tied float32 scores.
+
+    Both positive- and negative-eta fields reference the same selected graph,
+    so the result can be passed directly anywhere a :class:`TopKAttentionCache`
+    is accepted and its support remains fixed as eta crosses zero.
+    """
+    values = np.asarray(Z)
+    if values.ndim != 2:
+        raise ValueError("Z must be a two-dimensional feature matrix.")
+    p = int(values.shape[0])
+    if p < 2:
+        raise ValueError("Z must contain at least two rows for off-diagonal attention.")
+    if not np.issubdtype(values.dtype, np.number) or not np.all(np.isfinite(values)):
+        raise ValueError("Z must contain only finite numeric values.")
+    if int(batch_size) < 1:
+        raise ValueError("batch_size must be positive.")
+
+    k = _top_k_size(p, top_k)
+    compute_values = np.asarray(values, dtype=np.float64)
+    selected_indices = np.empty((p, k), dtype=np.int32)
+    selected_scores = np.empty((p, k), dtype=np.float64)
+
+    for start in range(0, p, int(batch_size)):
+        stop = min(p, start + int(batch_size))
+        raw_scores = compute_values[start:stop] @ compute_values.T
+        local_rows = np.arange(stop - start)
+        raw_scores[local_rows, np.arange(start, stop)] = np.inf
+
+        for local_row, global_row in enumerate(range(start, stop)):
+            row_idx, row_scores = _stable_smallest_row(raw_scores[local_row], k)
+            selected_indices[global_row] = row_idx.astype(np.int32, copy=False)
+            selected_scores[global_row] = row_scores
+
+    return TopKAttentionCache(
+        indices_pos=selected_indices,
+        scores_pos=selected_scores,
+        indices_neg=selected_indices,
+        scores_neg=selected_scores,
+        mode="exact-fixed-smallest",
+    )
+
+
+def build_cached_topk_attention_csr(
+    cache: TopKAttentionCache,
+    eta: float,
+    scale: float = 1.0,
+):
+    """Build a SciPy CSR operator from a fixed top-k attention cache.
+
+    This host sparse-matrix path is substantially faster than repeated indexed
+    gathers for the large, moderately sparse Accounting-Signal Risk graph.  It
+    implements the same row-wise softmax weights as
+    :func:`topk_attention_cached_indices_weights`.
+    """
+    from scipy import sparse
+
+    factor = float(eta) * float(scale)
+    if factor < 0.0 and cache.indices_neg is not None and cache.scores_neg is not None:
+        indices = np.asarray(cache.indices_neg, dtype=np.int32)
+        raw_scores = np.asarray(cache.scores_neg)
+    else:
+        indices = np.asarray(cache.indices_pos, dtype=np.int32)
+        raw_scores = np.asarray(cache.scores_pos)
+    if indices.ndim != 2 or raw_scores.shape != indices.shape:
+        raise ValueError("Cached top-k indices and scores must have the same 2D shape.")
+    valid = (indices >= 0) & np.isfinite(raw_scores)
+    if not np.all(np.any(valid, axis=1)):
+        raise ValueError("Every cached attention row must contain a finite neighbor.")
+
+    weighted_scores = factor * raw_scores
+    weighted_scores = np.where(valid, weighted_scores, -np.inf)
+    weighted_scores -= np.max(weighted_scores, axis=1, keepdims=True)
+    weights = np.zeros_like(weighted_scores)
+    np.exp(weighted_scores, out=weights, where=valid)
+    weights /= np.sum(weights, axis=1, keepdims=True)
+    safe_indices = np.where(valid, indices, 0)
+    p, k = indices.shape
+    indptr = np.arange(0, (p + 1) * k, k, dtype=np.int64)
+    return sparse.csr_matrix(
+        (weights.ravel(), safe_indices.ravel(), indptr),
+        shape=(p, p),
+    )
+
+
+def cached_topk_attention_weighted_lags(
+    Y_lag: np.ndarray,
+    cache: TopKAttentionCache,
+    eta: float,
+    scale: float = 1.0,
+) -> np.ndarray:
+    """Apply a cached top-k attention operator to a time-by-component panel."""
+    values = np.asarray(Y_lag)
+    if values.ndim != 2 or values.shape[1] != cache.indices_pos.shape[0]:
+        raise ValueError("Y_lag and the cached attention graph have inconsistent shapes.")
+    operator = build_cached_topk_attention_csr(cache, eta, scale)
+    calculation_dtype = np.result_type(np.asarray(cache.scores_pos).dtype, np.float32)
+    return np.asarray(operator @ values.astype(calculation_dtype, copy=False).T).T
+
+
 def _anchor_indices(p: int, cluster_count: int) -> jnp.ndarray:
     n_clusters = int(min(max(1, cluster_count), p))
     if n_clusters == p:

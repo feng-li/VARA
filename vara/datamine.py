@@ -1065,7 +1065,7 @@ def estimate_global_lambda(
     *,
     ridge: float = 0.0,
 ) -> dict[str, float]:
-    """Estimate the validation-pooled correction coefficient and clip to [0, 1]."""
+    """Estimate a pooled correction coefficient by LSE and clip to [0, 1]."""
     error = np.asarray(baseline_error, dtype=float)
     adjustment = np.asarray(correction, dtype=float)
     if error.shape != adjustment.shape:
@@ -1173,6 +1173,15 @@ def rolling_group_lambdas(
         raise ValueError("window_months must be positive.")
     if int(min_history_months) < 1 or int(min_history_months) > int(window_months):
         raise ValueError("min_history_months must be in [1, window_months].")
+    metadata_frame = metadata.reset_index(drop=True)
+    if len(metadata_frame) != error.shape[1]:
+        raise ValueError("metadata rows must match the panel component dimension.")
+    columns = [str(column) for column in group_cols]
+    missing = sorted(set(columns).difference(metadata_frame.columns))
+    if missing:
+        raise ValueError(f"Unknown lambda group columns: {missing}")
+    if int(min_group_series) < 1:
+        raise ValueError("min_group_series must be positive.")
 
     values = np.full(error.shape, np.nan, dtype=float)
     rows: list[pd.DataFrame] = []
@@ -1195,6 +1204,103 @@ def rolling_group_lambdas(
         table.insert(2, "lambda_training_end_index", int(prior[-1]))
         rows.append(table)
     return values, pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def rolling_refit_group_lambdas(
+    baseline_error: np.ndarray,
+    correction: np.ndarray,
+    metadata: pd.DataFrame,
+    evaluation_indices: Sequence[int],
+    refit_index: Sequence[int],
+    *,
+    window_months: int,
+    min_history_months: int,
+    group_cols: Sequence[str] = (),
+    ridge: float = 0.0,
+    min_group_series: int = 1,
+) -> tuple[np.ndarray, pd.DataFrame]:
+    """Estimate one leakage-safe LSE lambda at the start of every refit block.
+
+    The coefficient for a block uses only genuine forecast errors and VARA
+    corrections from evaluation origins strictly before that block.  It is
+    then held fixed until the next VARA refit.  This makes the lambda schedule
+    coincide with the rolling model windows without allowing a target outcome
+    to tune its own forecast.
+    """
+    error = np.asarray(baseline_error, dtype=float)
+    adjustment = np.asarray(correction, dtype=float)
+    evaluation = np.asarray(evaluation_indices, dtype=np.int64)
+    refits = np.asarray(refit_index, dtype=np.int64)
+    if error.shape != adjustment.shape or error.ndim != 2:
+        raise ValueError("baseline_error and correction must have the same 2D shape.")
+    if evaluation.size == 0 or np.any(np.diff(evaluation) <= 0):
+        raise ValueError("evaluation_indices must be a nonempty increasing sequence.")
+    if refits.ndim != 1 or len(refits) != len(error):
+        raise ValueError("refit_index must have one entry per panel row.")
+    evaluation_refits = refits[evaluation]
+    if np.any(evaluation_refits < 0) or np.any(np.diff(evaluation_refits) < 0):
+        raise ValueError("Evaluation refit indices must be nonnegative and nondecreasing.")
+    if int(window_months) < 1:
+        raise ValueError("window_months must be positive.")
+    if int(min_history_months) < 1 or int(min_history_months) > int(window_months):
+        raise ValueError("min_history_months must be in [1, window_months].")
+    metadata_frame = metadata.reset_index(drop=True)
+    if len(metadata_frame) != error.shape[1]:
+        raise ValueError("metadata rows must match the panel component dimension.")
+    columns = [str(column) for column in group_cols]
+    missing = sorted(set(columns).difference(metadata_frame.columns))
+    if missing:
+        raise ValueError(f"Unknown lambda group columns: {missing}")
+    if int(min_group_series) < 1:
+        raise ValueError("min_group_series must be positive.")
+
+    values = np.full(error.shape, np.nan, dtype=float)
+    rows: list[pd.DataFrame] = []
+    current_lambdas: np.ndarray | None = None
+    current_refit: int | None = None
+    for position, (target_index, target_refit) in enumerate(
+        zip(evaluation, evaluation_refits, strict=True)
+    ):
+        block_start = current_refit is None or int(target_refit) != current_refit
+        if block_start:
+            current_refit = int(target_refit)
+            prior = evaluation[max(0, position - int(window_months)):position]
+            sufficient = len(prior) >= int(min_history_months)
+            if sufficient:
+                lambda_error = error[prior]
+                lambda_adjustment = adjustment[prior]
+            else:
+                lambda_error = error[:0]
+                lambda_adjustment = adjustment[:0]
+            current_lambdas, table, _ = estimate_group_lambdas(
+                lambda_error,
+                lambda_adjustment,
+                metadata_frame,
+                group_cols=columns,
+                ridge=ridge,
+                min_group_series=min_group_series,
+            )
+            table = table.rename(
+                columns={"validation_cells": "lambda_training_cells"}
+            )
+            table.insert(0, "lambda_refit_target_index", int(target_index))
+            table.insert(1, "refit_index", current_refit)
+            table.insert(
+                2,
+                "lambda_training_start_index",
+                int(prior[0]) if len(prior) else -1,
+            )
+            table.insert(
+                3,
+                "lambda_training_end_index",
+                int(prior[-1]) if len(prior) else -1,
+            )
+            table.insert(4, "lambda_training_months", int(len(prior)))
+            table.insert(5, "lambda_history_sufficient", bool(sufficient))
+            rows.append(table)
+        assert current_lambdas is not None
+        values[int(target_index)] = current_lambdas
+    return values, pd.concat(rows, ignore_index=True)
 
 
 def estimate_series_lambdas(
@@ -1951,7 +2057,13 @@ def evaluate_risk_forecasts(
     epsilon: float,
     variance_floor: float = 1e-8,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """Evaluate log-risk and calibrated variance forecasts on matched test cells."""
+    """Evaluate log-risk and calibrated variance forecasts on matched test cells.
+
+    ``absolute_r2`` is the conventional pooled coefficient of determination on
+    the out-of-sample cells.  Its denominator is the total sum of squares about
+    the observed test-cell mean, so it does not use the supplied benchmark.
+    ``oos_r2_vs_benchmark`` is retained as a backward-compatible diagnostic.
+    """
     if benchmark_name not in forecasts:
         raise ValueError(f"benchmark_name {benchmark_name!r} is not in forecasts.")
     target = np.asarray(target, dtype=float)
@@ -1972,11 +2084,27 @@ def evaluate_risk_forecasts(
     actual_variance = np.square(actual_return)
     benchmark = np.asarray(forecasts[benchmark_name], dtype=float)[test_indices]
     benchmark_error = benchmark - actual_log
+    matched_test_cells = np.isfinite(actual_log)
+    for full_forecast in forecasts.values():
+        matched_test_cells &= np.isfinite(
+            np.asarray(full_forecast, dtype=float)[test_indices]
+        )
+    if matched_test_cells.any():
+        absolute_r2_observed_mean = float(np.mean(actual_log[matched_test_cells]))
+        absolute_r2_total_sum_of_squares = float(
+            np.sum(
+                np.square(
+                    actual_log[matched_test_cells] - absolute_r2_observed_mean
+                )
+            )
+        )
+    else:
+        absolute_r2_total_sum_of_squares = np.nan
     summary_rows: list[dict[str, Any]] = []
     monthly_rows: list[pd.DataFrame] = []
     for name, full_forecast in forecasts.items():
         log_forecast = np.asarray(full_forecast, dtype=float)[test_indices]
-        valid = np.isfinite(actual_log) & np.isfinite(log_forecast) & np.isfinite(benchmark)
+        valid = matched_test_cells
         error = log_forecast - actual_log
         squared_error = np.square(error)
         benchmark_squared_error = np.square(benchmark_error)
@@ -1990,6 +2118,9 @@ def evaluate_risk_forecasts(
         variance_squared_error = np.square(actual_variance - variance)
         sse = float(np.sum(squared_error[valid]))
         benchmark_sse = float(np.sum(benchmark_squared_error[valid]))
+        absolute_r2_sse = float(
+            np.sum(squared_error[matched_test_cells])
+        )
         summary_rows.append({
             "model": name,
             "target_type": "log_squared_return",
@@ -2001,6 +2132,11 @@ def evaluate_risk_forecasts(
             "gaussian_return_crps": float(np.mean(gaussian_return_crps[valid])),
             "qlike": float(np.mean(qlike[valid])),
             "variance_mse": float(np.mean(variance_squared_error[valid])),
+            "absolute_r2": (
+                1.0 - absolute_r2_sse / absolute_r2_total_sum_of_squares
+                if absolute_r2_total_sum_of_squares > 0.0
+                else np.nan
+            ),
             "oos_r2_vs_benchmark": 1.0 - sse / benchmark_sse if benchmark_sse > 0.0 else np.nan,
             "variance_calibration": calibrations[name],
             "mean_predicted_variance": float(np.mean(variance[valid])),
@@ -2181,6 +2317,249 @@ class RollingHARVARAResult:
     fit_summary: pd.DataFrame
 
 
+def _fixed_smallest_topk_cache(cache: Any) -> Any:
+    """Return a top-k cache whose support is always the smallest-score set.
+
+    The generic top-k implementation changes support with the sign of eta.
+    For the Accounting-Signal Risk specification the sparse graph is defined
+    first by the 500 smallest formula scores, and eta is then estimated as the
+    softmax temperature on that fixed graph.  Reusing the negative-score cache
+    for both signs makes that profile objective continuous at eta zero.
+    """
+    from vara.attention import TopKAttentionCache
+
+    if cache.indices_neg is None or cache.scores_neg is None:
+        raise ValueError("A smallest-score attention cache is required.")
+    return TopKAttentionCache(
+        indices_pos=cache.indices_neg,
+        scores_pos=cache.scores_neg,
+        indices_neg=cache.indices_neg,
+        scores_neg=cache.scores_neg,
+        mode=cache.mode,
+        cluster_count=cache.cluster_count,
+        cluster_probe=cache.cluster_probe,
+        cluster_candidate_size=cache.cluster_candidate_size,
+    )
+
+
+def _har_training_regressors(
+    response: np.ndarray,
+    peer_response: np.ndarray,
+    *,
+    windows: Sequence[int],
+    zero_own_lag_coefficients: bool,
+) -> tuple[np.ndarray, list[np.ndarray], list[str]]:
+    """Build the target and componentwise HAR regressors at a fixed eta."""
+    values = np.asarray(response, dtype=float)
+    peers = np.asarray(peer_response, dtype=float)
+    if values.shape != peers.shape or values.ndim != 2:
+        raise ValueError("response and peer_response must have the same 2D shape.")
+    window_values = tuple(int(window) for window in windows)
+    if not window_values or min(window_values) < 1 or max(window_values) >= len(values):
+        raise ValueError("HAR windows must be positive and shorter than the response history.")
+
+    target_rows = np.arange(max(window_values), len(values), dtype=np.int64)
+    cumulative_response = np.vstack(
+        (np.zeros((1, values.shape[1])), np.cumsum(values, axis=0))
+    )
+    cumulative_peer = np.vstack(
+        (np.zeros((1, values.shape[1])), np.cumsum(peers, axis=0))
+    )
+    own = [
+        (cumulative_response[target_rows] - cumulative_response[target_rows - window])
+        / window
+        for window in window_values
+    ]
+    peer = [
+        (cumulative_peer[target_rows] - cumulative_peer[target_rows - window]) / window
+        for window in window_values
+    ]
+    if bool(zero_own_lag_coefficients):
+        regressors = peer
+        names = [f"peer_mean_{window}" for window in window_values]
+    else:
+        regressors = own + peer
+        names = [f"own_mean_{window}" for window in window_values]
+        names += [f"peer_mean_{window}" for window in window_values]
+    return values[target_rows], regressors, names
+
+
+def _fit_har_vara_profile(
+    response: np.ndarray,
+    peer_response: np.ndarray,
+    *,
+    windows: Sequence[int],
+    ridge: float,
+    zero_own_lag_coefficients: bool,
+    variance_floor: float = 1e-12,
+) -> dict[str, Any]:
+    """Profile component slopes and variances for one candidate eta.
+
+    The criterion is the ridge-penalized concentrated Gaussian
+    quasi-likelihood.  At ridge zero it reduces to the ordinary concentrated
+    QMLE used by the two-stage VARA estimator.
+    """
+    now, regressors, regressor_names = _har_training_regressors(
+        response,
+        peer_response,
+        windows=windows,
+        zero_own_lag_coefficients=zero_own_lag_coefficients,
+    )
+    regressor_count = len(regressors)
+    p = now.shape[1]
+    gram = np.empty((p, regressor_count, regressor_count), dtype=float)
+    rhs = np.empty((p, regressor_count), dtype=float)
+    for left in range(regressor_count):
+        rhs[:, left] = np.sum(regressors[left] * now, axis=0)
+        for right in range(left, regressor_count):
+            product = np.sum(regressors[left] * regressors[right], axis=0)
+            gram[:, left, right] = product
+            gram[:, right, left] = product
+    penalized_gram = gram + float(ridge) * np.eye(regressor_count)[None, :, :]
+    coefficients = np.linalg.solve(penalized_gram, rhs[..., None]).squeeze(axis=2)
+    response_sse = np.sum(np.square(now), axis=0)
+    fitted_cross_product = np.sum(coefficients * rhs, axis=1)
+    fitted_sse = np.einsum(
+        "pi,pij,pj->p",
+        coefficients,
+        gram,
+        coefficients,
+        optimize=True,
+    )
+    residual_sse = np.maximum(
+        response_sse - 2.0 * fitted_cross_product + fitted_sse,
+        0.0,
+    )
+    penalty = float(ridge) * np.sum(np.square(coefficients), axis=1)
+    profiled_variance = np.maximum(
+        (residual_sse + penalty) / now.shape[0],
+        float(variance_floor),
+    )
+    objective = -0.5 * now.shape[0] * float(np.sum(np.log(profiled_variance)))
+    return {
+        "coefficients": coefficients,
+        "regressor_names": regressor_names,
+        "residual_variance": residual_sse / now.shape[0],
+        "profiled_variance": profiled_variance,
+        "objective": objective,
+        "effective_rows": int(now.shape[0]),
+    }
+
+
+def estimate_har_vara_eta(
+    *,
+    response: np.ndarray,
+    feature_matrix: np.ndarray,
+    attention_cache: Any,
+    attention_top_k: int,
+    attention_batch_size: int,
+    ridge: float,
+    eta_bounds: tuple[float, float],
+    eta_grid_size: int,
+    eta_local_tolerance: float,
+    windows: Sequence[int] = (1, 3, 12),
+    zero_own_lag_coefficients: bool = False,
+) -> tuple[float, dict[str, Any], dict[str, Any]]:
+    """Estimate eta by the HAR-specific concentrated quasi-likelihood."""
+    import jax.numpy as jnp
+
+    from vara.attention import (
+        attention_weighted_lags,
+        cached_topk_attention_weighted_lags,
+    )
+    from vara.simulation import golden_section_maximize
+
+    lower, upper = (float(eta_bounds[0]), float(eta_bounds[1]))
+    if not np.isfinite(lower) or not np.isfinite(upper) or lower >= upper:
+        raise ValueError("eta_bounds must contain two finite increasing values.")
+    if int(eta_grid_size) < 2:
+        raise ValueError("eta_grid_size must be at least two.")
+    if float(eta_local_tolerance) <= 0.0:
+        raise ValueError("eta_local_tolerance must be positive.")
+
+    values = np.asarray(response, dtype=float)
+    Z = np.asarray(feature_matrix, dtype=float)
+    profile_cache: dict[float, dict[str, Any]] = {}
+
+    def profile(eta_value: float) -> dict[str, Any]:
+        key = float(eta_value)
+        if key not in profile_cache:
+            if getattr(attention_cache, "mode", "") == "exact-fixed-smallest":
+                peer_response = cached_topk_attention_weighted_lags(
+                    values,
+                    attention_cache,
+                    key,
+                )
+            else:
+                peer_response = np.asarray(attention_weighted_lags(
+                    jnp.asarray(values),
+                    jnp.asarray(Z),
+                    key,
+                    {"eta_a": 1.0},
+                    batch_size=int(attention_batch_size),
+                    dense_threshold=0,
+                    attention_mode="topk",
+                    attention_top_k=int(attention_top_k),
+                    attention_cache=attention_cache,
+                ))
+            profile_cache[key] = _fit_har_vara_profile(
+                values,
+                peer_response,
+                windows=windows,
+                ridge=ridge,
+                zero_own_lag_coefficients=zero_own_lag_coefficients,
+            )
+        return profile_cache[key]
+
+    def objective(eta_value: float) -> float:
+        return float(profile(float(eta_value))["objective"])
+
+    grid = np.linspace(lower, upper, int(eta_grid_size), dtype=float)
+    grid_objectives = np.asarray([objective(value) for value in grid], dtype=float)
+    best_index = int(np.argmax(grid_objectives))
+    left_index = max(0, best_index - 1)
+    right_index = min(len(grid) - 1, best_index + 1)
+    if best_index == 0:
+        right_index = 1
+    elif best_index == len(grid) - 1:
+        left_index = len(grid) - 2
+    refined_eta, _ = golden_section_maximize(
+        objective,
+        float(grid[left_index]),
+        float(grid[right_index]),
+        tol=float(eta_local_tolerance),
+    )
+    refined_value = float(refined_eta)
+
+    candidates = [float(value) for value in grid]
+    candidates.append(refined_value)
+    candidate_objectives = np.asarray([objective(value) for value in candidates])
+    selected_position = int(np.argmax(candidate_objectives))
+    eta_hat = float(candidates[selected_position])
+    selected_profile = profile(eta_hat)
+    tolerance = max(float(eta_local_tolerance), 1e-10)
+    diagnostics = {
+        "eta_hat": eta_hat,
+        "eta_on_boundary": bool(
+            abs(eta_hat - lower) <= tolerance or abs(eta_hat - upper) <= tolerance
+        ),
+        "eta_grid_best": float(grid[best_index]),
+        "eta_grid_best_objective": float(grid_objectives[best_index]),
+        "eta_objective": float(selected_profile["objective"]),
+        "eta_bounds_lower": lower,
+        "eta_bounds_upper": upper,
+        "eta_grid_size": int(eta_grid_size),
+        "eta_local_tolerance": float(eta_local_tolerance),
+        "eta_estimation": "ridge_penalized_concentrated_qmle",
+        "attention_support": (
+            "deterministic_fixed_smallest_scores"
+            if getattr(attention_cache, "mode", "") == "exact-fixed-smallest"
+            else "fixed_smallest_scores"
+        ),
+    }
+    return eta_hat, diagnostics, selected_profile
+
+
 def _group_mean_excluding_self(values: np.ndarray, labels: Sequence[Any]) -> np.ndarray:
     matrix = np.asarray(values, dtype=float)
     if matrix.ndim != 2 or matrix.shape[1] != len(labels):
@@ -2340,14 +2719,27 @@ def rolling_har_vara_corrections(
     attention_top_k: int,
     attention_cache_mode: str,
     attention_batch_size: int,
-    eta: float,
+    eta_bounds: tuple[float, float] = (-2.0, 2.0),
+    eta_grid_size: int = 7,
+    eta_local_tolerance: float = 1e-4,
+    zero_own_lag_coefficients: bool = False,
+    progress_callback: Any | None = None,
 ) -> RollingHARVARAResult:
-    """Forecast errors from own and attention-weighted HAR lag summaries."""
+    """Forecast errors using rolling QMLE-estimated HAR--VARA corrections.
+
+    When ``zero_own_lag_coefficients`` is true, the own-error HAR coefficients
+    are constrained to zero and only attention-weighted peer-error regressors
+    are fitted.  This supplies a no-own-lag VARA ablation without changing the
+    HAR windows used to aggregate the peer errors. Eta is estimated at every
+    scheduled refit by profiling the same componentwise HAR regressions used
+    for forecasting.
+    """
     import jax.numpy as jnp
 
     from vara.attention import (
-        attention_matvec,
         attention_weighted_lags,
+        build_cached_topk_attention_csr,
+        build_fixed_smallest_topk_attention_cache,
         build_topk_attention_cache,
     )
 
@@ -2363,13 +2755,21 @@ def rolling_har_vara_corrections(
     if int(refit_frequency_months) < 1:
         raise ValueError("refit_frequency_months must be positive.")
 
-    cache = build_topk_attention_cache(
-        jnp.asarray(Z),
-        top_k=int(attention_top_k),
-        batch_size=int(attention_batch_size),
-        include_negative=True,
-        cache_mode=str(attention_cache_mode),
-    )
+    if str(attention_cache_mode) == "exact":
+        cache = build_fixed_smallest_topk_attention_cache(
+            Z,
+            top_k=int(attention_top_k),
+            batch_size=int(attention_batch_size),
+        )
+    else:
+        candidate_cache = build_topk_attention_cache(
+            jnp.asarray(Z),
+            top_k=int(attention_top_k),
+            batch_size=int(attention_batch_size),
+            include_negative=True,
+            cache_mode=str(attention_cache_mode),
+        )
+        cache = _fixed_smallest_topk_cache(candidate_cache)
     standardized_forecast = np.full_like(errors, np.nan, dtype=float)
     correction = np.full_like(errors, np.nan, dtype=float)
     refit_index = np.full(len(errors), -1, dtype=np.int64)
@@ -2392,51 +2792,21 @@ def rolling_har_vara_corrections(
             response = scaler.transform(history)
             imputed_cells = int((~np.isfinite(response)).sum())
             response = np.where(np.isfinite(response), response, 0.0)
-            peer_response = np.asarray(attention_weighted_lags(
-                jnp.asarray(response),
-                jnp.asarray(Z),
-                float(eta),
-                {"eta_a": 1.0},
-                batch_size=int(attention_batch_size),
-                dense_threshold=0,
-                attention_mode="topk",
-                attention_top_k=int(attention_top_k),
+            eta_hat, eta_diagnostics, profile_fit = estimate_har_vara_eta(
+                response=response,
+                feature_matrix=Z,
                 attention_cache=cache,
-            ))
-            target_rows = np.arange(max(windows), len(response), dtype=np.int64)
-            cumulative_response = np.vstack((np.zeros((1, errors.shape[1])), np.cumsum(response, axis=0)))
-            cumulative_peer = np.vstack((np.zeros((1, errors.shape[1])), np.cumsum(peer_response, axis=0)))
-            regressors: list[np.ndarray] = []
-            regressor_names: list[str] = []
-            for window in windows:
-                regressors.append(
-                    (cumulative_response[target_rows] - cumulative_response[target_rows - window])
-                    / window
-                )
-                regressor_names.append(f"own_mean_{window}")
-            for window in windows:
-                regressors.append(
-                    (cumulative_peer[target_rows] - cumulative_peer[target_rows - window]) / window
-                )
-                regressor_names.append(f"peer_mean_{window}")
-            now = response[target_rows]
-            regressor_count = len(regressors)
-            p = errors.shape[1]
-            gram = np.empty((p, regressor_count, regressor_count), dtype=float)
-            rhs = np.empty((p, regressor_count), dtype=float)
-            for left in range(regressor_count):
-                rhs[:, left] = np.sum(regressors[left] * now, axis=0)
-                for right in range(left, regressor_count):
-                    product = np.sum(regressors[left] * regressors[right], axis=0)
-                    gram[:, left, right] = product
-                    gram[:, right, left] = product
-            gram += float(ridge) * np.eye(regressor_count)[None, :, :]
-            coefficients = np.linalg.solve(gram, rhs[..., None]).squeeze(axis=2)
-            fitted = sum(
-                regressors[index] * coefficients[None, :, index]
-                for index in range(regressor_count)
+                attention_top_k=int(attention_top_k),
+                attention_batch_size=int(attention_batch_size),
+                ridge=float(ridge),
+                eta_bounds=(float(eta_bounds[0]), float(eta_bounds[1])),
+                eta_grid_size=int(eta_grid_size),
+                eta_local_tolerance=float(eta_local_tolerance),
+                windows=windows,
+                zero_own_lag_coefficients=zero_own_lag_coefficients,
             )
-            residual = now - fitted
+            coefficients = np.asarray(profile_fit["coefficients"], dtype=float)
+            regressor_names = list(profile_fit["regressor_names"])
             row: dict[str, Any] = {
                 "refit_index": origin_index,
                 "error_window_start_index": start,
@@ -2444,10 +2814,17 @@ def rolling_har_vara_corrections(
                 "imputed_error_cells": imputed_cells,
                 "imputed_error_fraction": imputed_cells / response.size,
                 "response_scale_floor": scaler.scale_floor,
-                "residual_variance_mean": float(np.mean(np.square(residual))),
-                "eta": float(eta),
+                "residual_variance_mean": float(
+                    np.mean(profile_fit["residual_variance"])
+                ),
                 "attention_top_k": int(attention_top_k),
+                "own_lag_coefficients_fixed_zero": bool(zero_own_lag_coefficients),
             }
+            row.update(eta_diagnostics)
+            if bool(zero_own_lag_coefficients):
+                for window in windows:
+                    row[f"own_mean_{window}_coefficient_abs_mean"] = 0.0
+                    row[f"own_mean_{window}_coefficient_abs_max"] = 0.0
             for index, name in enumerate(regressor_names):
                 row[f"{name}_coefficient_abs_mean"] = float(
                     np.mean(np.abs(coefficients[:, index]))
@@ -2456,10 +2833,19 @@ def rolling_har_vara_corrections(
                     np.max(np.abs(coefficients[:, index]))
                 )
             fit_rows.append(row)
+            if progress_callback is not None:
+                progress_callback(dict(row))
+            attention_operator = (
+                build_cached_topk_attention_csr(cache, float(eta_hat))
+                if getattr(cache, "mode", "") == "exact-fixed-smallest"
+                else None
+            )
             state = {
                 "scaler": scaler,
                 "coefficients": coefficients,
+                "eta_hat": float(eta_hat),
                 "refit_index": origin_index,
+                "attention_operator": attention_operator,
             }
 
         assert state is not None
@@ -2469,18 +2855,34 @@ def rolling_har_vara_corrections(
         if len(recent) < 12:
             raise ValueError("HAR-VARA prediction requires at least 12 lagged error months.")
         own_regressors = [np.mean(recent[-window:], axis=0) for window in windows]
-        peer_regressors = [np.asarray(attention_matvec(
-            jnp.asarray(Z),
-            float(eta),
-            jnp.asarray(values),
-            {"eta_a": 1.0},
-            batch_size=int(attention_batch_size),
-            dense_threshold=0,
-            attention_mode="topk",
-            attention_top_k=int(attention_top_k),
-            attention_cache=cache,
-        )) for values in own_regressors]
-        prediction_regressors = own_regressors + peer_regressors
+        own_matrix = np.stack(own_regressors, axis=0)
+        if state["attention_operator"] is not None:
+            calculation_dtype = np.result_type(
+                np.asarray(cache.scores_pos).dtype,
+                np.float32,
+            )
+            peer_matrix = np.asarray(
+                state["attention_operator"]
+                @ own_matrix.astype(calculation_dtype, copy=False).T
+            ).T
+        else:
+            peer_matrix = np.asarray(attention_weighted_lags(
+                jnp.asarray(own_matrix),
+                jnp.asarray(Z),
+                float(state["eta_hat"]),
+                {"eta_a": 1.0},
+                batch_size=int(attention_batch_size),
+                dense_threshold=0,
+                attention_mode="topk",
+                attention_top_k=int(attention_top_k),
+                attention_cache=cache,
+            ))
+        peer_regressors = [peer_matrix[index] for index in range(len(windows))]
+        prediction_regressors = (
+            peer_regressors
+            if bool(zero_own_lag_coefficients)
+            else own_regressors + peer_regressors
+        )
         coefficients = state["coefficients"]
         zhat = sum(
             prediction_regressors[index] * coefficients[:, index]

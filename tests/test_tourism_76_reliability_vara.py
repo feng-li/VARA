@@ -198,6 +198,33 @@ def test_rolling_recombine_ignores_future_rows() -> None:
     assert first["n_calibration_months"].eq(2).all()
 
 
+def test_rolling_recombine_allows_prespecified_expanding_warmup() -> None:
+    config = ReliabilityCombinationConfig(
+        calibration_window_months=3,
+        calibration_min_months=2,
+        lambda_prior_strength=1.0,
+        lambda_cap=1.25,
+        reliability_bins=2,
+    )
+    state = _state_rows()
+
+    predictions, _, _ = rolling_recombine(
+        state,
+        [pd.Timestamp("2015-03-01"), pd.Timestamp("2015-04-01")],
+        config,
+    )
+
+    observed = (
+        predictions.groupby("date", observed=True)["n_calibration_months"]
+        .first()
+        .to_dict()
+    )
+    assert observed == {
+        pd.Timestamp("2015-03-01"): 2,
+        pd.Timestamp("2015-04-01"): 3,
+    }
+
+
 def test_reliability_gate_uses_validation_mae() -> None:
     validation = pd.DataFrame({
         "reliability_group": [0, 0, 1, 1],

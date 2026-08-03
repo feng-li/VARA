@@ -18,7 +18,186 @@ autoets_oos_forecasts:
   series_depth: 3
   expected_n_series: 76
   season_length: 12
+  response_transform: none
   clip_nonnegative: true
+  model_config: &tourism_autoets_model_config
+    implementation: statsforecast.models.AutoETS
+    package_version: 2.0.3
+    model_specification: ZZZ
+    damped: null
+    phi: null
+    selection_criterion: AICc
+    optimization_criterion: likelihood
+    allow_multiplicative_trend: false
+    series_fit: separate
+    training_window: expanding
+    forecast_horizon: 1
+    refit_every_origin: true
+    validation_hyperparameter_search: false
+
+autoets_ann_sensitivity:
+  purpose: fixed-family sensitivity analysis kept separate from standard ZZZ
+  autoets_entrypoint: scripts/evaluate_tourism_76_autoets.py
+  autoets_output_path: outputs/tourism_76_autoets_ann_extended/rolling_forecasts.csv
+  vara_entrypoint: scripts/search_tourism_oos_error_vara.py
+  vara_output_dir: outputs/tourism_76_vara_ann_extended
+  combination_entrypoint: scripts/recombine_tourism_76_reliability_vara.py
+  combination_output_dir: outputs/tourism_76_reliability_vara_autoets_ann
+  comparison_entrypoint: scripts/compare_tourism_autoets_ann.py
+  comparison_output_dir: outputs/tourism_76_autoets_ann_comparison
+  table6_entrypoint: scripts/build_tourism_table6_ann.py
+  table6_output_dir: outputs/tourism_table6_ann
+  ann_benchmark_output_dir: outputs/tourism_benchmark_ann_run/rolling-origin
+  first_year: 1999
+  final_year: 2016
+  series_depth: 3
+  expected_n_series: 76
+  season_length: 12
+  response_transform: none
+  evaluation_scale: original visitor nights
+  clip_nonnegative: true
+  model_config:
+    implementation: statsforecast.models.AutoETS
+    package_version: 2.0.3
+    model_specification: ANN
+    ets_family: ETS(A,N,N)
+    damped: false
+    phi: null
+    selection_criterion: null
+    optimization_criterion: likelihood
+    series_fit: separate
+    training_window: expanding
+    forecast_horizon: 1
+    refit_every_origin: true
+    validation_hyperparameter_search: false
+  vara_strategy_id: predictive_avg_topk10_w24_stable05
+  result:
+    autoets_ann_rmse: 202.6973687334348
+    unit_weight_vara_autoets_ann_rmse: 192.0860932254074
+    tuned_vara_autoets_ann_rmse: 118.23167230217445
+    tuned_vara_autoets_ann_rank_score: 89.0625
+    expanded_comparison_method_count: 17
+  table6_result:
+    method_count: 11
+    rank_score_metrics: [rmse, mae, mase, rmsse]
+    best_method: VARA--AutoETS(ANN)_lambda
+    best_rmse: 118.23167230217445
+    best_rank_score: 100.0
+    autoets_ann_rmse: 202.6973687334348
+    ar1_autoets_ann_rmse: 201.95802683170888
+    var1_autoets_ann_rmse: 253.1928451996644
+
+autoets_family_vara_o_selection:
+  purpose: find a parsimonious AutoETS family for which unit-weight VARA improves RMSE
+  direct_screen_entrypoint: scripts/screen_tourism_autoets_families.py
+  vara_runner_entrypoint: scripts/run_tourism_autoets_family_vara.py
+  selection_entrypoint: scripts/select_tourism_autoets_family_vara.py
+  forecast_root: outputs/tourism_autoets_family_full
+  vara_root: outputs/tourism_vara_autoets_family
+  output_dir: outputs/tourism_autoets_family_vara_selection
+  selection_uses_final_2016: false
+  validation_windows:
+    - {months: 36, start: "2013-01-01", end: "2015-12-01"}
+    - {months: 24, start: "2014-01-01", end: "2015-12-01"}
+    - {months: 12, start: "2015-01-01", end: "2015-12-01"}
+  selection_rule:
+    - direct 36-month validation RMSE no worse than standard ZZZ
+    - unit-weight VARA improves RMSE over direct AutoETS in the last 24 validation months
+    - unit-weight VARA improves RMSE over direct AutoETS in the last 12 validation months
+    - prefer the eligible family with the most automatically selected ETS components
+    - break remaining ties by 24-month unit-weight validation RMSE
+  selected_candidate_id: zza_add_season_auto
+  selected_model_config:
+    implementation: statsforecast.models.AutoETS
+    package_version: 2.0.3
+    model_specification: ZZA
+    interpretation: automatic error, automatic trend/damping, additive seasonality
+    season_length: 12
+    damped: null
+    phi: null
+    selection_criterion: AICc
+    optimization_criterion: likelihood
+    allow_multiplicative_trend: false
+    series_fit: separate
+    training_window: expanding
+    forecast_horizon: 1
+    refit_every_origin: true
+    clip_nonnegative: true
+  vara_strategy_id: predictive_avg_topk10_w24_stable05
+  vara_correction_weight: 1.0
+  final_2016_result:
+    evaluation_scale: original visitor nights
+    n_origins: 12
+    n_series: 76
+    autoets_rmse: 119.7047475096557
+    vara_autoets_o_rmse: 119.41130224746364
+    rmse_gain: 0.29344526219206557
+    rmse_gain_pct: 0.24514087226857523
+
+autoets_zza_table6:
+  purpose: full 11-method Table 6 with training-only z-score normalization and ZZA used in every AutoETS-based method
+  selection_source: autoets_family_vara_o_selection
+  selection_uses_final_2016: false
+  autoets_entrypoint: scripts/evaluate_tourism_76_autoets.py
+  autoets_output_path: outputs/tourism_76_autoets_zza_train_zscore_extended/rolling_forecasts.csv
+  autoets_first_year: 2000
+  autoets_final_year: 2016
+  vara_entrypoint: scripts/search_tourism_oos_error_vara.py
+  vara_output_dir: outputs/tourism_76_vara_zza_train_zscore_w24
+  combination_entrypoint: scripts/recombine_tourism_76_reliability_vara.py
+  combination_output_dir: outputs/tourism_76_reliability_vara_autoets_zza_train_zscore
+  benchmark_entrypoint: scripts/run_benchmarks.py
+  benchmark_output_dir: outputs/tourism_benchmark_zza_train_zscore_run/rolling-origin
+  table6_entrypoint: scripts/build_tourism_table6_zza.py
+  table6_output_dir: outputs/tourism_table6_zza_train_zscore
+  model_config:
+    implementation: statsforecast.models.AutoETS
+    package_version: 2.0.3
+    model_specification: ZZA
+    interpretation: automatic error, automatic trend/damping, additive seasonality
+    season_length: 12
+    damped: null
+    phi: null
+    selection_criterion: AICc
+    optimization_criterion: likelihood
+    response_transform: none
+    response_normalization: training_zscore
+    normalization_scope: per rolling origin and per series
+    normalization_statistics_source: observations through the month before the forecast target
+    normalization_variance_ddof: 0
+    normalization_formula: (response - training_mean) / sqrt(training_variance)
+    forecast_inverse_formula: training_mean + sqrt(training_variance) * normalized_forecast
+    training_window: expanding
+    forecast_horizon: 1
+    refit_every_origin: true
+    clip_nonnegative: true
+  vara_strategy_id: predictive_avg_topk10_w24_stable05
+  calibrated_vara:
+    selection_period: ["2013-01-01", "2015-12-01"]
+    final_period: ["2016-01-01", "2016-12-01"]
+    state_window_months: 36
+    state_feature_set: vara_seasonal10
+    state_ridge_alpha: 10.0
+    calibration_window_months: 36
+    calibration_min_months: 24
+    final_forecasts_use_full_calibration_window: true
+    lambda_prior_strength: 3.0
+    lambda_cap: 1.25
+  result:
+    method_count: 11
+    rank_score_metric: monthly cross-series mean absolute error
+    rank_score_definition: average over s=217,...,228 of 100 times strict pairwise absolute-error wins divided by 10 comparators
+    best_method: VARA--AutoETS(ZZA)_lambda
+    best_rmse: 116.40055199152688
+    best_rank_score: 75.83333333333333
+    autoets_zza_rank_score: 75.83333333333333
+    autoets_zza_rmse: 118.458906939579
+    ar1_autoets_zza_rank_score: 74.16666666666667
+    ar1_autoets_zza_rmse: 118.62158223629494
+    unit_vara_autoets_zza_rank_score: 60.833333333333336
+    unit_vara_autoets_zza_rmse: 118.52109252591556
+    var1_autoets_zza_rank_score: 23.333333333333332
+    var1_autoets_zza_rmse: 145.17958969438905
 
 vara_oos_error_forecasts:
   entrypoint: scripts/search_tourism_oos_error_vara.py
@@ -48,6 +227,186 @@ vara_oos_error_forecasts:
     eta_refinement: golden_section_within_best_grid_interval
     stability_cap: 0.5
 
+log1p_raw_oos_comparison:
+  response_transform: log1p
+  autoets_model_config: *tourism_autoets_model_config
+  autoets_entrypoint: scripts/evaluate_tourism_76_autoets.py
+  autoets_output_path: outputs/tourism_76_autoets_log1p_extended/rolling_forecasts.csv
+  vara_entrypoint: scripts/search_tourism_oos_error_vara.py
+  vara_output_dir: outputs/tourism_76_vara_log1p_extended
+  evaluation_entrypoint: scripts/evaluate_tourism_log1p_vara.py
+  evaluation_output_dir: outputs/tourism_76_log1p_raw_oos_vara
+  autoets_error_definition: log1p(actual) - rolling AutoETS forecast on log1p history
+  vara_strategy_id: predictive_avg_topk10_w24_stable05
+  vara_correction_weight: 1.0
+  inverse_transform: max(expm1(autoets_log_forecast + vara_log_error_forecast), 0)
+  tuned_lambda:
+    calibration_window_months: 36
+    objective: pooled squared log1p AutoETS error
+    intercept: false
+    bounds: [0.0, 1.25]
+    forecast: max(expm1(autoets_log_forecast + lambda_t * vara_log_error_forecast), 0)
+    result:
+      rmse: 120.27963404950854
+      mae: 71.41053286090472
+      mase: 0.8364573996153768
+      rmsse: 0.7831120107871832
+      bias: -19.26309334738813
+      oos_r2: 0.5945431973185753
+      lambda_min: 0.24256950066654226
+      lambda_max: 0.4303183835745385
+      comparison_method_count: 13
+      overall_rank: 2
+      rank_score: 91.66666666666667
+  final_start: "2016-01-01"
+  final_end: "2016-12-01"
+  evaluation_scale: original visitor nights
+  rank_score_metrics: [rmse, mae, mase, rmsse]
+  uncalibrated_result:
+    n_origins: 12
+    n_series: 76
+    n_cells: 912
+    rmse: 124.62995238191698
+    mae: 74.48511584343596
+    mase: 0.8694826379556548
+    rmsse: 0.7995625441823865
+    bias: -1.8289786876179497
+    oos_r2: 0.564683375112436
+    comparison_method_count: 13
+    overall_rank: 6
+    rank_score: 56.25
+
+log1p_zza_w24_comparison:
+  purpose: compare log1p and level-scale VARA--AutoETS(ZZA) with the same VARA residual window
+  autoets_entrypoint: scripts/evaluate_tourism_76_autoets.py
+  autoets_output_path: outputs/tourism_76_autoets_zza_log1p_extended/rolling_forecasts.csv
+  vara_entrypoint: scripts/search_tourism_oos_error_vara.py
+  vara_output_dir: outputs/tourism_76_vara_zza_log1p_w24
+  evaluation_entrypoint: scripts/evaluate_tourism_log1p_vara.py
+  evaluation_output_dir: outputs/tourism_76_log1p_vara_autoets_zza_w24
+  first_year: 2000
+  final_year: 2016
+  final_start: "2016-01-01"
+  final_end: "2016-12-01"
+  response_transform: log1p
+  inverse_transform: max(expm1(log-scale forecast), 0)
+  evaluation_scale: original visitor nights
+  autoets_model_config:
+    implementation: statsforecast.models.AutoETS
+    package_version: 2.0.3
+    model_specification: ZZA
+    interpretation: automatic error, automatic trend/damping, additive seasonality
+    season_length: 12
+    damped: null
+    phi: null
+    selection_criterion: AICc
+    optimization_criterion: likelihood
+    allow_multiplicative_trend: false
+    series_fit: separate
+    training_window: expanding
+    forecast_horizon: 1
+    refit_every_origin: true
+    validation_hyperparameter_search: false
+  vara_strategy_id: predictive_avg_topk10_w24_stable05
+  vara_history_window_months: 24
+  autoets_error_definition: log1p(actual) - rolling AutoETS(ZZA) forecast fitted to log1p history
+  unit_weight_forecast: max(expm1(autoets_log_forecast + vara_log_error_forecast), 0)
+  tuned_weight:
+    calibration_window_months: 36
+    objective: pooled squared log1p AutoETS error
+    intercept: false
+    bounds: [0.0, 1.25]
+  result:
+    log1p_autoets_zza_rmse: 121.90441937903974
+    log1p_vara_autoets_zza_unit_rmse: 124.335404523362
+    log1p_vara_autoets_zza_tuned_rmse: 120.18990636069053
+    level_autoets_zza_rmse: 119.7047475096557
+    level_vara_autoets_zza_unit_rmse: 119.41130224746364
+    level_vara_autoets_zza_tuned_rmse: 117.13313736658188
+  rank_score_scope: excluded from the fixed 11-method Table 6 because adding this sensitivity method changes M from 10 to 11 competitors
+
+training_zscore_zza_w24_comparison:
+  purpose: normalize each series over its origin-specific AutoETS training history and invert forecasts with the same statistics
+  normalization:
+    method: training_zscore
+    scope: per origin and per series
+    statistics_source: observations through the month before the forecast target
+    variance_ddof: 0
+    fit_formula: (response - training_mean) / sqrt(training_variance)
+    forecast_inverse_formula: training_mean + sqrt(training_variance) * normalized_forecast
+    constant_series_scale_fallback: 1.0
+  autoets_model_specification: ZZA
+  autoets_training_window: expanding
+  vara_strategy_id: predictive_avg_topk10_w24_stable05
+  vara_history_window_months: 24
+  level:
+    response_transform: none
+    autoets_output_path: outputs/tourism_76_autoets_zza_train_zscore_extended/rolling_forecasts.csv
+    vara_output_dir: outputs/tourism_76_vara_zza_train_zscore_w24
+    evaluation_output_dir: outputs/tourism_76_vara_autoets_zza_train_zscore_w24_unit
+    result:
+      autoets_rmse: 118.45890693957827
+      autoets_mae: 70.65255296278563
+      unit_vara_autoets_rmse: 118.52109252591555
+      unit_vara_autoets_mae: 73.07089615610663
+  log1p:
+    response_transform: log1p
+    normalization_order: log1p then training_zscore
+    autoets_output_path: outputs/tourism_76_autoets_zza_log1p_train_zscore_extended/rolling_forecasts.csv
+    vara_output_dir: outputs/tourism_76_vara_zza_log1p_train_zscore_w24
+    evaluation_output_dir: outputs/tourism_76_log1p_train_zscore_vara_autoets_zza_w24
+    result:
+      autoets_rmse: 122.19702808721235
+      autoets_mae: 72.60462163941159
+      unit_vara_autoets_rmse: 124.95879852111024
+      unit_vara_autoets_mae: 74.63280279233918
+      tuned_vara_autoets_rmse: 120.60781806751348
+      tuned_vara_autoets_mae: 71.26209682759315
+  comparison_entrypoint: scripts/compare_tourism_training_normalization.py
+  comparison_output_path: outputs/tourism_76_zza_training_normalization_comparison.csv
+  evaluation_scale: original visitor nights
+  tex_updated: false
+
+raw_direct_vara_comparison:
+  evaluation_entrypoint: scripts/evaluate_tourism_raw_vara.py
+  evaluation_output_dir: outputs/tourism_76_raw_direct_vara
+  response: original visitor-night levels
+  response_transform: none
+  evaluation_scale: original visitor nights
+  autoets_used: false
+  forecast_scenario: direct
+  series_depth: 3
+  expected_n_series: 76
+  final_start: "2016-01-01"
+  final_end: "2016-12-01"
+  strategy:
+    strategy_id: raw_direct_predictive_avg_topk10_w24_stable05
+    history_window: 24
+    internal_fit_transform: standardize
+    feature_source: predictive-average
+    predictive_score_lags: [1, 12]
+    attention_mode: score-topk
+    attention_top_k: 10
+    ridge: 0.01
+    grid_size: 7
+    eta_bounds: [-2.0, 2.0]
+    stability_cap: 0.5
+  forecast: max(direct raw-level VARA forecast, 0)
+  rank_score_metrics: [rmse, mae, mase, rmsse]
+  result:
+    n_origins: 12
+    n_series: 76
+    n_cells: 912
+    rmse: 189.9761312286315
+    mae: 94.1835743074879
+    mase: 1.049407269928928
+    rmsse: 1.0058827258917593
+    bias: -16.443952247149994
+    oos_r2: -0.0114827336422629
+    comparison_method_count: 14
+    overall_rank: 12
+    rank_score: 19.230769230769234
+
 benchmark_forecasts:
   entrypoint: scripts/run_benchmarks.py
   data_dir: data/tourism
@@ -66,6 +425,7 @@ benchmark_forecasts:
   max_series: 0
   clip_nonnegative: true
   forecast_variance_level: 95
+  autoets_model_config: *tourism_autoets_model_config
   resume: true
   resume_csv: outputs/tourism_benchmark_standardized_run/rolling-origin/benchmark_task_results.csv
   ray_debug: false

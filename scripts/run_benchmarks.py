@@ -15,14 +15,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from statsforecast import StatsForecast
-from statsforecast.models import AutoARIMA, AutoETS, Naive, RandomWalkWithDrift, SeasonalNaive
+from statsforecast.models import AutoARIMA, Naive, RandomWalkWithDrift, SeasonalNaive
 from statsmodels.tsa.ar_model import AutoReg
 from statsmodels.tsa.api import VAR
 
 from vara.forecast_data import load_panel_data
 from vara.forecast_baselines import (
+    AUTO_ETS_DAMPED,
+    AUTO_ETS_MODEL_SPECIFICATION,
+    AUTO_ETS_PHI,
     FORECAST_VARIANCE_LEVEL,
+    RESPONSE_NORMALIZATIONS,
     auto_ets_baseline_panel,
+    auto_ets_config,
+    make_auto_ets_model,
     seasonal_ets_baseline_panel,
     statsmodels_ets_baseline_panel,
 )
@@ -111,6 +117,28 @@ class NeuralModelConfig:
 
 
 @dataclass(frozen=True)
+class AutoETSBenchmarkConfig:
+    model_specification: str = AUTO_ETS_MODEL_SPECIFICATION
+    damped: bool | None = AUTO_ETS_DAMPED
+    phi: float | None = AUTO_ETS_PHI
+    response_normalization: str = "none"
+
+    def __post_init__(self) -> None:
+        if self.response_normalization not in RESPONSE_NORMALIZATIONS:
+            raise ValueError(
+                "AutoETS response_normalization must be one of "
+                f"{RESPONSE_NORMALIZATIONS}."
+            )
+
+    def model_kwargs(self) -> dict[str, Any]:
+        return {
+            "model_specification": self.model_specification,
+            "damped": self.damped,
+            "phi": self.phi,
+        }
+
+
+@dataclass(frozen=True)
 class BenchmarkConfig:
     data_dir: Path = Path("data/tourism")
     output_dir: Path = Path("outputs/tourism_benchmark_statsforecast")
@@ -133,6 +161,9 @@ class BenchmarkConfig:
     ray_debug: bool = False
     resume: bool = True
     resume_csv: Path | None = None
+    autoets_config: AutoETSBenchmarkConfig = field(
+        default_factory=AutoETSBenchmarkConfig
+    )
     neural_config: NeuralModelConfig = field(default_factory=NeuralModelConfig)
 
     @property
@@ -163,6 +194,14 @@ class BenchmarkConfig:
             "max_cpus_per_task": self.max_cpus_per_task,
             "ray_debug": self.ray_debug,
             "resume": self.resume,
+            "autoets_model_specification": (
+                self.autoets_config.model_specification
+            ),
+            "autoets_damped": self.autoets_config.damped,
+            "autoets_phi": self.autoets_config.phi,
+            "autoets_response_normalization": (
+                self.autoets_config.response_normalization
+            ),
             "deepar_input_size": self.neural_config.input_size,
             "deepar_max_steps": self.neural_config.max_steps,
             "deepar_hidden_size": self.neural_config.hidden_size,
@@ -197,6 +236,20 @@ class BenchmarkConfig:
             "resume": bool(self.resume),
             "resume_csv": None if checkpoint_csv is None else str(checkpoint_csv),
             "forecast_variance_level": int(FORECAST_VARIANCE_LEVEL),
+            "autoets_config": {
+                **auto_ets_config(
+                    self.season_length,
+                    **self.autoets_config.model_kwargs(),
+                ),
+                "response_normalization": (
+                    self.autoets_config.response_normalization
+                ),
+                "normalization_scope": "per rolling origin and per series",
+                "normalization_statistics_source": (
+                    "training observations through t-1 only"
+                ),
+                "normalization_variance_ddof": 0,
+            },
             **self.neural_config.legacy_config(),
         }
 
@@ -459,7 +512,11 @@ def _parse_model_names(models: str | list[str]) -> list[str]:
     return out
 
 
-def _make_models(model_names: list[str], season_length: int):
+def _make_models(
+    model_names: list[str],
+    season_length: int,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
+):
     models = []
     for name in model_names:
         if name == "naive":
@@ -469,7 +526,13 @@ def _make_models(model_names: list[str], season_length: int):
         elif name == "drift":
             models.append(RandomWalkWithDrift(alias=name))
         elif name == "auto_ets":
-            models.append(AutoETS(season_length=season_length, alias=name))
+            models.append(
+                make_auto_ets_model(
+                    season_length,
+                    alias=name,
+                    **autoets_model_config.model_kwargs(),
+                )
+            )
         elif name == "auto_arima":
             models.append(AutoARIMA(season_length=season_length, alias=name))
         else:
@@ -673,31 +736,75 @@ def _forecast_statsforecast_once(
     series_cols: list[str],
     *,
     model_names: list[str],
+    forecast_dates: pd.Series | list[pd.Timestamp],
     season_length: int,
     freq: str,
     h: int,
     n_jobs: int,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
-    models = _make_models(model_names, season_length)
-    sf = StatsForecast(models=models, freq=freq, n_jobs=n_jobs)
-    out = sf.forecast(df=_wide_to_statsforecast_long(train_wide, series_cols), h=h, level=[FORECAST_VARIANCE_LEVEL])
-    out = out.rename(columns={"unique_id": "series_id", "ds": "date"})
-    keep_cols = ["series_id", "date"]
-    for model_name in model_names:
-        keep_cols.append(model_name)
-        lo_col = f"{model_name}-lo-{FORECAST_VARIANCE_LEVEL}"
-        hi_col = f"{model_name}-hi-{FORECAST_VARIANCE_LEVEL}"
-        var_col = _variance_col(model_name)
-        if lo_col in out.columns and hi_col in out.columns:
-            out[var_col] = _interval_variance(
-                out[lo_col].to_numpy(dtype=float),
-                out[hi_col].to_numpy(dtype=float),
-                level=FORECAST_VARIANCE_LEVEL,
-            )
-        else:
-            out[var_col] = np.nan
-        keep_cols.append(var_col)
-    return out.loc[:, keep_cols]
+    normalized_autoets = (
+        "auto_ets" in model_names
+        and autoets_model_config.response_normalization == "training_zscore"
+    )
+    regular_names = [
+        name
+        for name in model_names
+        if not (normalized_autoets and name == "auto_ets")
+    ]
+    frames = []
+    if regular_names:
+        models = _make_models(
+            regular_names,
+            season_length,
+            autoets_model_config,
+        )
+        sf = StatsForecast(models=models, freq=freq, n_jobs=n_jobs)
+        out = sf.forecast(
+            df=_wide_to_statsforecast_long(train_wide, series_cols),
+            h=h,
+            level=[FORECAST_VARIANCE_LEVEL],
+        )
+        out = out.rename(columns={"unique_id": "series_id", "ds": "date"})
+        keep_cols = ["series_id", "date"]
+        for model_name in regular_names:
+            keep_cols.append(model_name)
+            lo_col = f"{model_name}-lo-{FORECAST_VARIANCE_LEVEL}"
+            hi_col = f"{model_name}-hi-{FORECAST_VARIANCE_LEVEL}"
+            var_col = _variance_col(model_name)
+            if lo_col in out.columns and hi_col in out.columns:
+                out[var_col] = _interval_variance(
+                    out[lo_col].to_numpy(dtype=float),
+                    out[hi_col].to_numpy(dtype=float),
+                    level=FORECAST_VARIANCE_LEVEL,
+                )
+            else:
+                out[var_col] = np.nan
+            keep_cols.append(var_col)
+        frames.append(out.loc[:, keep_cols])
+    if normalized_autoets:
+        baseline = auto_ets_baseline_panel(
+            train_wide.loc[:, series_cols].to_numpy(dtype=float),
+            horizon=h,
+            seasonal_lag=season_length,
+            series_ids=series_cols,
+            **autoets_model_config.model_kwargs(),
+            response_normalization=(
+                autoets_model_config.response_normalization
+            ),
+        )
+        frames.append(_forecast_array_to_long(
+            baseline["forecast"],
+            _validate_forecast_dates(
+                forecast_dates,
+                h,
+                "normalized AutoETS",
+            ),
+            series_cols,
+            "auto_ets",
+            variance=baseline["forecast_variance"],
+        ))
+    return _merge_forecast_frames(frames)
 
 
 
@@ -935,9 +1042,19 @@ def _filtered_baseline_panel(
     season_length: int,
     series_cols: list[str],
     filter_name: str,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> dict[str, Any]:
     if filter_name == "auto_ets":
-        return auto_ets_baseline_panel(values, h, season_length, series_cols)
+        return auto_ets_baseline_panel(
+            values,
+            h,
+            season_length,
+            series_cols,
+            **autoets_model_config.model_kwargs(),
+            response_normalization=(
+                autoets_model_config.response_normalization
+            ),
+        )
     if filter_name == "seasonal_ets":
         return seasonal_ets_baseline_panel(values, h, season_length, series_cols)
     if filter_name == "statsmodels_ets":
@@ -954,10 +1071,18 @@ def _forecast_ar1_filtered_once(
     season_length: int,
     filter_name: str,
     model_name: str,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     dates = _validate_forecast_dates(forecast_dates, h, f"AR(1) {filter_name} residual")
     values = train_wide.loc[:, series_cols].to_numpy(dtype=float)
-    baseline = _filtered_baseline_panel(values, h, season_length, series_cols, filter_name)
+    baseline = _filtered_baseline_panel(
+        values,
+        h,
+        season_length,
+        series_cols,
+        filter_name,
+        autoets_model_config,
+    )
     residuals = baseline["residuals"]
     results = [
         _forecast_ar1_mean_variance(
@@ -984,10 +1109,18 @@ def _forecast_var1_filtered_once(
     season_length: int,
     filter_name: str,
     model_name: str,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     dates = _validate_forecast_dates(forecast_dates, h, f"VAR(1) {filter_name} residual")
     values = train_wide.loc[:, series_cols].to_numpy(dtype=float)
-    baseline = _filtered_baseline_panel(values, h, season_length, series_cols, filter_name)
+    baseline = _filtered_baseline_panel(
+        values,
+        h,
+        season_length,
+        series_cols,
+        filter_name,
+        autoets_model_config,
+    )
     residual_forecast, residual_variance = _forecast_var1_mean_variance(
         baseline["residuals"],
         series_cols,
@@ -1089,6 +1222,7 @@ def _forecast_once(
     n_jobs: int,
     forecast_dates: pd.Series | list[pd.Timestamp],
     neural_config: NeuralModelConfig,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     frames = []
     statsforecast_names = [name for name in model_names if name in STATSFORECAST_MODELS]
@@ -1098,10 +1232,12 @@ def _forecast_once(
                 train_wide,
                 series_cols,
                 model_names=statsforecast_names,
+                forecast_dates=forecast_dates,
                 season_length=season_length,
                 freq=freq,
                 h=h,
                 n_jobs=n_jobs,
+                autoets_model_config=autoets_model_config,
             )
         )
     if "seasonal_ets" in model_names:
@@ -1131,6 +1267,7 @@ def _forecast_once(
                     season_length=season_length,
                     filter_name=filter_name,
                     model_name=model_name,
+                    autoets_model_config=autoets_model_config,
                 )
             )
     if "ar1" in model_names:
@@ -1160,6 +1297,7 @@ def _forecast_once(
                     season_length=season_length,
                     filter_name=filter_name,
                     model_name=model_name,
+                    autoets_model_config=autoets_model_config,
                 )
             )
     if "var1" in model_names:
@@ -1218,6 +1356,7 @@ def _forecast_recursive(
     freq: str,
     n_jobs: int,
     neural_config: NeuralModelConfig,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     train = wide.iloc[: len(wide) - horizon]
     out = _forecast_once(
@@ -1230,6 +1369,7 @@ def _forecast_recursive(
         n_jobs=n_jobs,
         forecast_dates=wide["date"].iloc[-horizon:],
         neural_config=neural_config,
+        autoets_model_config=autoets_model_config,
     )
     return out
 
@@ -1244,6 +1384,7 @@ def _forecast_rolling_origin(
     freq: str,
     n_jobs: int,
     neural_config: NeuralModelConfig,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     rows = []
     for step in range(horizon):
@@ -1259,6 +1400,7 @@ def _forecast_rolling_origin(
             n_jobs=n_jobs,
             forecast_dates=[wide["date"].iloc[origin_end]],
             neural_config=neural_config,
+            autoets_model_config=autoets_model_config,
         )
         out.insert(0, "origin", step + 1)
         out.insert(1, "train_end", wide["date"].iloc[origin_end - 1])
@@ -1296,6 +1438,7 @@ def _forecast_closed_loop_single_model(
     freq: str,
     n_jobs: int,
     neural_config: NeuralModelConfig,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     history = wide.iloc[: len(wide) - horizon].loc[:, ["date", *series_cols]].copy().reset_index(drop=True)
     rows = []
@@ -1313,6 +1456,7 @@ def _forecast_closed_loop_single_model(
             n_jobs=n_jobs,
             forecast_dates=[forecast_date],
             neural_config=neural_config,
+            autoets_model_config=autoets_model_config,
         )
         out.insert(0, "origin", step + 1)
         out.insert(1, "train_end", train_end)
@@ -1337,6 +1481,7 @@ def _forecast_closed_loop(
     freq: str,
     n_jobs: int,
     neural_config: NeuralModelConfig,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     frames = [
         _forecast_closed_loop_single_model(
@@ -1348,6 +1493,7 @@ def _forecast_closed_loop(
             freq=freq,
             n_jobs=n_jobs,
             neural_config=neural_config,
+            autoets_model_config=autoets_model_config,
         )
         for model_name in model_names
     ]
@@ -1378,6 +1524,7 @@ def _forecast_by_mode(
     freq: str,
     n_jobs: int,
     neural_config: NeuralModelConfig,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     forecast_mode = _normalize_forecast_mode(forecast_mode)
     if forecast_mode == "recursive":
@@ -1390,6 +1537,7 @@ def _forecast_by_mode(
             freq=freq,
             n_jobs=n_jobs,
             neural_config=neural_config,
+            autoets_model_config=autoets_model_config,
         )
     if forecast_mode == "closed-loop":
         if len(model_names) == 1:
@@ -1402,6 +1550,7 @@ def _forecast_by_mode(
                 freq=freq,
                 n_jobs=n_jobs,
                 neural_config=neural_config,
+                autoets_model_config=autoets_model_config,
             )
         return _forecast_closed_loop(
             wide,
@@ -1412,6 +1561,7 @@ def _forecast_by_mode(
             freq=freq,
             n_jobs=n_jobs,
             neural_config=neural_config,
+            autoets_model_config=autoets_model_config,
         )
     return _forecast_rolling_origin(
         wide,
@@ -1422,6 +1572,7 @@ def _forecast_by_mode(
         freq=freq,
         n_jobs=n_jobs,
         neural_config=neural_config,
+        autoets_model_config=autoets_model_config,
     )
 
 
@@ -1436,6 +1587,7 @@ def _forecast_single_model(
     freq: str,
     n_jobs: int,
     neural_config: NeuralModelConfig,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     return _forecast_by_mode(
         wide,
@@ -1447,6 +1599,7 @@ def _forecast_single_model(
         freq=freq,
         n_jobs=n_jobs,
         neural_config=neural_config,
+        autoets_model_config=autoets_model_config,
     )
 
 
@@ -1463,6 +1616,7 @@ def _forecast_model_task_remote(
     n_jobs: int,
     neural_config: NeuralModelConfig,
     ray_debug: bool,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> tuple[str, str, pd.DataFrame]:
     task_label = "panel" if task_series == "panel" else f"series={task_series}"
     if ray_debug:
@@ -1478,6 +1632,7 @@ def _forecast_model_task_remote(
         freq=freq,
         n_jobs=n_jobs,
         neural_config=neural_config,
+        autoets_model_config=autoets_model_config,
     )
     if ray_debug:
         _print_progress(
@@ -1501,6 +1656,7 @@ def _forecast_models_with_ray(
     neural_config: NeuralModelConfig,
     ray_debug: bool,
     checkpoint_csv: Path | None = None,
+    autoets_model_config: AutoETSBenchmarkConfig = AutoETSBenchmarkConfig(),
 ) -> pd.DataFrame:
     univariate_models = [model_name for model_name in model_names if model_name not in PANEL_MODELS]
     panel_models = [model_name for model_name in model_names if model_name in PANEL_MODELS]
@@ -1535,6 +1691,7 @@ def _forecast_models_with_ray(
                 n_jobs=n_jobs,
                 neural_config=neural_config,
                 ray_debug=ray_debug,
+                autoets_model_config=autoets_model_config,
             )
             futures.append(ref)
             submit_times[ref] = time.time()
@@ -1556,6 +1713,7 @@ def _forecast_models_with_ray(
             n_jobs=n_jobs,
             neural_config=neural_config,
             ray_debug=ray_debug,
+            autoets_model_config=autoets_model_config,
         )
         futures.append(ref)
         submit_times[ref] = time.time()
@@ -1751,6 +1909,10 @@ def run_forecast_benchmark(
     ray_debug: bool = DEFAULT_BENCHMARK_CONFIG.ray_debug,
     resume: bool = DEFAULT_BENCHMARK_CONFIG.resume,
     resume_csv: Path | None = None,
+    autoets_model_specification: str = AUTO_ETS_MODEL_SPECIFICATION,
+    autoets_damped: bool | None = AUTO_ETS_DAMPED,
+    autoets_phi: float | None = AUTO_ETS_PHI,
+    autoets_response_normalization: str = "none",
     deepar_input_size: int = DEFAULT_BENCHMARK_CONFIG.neural_config.input_size,
     deepar_max_steps: int = DEFAULT_BENCHMARK_CONFIG.neural_config.max_steps,
     deepar_hidden_size: int = DEFAULT_BENCHMARK_CONFIG.neural_config.hidden_size,
@@ -1776,6 +1938,17 @@ def run_forecast_benchmark(
         scaler_type=str(deepar_scaler_type),
         random_seed=int(deepar_random_seed),
     )
+    autoets_model_config = AutoETSBenchmarkConfig(
+        model_specification=auto_ets_config(
+            season_length,
+            model_specification=autoets_model_specification,
+            damped=autoets_damped,
+            phi=autoets_phi,
+        )["model_specification"],
+        damped=autoets_damped,
+        phi=autoets_phi,
+        response_normalization=autoets_response_normalization,
+    )
     benchmark_config = BenchmarkConfig(
         data_dir=data_dir,
         output_dir=output_dir,
@@ -1798,6 +1971,7 @@ def run_forecast_benchmark(
         ray_debug=ray_debug,
         resume=resume,
         resume_csv=resume_csv,
+        autoets_config=autoets_model_config,
         neural_config=neural_config,
     )
     success_path = output_dir / SUCCESS_MARKER
@@ -1874,6 +2048,7 @@ def run_forecast_benchmark(
                 neural_config=neural_config,
                 ray_debug=ray_debug,
                 checkpoint_csv=checkpoint_csv,
+                autoets_model_config=autoets_model_config,
             )
         else:
             long_forecasts = _forecast_by_mode(
@@ -1886,6 +2061,7 @@ def run_forecast_benchmark(
                 freq=freq,
                 n_jobs=STATSFORECAST_N_JOBS,
                 neural_config=neural_config,
+                autoets_model_config=autoets_model_config,
             )
 
         if clip_nonnegative:
@@ -1911,6 +2087,9 @@ def run_forecast_benchmark(
                 "train_end": str(train_wide["date"].iloc[-1].date()),
                 "test_start": str(test_wide["date"].iloc[0].date()),
                 "test_end": str(test_wide["date"].iloc[-1].date()),
+                "autoets_response_normalization": (
+                    autoets_model_config.response_normalization
+                ),
             },
         )
 
@@ -1945,6 +2124,17 @@ def _load_config_defaults(path: Path | None) -> dict[str, Any]:
             config[key] = Path(config[key])
     if "models" in config and isinstance(config["models"], list):
         config["models"] = ",".join(config["models"])
+    autoets_config = config.get("autoets_config")
+    if isinstance(autoets_config, dict):
+        nested_to_argument = {
+            "model_specification": "autoets_model_specification",
+            "damped": "autoets_damped",
+            "phi": "autoets_phi",
+            "response_normalization": "autoets_response_normalization",
+        }
+        for nested_key, argument_name in nested_to_argument.items():
+            if nested_key in autoets_config:
+                config[argument_name] = autoets_config[nested_key]
     return config
 
 
@@ -1973,6 +2163,12 @@ def _benchmark_config_from_args(args: argparse.Namespace) -> BenchmarkConfig:
         ray_debug=args.ray_debug,
         resume=args.resume,
         resume_csv=args.resume_csv,
+        autoets_config=AutoETSBenchmarkConfig(
+            model_specification=args.autoets_model_specification,
+            damped=args.autoets_damped,
+            phi=args.autoets_phi,
+            response_normalization=args.autoets_response_normalization,
+        ),
         neural_config=NeuralModelConfig(
             input_size=args.deepar_input_size,
             max_steps=args.deepar_max_steps,
@@ -2031,6 +2227,37 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-resume", dest="resume", action="store_false", help="Disable Ray task checkpoint resume.")
     parser.set_defaults(resume=default_config.resume)
     parser.add_argument("--resume-csv", type=Path, default=default_config.resume_csv, help="Checkpoint CSV path; defaults to OUTPUT_DIR/benchmark_task_results.csv.")
+    parser.add_argument(
+        "--autoets-model-specification",
+        default=default_config.autoets_config.model_specification,
+        help=(
+            "Three-letter ETS family used by AutoETS and every AutoETS-residual "
+            "benchmark. ZZZ retains automatic family selection; ANN fixes "
+            "ETS(A,N,N)."
+        ),
+    )
+    parser.add_argument(
+        "--autoets-damped",
+        action=argparse.BooleanOptionalAction,
+        default=default_config.autoets_config.damped,
+        help="Force or forbid damping in every AutoETS-dependent benchmark.",
+    )
+    parser.add_argument(
+        "--autoets-phi",
+        type=float,
+        default=default_config.autoets_config.phi,
+        help="Optional fixed damping coefficient for AutoETS-dependent methods.",
+    )
+    parser.add_argument(
+        "--autoets-response-normalization",
+        choices=RESPONSE_NORMALIZATIONS,
+        default=default_config.autoets_config.response_normalization,
+        help=(
+            "Normalize each AutoETS training series at every rolling origin "
+            "and invert forecasts with the same training statistics. This "
+            "also applies to AR(1)--AutoETS and VAR(1)--AutoETS."
+        ),
+    )
     parser.add_argument(
         "--deepar-input-size",
         type=int,

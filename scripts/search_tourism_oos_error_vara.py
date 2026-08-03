@@ -125,6 +125,16 @@ def default_strategies() -> list[ErrorStrategy]:
                 stability_cap=cap,
             ),
         ])
+    strategies.append(
+        ErrorStrategy(
+            "predictive_avg_topk10_w192_stable05",
+            feature_source="predictive-average",
+            attention_mode="score-topk",
+            attention_top_k=10,
+            history_window=192,
+            stability_cap=0.5,
+        )
+    )
     ids = [strategy.strategy_id for strategy in strategies]
     if len(ids) != len(set(ids)):
         raise RuntimeError("OOS-error strategy identifiers must be unique.")

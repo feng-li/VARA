@@ -53,6 +53,7 @@ class ReliabilityCombinationConfig:
     state_feature_set: str = "vara_seasonal10"
     state_ridge_alpha: float = 10.0
     calibration_window_months: int = 36
+    calibration_min_months: int | None = None
     lambda_prior_strength: float = 3.0
     lambda_cap: float = 1.25
     reliability_bins: int = 7
@@ -349,6 +350,19 @@ def rolling_recombine(
     config: ReliabilityCombinationConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Apply leakage-safe rolling calibration at each requested target month."""
+    maximum_months = int(config.calibration_window_months)
+    minimum_months = (
+        maximum_months
+        if config.calibration_min_months is None
+        else int(config.calibration_min_months)
+    )
+    if maximum_months < 1:
+        raise ValueError("calibration_window_months must be positive.")
+    if minimum_months < 1 or minimum_months > maximum_months:
+        raise ValueError(
+            "calibration_min_months must be between one and "
+            "calibration_window_months."
+        )
     pieces = []
     lambda_rows = []
     offset_rows = []
@@ -358,11 +372,12 @@ def rolling_recombine(
                 state_predictions["date"] < target_date,
                 "date",
             ].unique()
-        )[-int(config.calibration_window_months):]
-        if len(prior_dates) != int(config.calibration_window_months):
+        )[-maximum_months:]
+        if len(prior_dates) < minimum_months:
             raise ValueError(
                 f"Target {target_date.date()} has {len(prior_dates)} prior state "
-                f"months; expected {config.calibration_window_months}."
+                f"months; expected at least {minimum_months} and at most "
+                f"{maximum_months}."
             )
         train = state_predictions[state_predictions["date"].isin(prior_dates)].copy()
         test = state_predictions[state_predictions["date"] == target_date].copy()
@@ -944,7 +959,11 @@ def run_recombination(
     )
     metadata = {
         "model": MODEL,
-        "selection_status": "selected from 2013-2015; final year excluded from rule",
+        "selection_status": (
+            f"selected from {validation_start} through {validation_end}; "
+            f"the final evaluation from {final_start} through {final_end} "
+            "is excluded from the selection rule"
+        ),
         "selection_rule": (
             "lowest validation MAE among core candidates within 1 percent of "
             "the minimum validation RMSE, followed by a reliability-group "
@@ -1037,6 +1056,16 @@ def main() -> None:
     parser.add_argument("--state-feature-set", default="vara_seasonal10")
     parser.add_argument("--state-ridge-alpha", type=float, default=10.0)
     parser.add_argument("--calibration-window-months", type=int, default=36)
+    parser.add_argument(
+        "--calibration-min-months",
+        type=int,
+        default=None,
+        help=(
+            "Optional expanding-window warm-up minimum. The rolling calibration "
+            "still uses at most --calibration-window-months; omit to require the "
+            "full window at every target."
+        ),
+    )
     parser.add_argument("--lambda-prior-strength", type=float, default=3.0)
     parser.add_argument("--lambda-cap", type=float, default=1.25)
     parser.add_argument("--reliability-bins", type=int, default=7)
@@ -1051,6 +1080,7 @@ def main() -> None:
         state_feature_set=args.state_feature_set,
         state_ridge_alpha=args.state_ridge_alpha,
         calibration_window_months=args.calibration_window_months,
+        calibration_min_months=args.calibration_min_months,
         lambda_prior_strength=args.lambda_prior_strength,
         lambda_cap=args.lambda_cap,
         reliability_bins=args.reliability_bins,

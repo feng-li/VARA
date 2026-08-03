@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,10 +7,42 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from scripts.run_benchmarks import _parse_forecast_modes, run_forecast_benchmark
+from scripts.run_benchmarks import (
+    _load_config_defaults,
+    _parse_forecast_modes,
+    run_forecast_benchmark,
+)
+from vara.forecast_baselines import auto_ets_baseline_panel
 
 
 class TourismBenchmarkTests(unittest.TestCase):
+    def test_saved_autoets_config_is_restored_as_cli_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps({
+                "models": ["auto_ets", "ar1_auto_ets"],
+                "autoets_config": {
+                    "model_specification": "ZZA",
+                    "damped": None,
+                    "phi": None,
+                    "response_normalization": "training_zscore",
+                },
+            }))
+
+            defaults = _load_config_defaults(path)
+
+            self.assertEqual(defaults["models"], "auto_ets,ar1_auto_ets")
+            self.assertEqual(
+                defaults["autoets_model_specification"],
+                "ZZA",
+            )
+            self.assertIsNone(defaults["autoets_damped"])
+            self.assertIsNone(defaults["autoets_phi"])
+            self.assertEqual(
+                defaults["autoets_response_normalization"],
+                "training_zscore",
+            )
+
     def test_parse_forecast_modes_accepts_comma_list(self):
         self.assertEqual(
             _parse_forecast_modes("rolling-origin,closed-loop,recursive,recursive"),
@@ -88,6 +121,107 @@ class TourismBenchmarkTests(unittest.TestCase):
             seasonal_wide = pd.read_csv(output_dir / "forecast_seasonal_naive.csv")
             self.assertEqual(list(seasonal_wide["AAAAll"]), [32.0, 33.0])
             self.assertEqual(list(seasonal_wide["AABAll"]), [74.0, 76.0])
+
+    def test_fixed_ann_family_is_used_by_all_autoets_benchmarks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            output_dir = root / "out"
+            data_dir.mkdir()
+            dates = pd.date_range("2017-01-01", periods=48, freq="MS")
+            time = np.arange(48, dtype=float)
+            pd.DataFrame({
+                "date": dates,
+                "AAAAll": 100.0 + 0.4 * time + 8.0 * np.sin(2.0 * np.pi * time / 12.0),
+                "AABAll": 80.0 + 0.2 * time + 5.0 * np.cos(2.0 * np.pi * time / 12.0),
+            }).to_csv(data_dir / "tourism.csv", index=False)
+
+            summary = run_forecast_benchmark(
+                data_dir=data_dir,
+                output_dir=output_dir,
+                models="auto_ets,ar1_auto_ets,var1_auto_ets",
+                forecast_mode="rolling-origin",
+                horizon=2,
+                season_length=12,
+                series_depth=3,
+                autoets_model_specification="ANN",
+                autoets_damped=False,
+            )
+
+            self.assertEqual(
+                set(summary["model"]),
+                {"auto_ets", "ar1_auto_ets", "var1_auto_ets"},
+            )
+            config = json.loads(
+                (output_dir / "config_benchmark.json").read_text()
+            )
+            self.assertEqual(
+                config["autoets_config"]["model_specification"],
+                "ANN",
+            )
+            self.assertIs(config["autoets_config"]["damped"], False)
+            self.assertIsNone(config["autoets_config"]["selection_criterion"])
+
+    def test_training_zscore_is_used_by_all_autoets_benchmarks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            output_dir = root / "out"
+            data_dir.mkdir()
+            dates = pd.date_range("2017-01-01", periods=48, freq="MS")
+            time = np.arange(48, dtype=float)
+            pd.DataFrame({
+                "date": dates,
+                "AAAAll": (
+                    100.0
+                    + 0.4 * time
+                    + 8.0 * np.sin(2.0 * np.pi * time / 12.0)
+                ),
+                "AABAll": (
+                    80.0
+                    + 0.2 * time
+                    + 5.0 * np.cos(2.0 * np.pi * time / 12.0)
+                ),
+            }).to_csv(data_dir / "tourism.csv", index=False)
+
+            normalizations = []
+
+            def recording_autoets(*args, **kwargs):
+                normalizations.append(kwargs.get("response_normalization"))
+                return auto_ets_baseline_panel(*args, **kwargs)
+
+            with patch(
+                "scripts.run_benchmarks.auto_ets_baseline_panel",
+                side_effect=recording_autoets,
+            ):
+                summary = run_forecast_benchmark(
+                    data_dir=data_dir,
+                    output_dir=output_dir,
+                    models="auto_ets,ar1_auto_ets,var1_auto_ets",
+                    forecast_mode="rolling-origin",
+                    horizon=2,
+                    season_length=12,
+                    series_depth=3,
+                    autoets_model_specification="ZZA",
+                    autoets_response_normalization="training_zscore",
+                )
+
+            self.assertEqual(
+                set(summary["model"]),
+                {"auto_ets", "ar1_auto_ets", "var1_auto_ets"},
+            )
+            self.assertEqual(normalizations, ["training_zscore"] * 6)
+            config = json.loads(
+                (output_dir / "config_benchmark.json").read_text()
+            )
+            self.assertEqual(
+                config["autoets_config"]["response_normalization"],
+                "training_zscore",
+            )
+            self.assertEqual(
+                set(summary["autoets_response_normalization"]),
+                {"training_zscore"},
+            )
 
     def test_success_marker_skips_completed_resume_run(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,10 +1,31 @@
 # Frozen Accounting-Signal Risk application configuration for
 # docs/VAR_Atten.tex. Paths are relative to the repository root.
-schema_version: 1
-status: frozen
+schema_version: 2
+status: frozen_paper_eta_results
+application_contract_schema: datamine_vara_paper_eta_v2
 paper_source: docs/VAR_Atten.tex
 application_name: Accounting-Signal Risk
 response: next-month log squared long-short portfolio return
+
+# The core routines consume the effective slope multiplying the similarity
+# score. The application runners expose the paper parameter eta and apply the
+# high-dimensional score scale log(p) at their boundary, so the core remains
+# unchanged.
+attention_parameterization:
+  name: paper_eta_log_component_count_v1
+  paper_parameter: eta
+  paper_weight_formula: exp(eta * log(component_count) * score)
+  component_count: 21800
+  score_scale_rule: log_component_count
+  score_scale_value: 9.98966524877718
+  paper_eta_bounds: [-2.0, 2.0]
+  effective_slope_bounds: [-19.97933049755436, 19.97933049755436]
+  eta_grid_size: 7
+  paper_eta_local_tolerance: 0.0001
+  effective_slope_local_tolerance: 0.0009989665248777181
+  estimator: ridge_penalized_concentrated_qmle
+  support: deterministic_fixed_smallest_scores
+  support_size: 500
 
 # This workflow supplies the frozen panel, HAR baseline, benchmarks, and the
 # December 2007 formula-feature snapshot consumed by the paper model.
@@ -60,7 +81,7 @@ source_workflow:
 final_har_vara:
   entrypoint: scripts/run_datamine_har_vara.py
   source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
-  output_dir: outputs/datamine_vara/ew_log_risk_har_vara_topk500_w240_refit12_lambda24
+  output_dir: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
   feature_snapshot: snapshot_200712
   component_count: 21800
   feature_count: 18
@@ -74,42 +95,119 @@ final_har_vara:
   attention_top_k: 500
   attention_cache_mode: exact
   attention_batch_size: 512
-  eta: -0.0001
+  parallel_backend: ray
+  ray_num_cpus: 15
+  max_cpus_per_task: 1
+  ray_task_unit: rolling_refit_block
+  ray_debug: false
+  eta_estimation: ridge_penalized_concentrated_qmle
+  eta_parameterization: paper_eta_log_component_count_v1
+  eta_score_scale_rule: log_component_count
+  eta_score_scale_value: 9.98966524877718
+  eta_bounds: [-2.0, 2.0]
+  eta_effective_slope_bounds: [-19.97933049755436, 19.97933049755436]
+  eta_grid_size: 7
+  eta_local_tolerance: 0.0001
+  eta_effective_slope_local_tolerance: 0.0009989665248777181
+  attention_support: deterministic_fixed_smallest_scores
   lambda_window_months: 24
   lambda_ridge: 0.001
+  lambda_estimation: rolling_refit_block_pooled_bounded_lse
+  lambda_minimum_history_months: 24
+  lambda_held_fixed_within_refit_block: true
   full: true
   reuse_saved_correction: false
+
+# Exploratory GARCH branches use the identical paper-eta convention. The
+# HAR--VARA output is included only as a comparator in its metric table.
+exploratory_garch_vara:
+  entrypoint: scripts/run_datamine_garch_vara.py
+  source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
+  output_dir: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24
+  har_vara_output: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
+  feature_snapshot: snapshot_200712
+  component_count: 21800
+  error_window_months: 240
+  refit_frequency_months: 12
+  response_standardization: componentwise_median_mad
+  response_clip: 8.0
+  ridge: 0.001
+  attention_mode: topk
+  attention_top_k: 500
+  attention_cache_mode: exact
+  attention_batch_size: 512
+  eta_estimation: ridge_penalized_concentrated_qmle
+  eta_parameterization: paper_eta_log_component_count_v1
+  eta_score_scale_rule: log_component_count
+  eta_score_scale_value: 9.98966524877718
+  eta_bounds: [-2.0, 2.0]
+  eta_effective_slope_bounds: [-19.97933049755436, 19.97933049755436]
+  eta_grid_size: 7
+  eta_local_tolerance: 0.0001
+  eta_effective_slope_local_tolerance: 0.0009989665248777181
+  attention_support: deterministic_fixed_smallest_scores
+  lambda_window_months: 24
+  lambda_ridge: 0.001
+  lambda_estimation: rolling_refit_block_pooled_bounded_lse
+  lambda_minimum_history_months: 24
+  lambda_held_fixed_within_refit_block: true
+  reuse_saved_correction: false
+
+paper_results:
+  entrypoint: scripts/build_datamine_risk_paper_results.py
+  source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
+  har_vara_output: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
+  garch_vara_output: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24
+  output_dir: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24/paper
+  require_matching_application_contracts: true
 
 locked_split:
   universe_selection_end: "2007-12-31"
   validation_start: "2008-01-31"
   validation_end: "2012-12-31"
-  lambda_training_start: "2011-01-31"
-  lambda_training_end: "2012-12-31"
-  lambda_training_cells: 521682
   test_start: "2013-01-31"
   test_end: "2022-12-31"
   test_origins: 120
   test_cells: 2586724
 
 locked_parameters:
-  global_lambda: 0.4009686886184981
+  lambda_rule: refit_aligned_trailing_24_origin_pooled_bounded_lse
   formula_incidence_columns: 252
   formula_svd_explained_variation: 0.2914
 
 paper_reference:
-  output_dir: outputs/datamine_vara/ew_log_risk_har_vara_topk500_w240_refit12_lambda24
+  status: current_paper_eta_results
+  eta_parameterization: paper_eta_log_component_count_v1
+  output_dir: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
+  seven_method_results_dir: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24/paper
+  eta_refits:
+    count: 15
+    minimum: 0.0457966870794996
+    median: 0.4489439586033112
+    maximum: 0.9006674125180961
+    boundary_count: 0
+  garch_eta_refits:
+    count: 15
+    minimum: -0.0023115775771752
+    median: 0.4083161190725726
+    maximum: 0.9154727716243952
+    boundary_count: 0
+  lambda_test_blocks:
+    count: 10
+    minimum: 0.20884931029369816
+    median: 0.3958336709900646
+    maximum: 0.5288242762349109
   vara_har_lambda:
-    log_risk_rmse: 1.9759938654637366
-    log_risk_mae: 1.5864756233950255
-    crps: 0.01533621065784137
-    bias: -0.04074668395266013
-    oos_r2_vs_har: 0.010008071925298734
-    rank_score: 100.0
+    log_risk_rmse: 1.976292364141233
+    log_risk_mae: 1.586171665470425
+    crps: 0.015364262712780512
+    bias: -0.036433974029882084
+    absolute_r2: 0.15647626354294575
+    rank_score: 83.33333333333333
   har_ridge:
     log_risk_rmse: 1.98595665373675
     log_risk_mae: 1.5986088174291724
     crps: 0.015371086709209536
     bias: -0.07127934206640403
-    oos_r2_vs_har: 0.0
-    rank_score: 58.333333333333336
+    absolute_r2: 0.1482062423125855
+    rank_score: 33.333333333333336
