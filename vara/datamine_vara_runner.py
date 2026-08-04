@@ -26,6 +26,11 @@ from .datamine import (
     rolling_har_vara_corrections,
     rolling_refit_group_lambdas,
 )
+from .forecast_contracts import (
+    ExecutionConfig,
+    RollingVARAConfig,
+    VARARunRequest,
+)
 
 RESPONSE_STANDARDIZATION_CHOICES = ("median_mad", "training_zscore")
 
@@ -661,4 +666,49 @@ def fit_rolling_vara_family(
         evaluation_indices=evaluation_indices,
         lambda_window_months=lambda_window_months,
         lambda_ridge=lambda_ridge,
+    )
+
+
+def run_vara_family(
+    request: VARARunRequest,
+    config: RollingVARAConfig,
+    *,
+    execution: ExecutionConfig = ExecutionConfig(),
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ray_module: Any | None = None,
+) -> RollingVARAFamilyResult:
+    """Run the shared rolling VARA family through the typed public contract.
+
+    This wrapper resolves the paper-scale eta configuration for the request's
+    component count and delegates unchanged arrays and numerical settings to
+    :func:`fit_rolling_vara_family`.  The legacy keyword API remains the
+    numerical implementation and is intentionally retained for compatibility.
+    """
+    component_count = len(request.panel.series_ids)
+    eta_specification = config.eta.resolve(component_count)
+    return fit_rolling_vara_family(
+        base_forecast=request.base.forecast,
+        base_error=request.base.error,
+        metadata=request.panel.metadata,
+        evaluation_indices=request.evaluation.evaluation_indices,
+        feature_matrix=request.features.values,
+        error_window_months=config.error_window_months,
+        response_standardization=config.response_standardization,
+        response_clip=config.response_clip,
+        refit_frequency_months=config.refit_frequency_months,
+        ridge=config.ridge,
+        attention_top_k=config.attention_top_k,
+        attention_cache_mode=config.attention_cache_mode,
+        attention_batch_size=config.attention_batch_size,
+        eta_bounds=eta_specification.effective_bounds,
+        eta_grid_size=config.eta.grid_size,
+        eta_local_tolerance=eta_specification.effective_local_tolerance,
+        lambda_window_months=config.lambda_window_months,
+        lambda_ridge=config.lambda_ridge,
+        zero_own_lag_coefficients=config.zero_own_lag_coefficients,
+        ray_num_cpus=execution.ray_num_cpus,
+        max_cpus_per_task=execution.max_cpus_per_task,
+        ray_debug=execution.ray_debug,
+        ray_module=ray_module,
+        progress_callback=progress_callback,
     )

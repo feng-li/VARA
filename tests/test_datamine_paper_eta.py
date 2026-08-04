@@ -8,6 +8,8 @@ import pandas as pd
 import pytest
 import yaml
 
+import scripts.datamine_paper_eta as compatibility_paper_eta
+import vara.paper_eta as library_paper_eta
 from scripts.build_datamine_risk_paper_results import (
     DM_COMPARISONS,
     LEGACY_LIGHTGBM_RESPONSE_NORMALIZATION,
@@ -43,6 +45,27 @@ from scripts.run_datamine_har_vara import _print_eta_refit as print_har_eta_refi
 
 
 COMPONENT_COUNT = 21_800
+
+
+def test_script_module_reexports_library_objects_by_identity() -> None:
+    names = (
+        "APPLICATION_CONTRACT_SCHEMA",
+        "DEFAULT_PAPER_ETA_BOUNDS",
+        "DEFAULT_PAPER_ETA_GRID_SIZE",
+        "DEFAULT_PAPER_ETA_LOCAL_TOLERANCE",
+        "ETA_EFFECTIVE_SLOPE_DEFINITION",
+        "ETA_PARAMETERIZATION",
+        "ETA_SCORE_SCALE_RULE",
+        "PaperEtaSpecification",
+        "attention_support_name",
+        "file_fingerprints",
+        "_boolean_values",
+    )
+
+    assert compatibility_paper_eta.__all__ is library_paper_eta.__all__
+    for name in names:
+        assert name in compatibility_paper_eta.__dict__
+        assert compatibility_paper_eta.__dict__[name] is getattr(library_paper_eta, name)
 
 
 def _specification() -> PaperEtaSpecification:

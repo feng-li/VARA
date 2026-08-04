@@ -29,6 +29,11 @@ from scripts.run_datamine_garch_vara import (
     estimate_validation_log_offset,
     load_validated_har_vara_forecast,
 )
+from vara.forecast_contracts import (
+    ExecutionConfig,
+    RollingVARAConfig,
+    VARARunRequest,
+)
 
 
 def test_validation_log_offset_uses_only_matched_validation_cells() -> None:
@@ -273,6 +278,16 @@ def test_garch_runner_forwards_paper_eta_on_effective_scale(
         test_indices=np.arange(30, 36, dtype=np.int64),
     )
     captured: dict[str, object] = {}
+    captured_typed: dict[str, object] = {}
+    real_run_vara_family = runner.run_vara_family
+
+    def capture_run_vara_family(request, config, **kwargs):
+        captured_typed.update({
+            "request": request,
+            "config": config,
+            "execution": kwargs["execution"],
+        })
+        return real_run_vara_family(request, config, **kwargs)
 
     def fake_vara(**kwargs):
         captured.update(kwargs)
@@ -331,6 +346,7 @@ def test_garch_runner_forwards_paper_eta_on_effective_scale(
 
     monkeypatch.setattr(runner, "load_panel", lambda path: panel)
     monkeypatch.setattr(runner, "relative_panel_split", lambda *args, **kwargs: split)
+    monkeypatch.setattr(runner, "run_vara_family", capture_run_vara_family)
     monkeypatch.setattr(vara_runner, "rolling_har_vara_corrections", fake_vara)
     monkeypatch.setattr(vara_runner, "rolling_refit_group_lambdas", fake_lambdas)
     monkeypatch.setattr(
@@ -346,6 +362,17 @@ def test_garch_runner_forwards_paper_eta_on_effective_scale(
 
     runner.main()
 
+    typed_request = captured_typed["request"]
+    assert isinstance(typed_request, VARARunRequest)
+    assert typed_request.base.model_name == GARCH_OFFSET_MODEL
+    np.testing.assert_allclose(typed_request.base.forecast, 1.5)
+    np.testing.assert_allclose(typed_request.base.error, target - 1.5)
+    np.testing.assert_array_equal(
+        typed_request.evaluation.evaluation_indices,
+        np.concatenate((split.validation_indices, split.test_indices)),
+    )
+    assert isinstance(captured_typed["config"], RollingVARAConfig)
+    assert isinstance(captured_typed["execution"], ExecutionConfig)
     scale = np.log(component_count)
     assert captured["eta_bounds"] == pytest.approx((-2.0 * scale, 2.0 * scale))
     assert captured["eta_local_tolerance"] == pytest.approx(1e-4 * scale)
@@ -474,6 +501,12 @@ def test_student_t_runner_uses_own_residuals_and_dynamic_artifacts(
     refit_index[evaluation] = 23
     captured_vara: dict[str, object] = {}
     captured_evaluation: dict[str, object] = {}
+    captured_typed: dict[str, object] = {}
+    real_run_vara_family = runner.run_vara_family
+
+    def capture_run_vara_family(request, config, **kwargs):
+        captured_typed.update({"request": request, "config": config})
+        return real_run_vara_family(request, config, **kwargs)
 
     def fake_vara(**kwargs):
         captured_vara.update(kwargs)
@@ -527,6 +560,7 @@ def test_student_t_runner_uses_own_residuals_and_dynamic_artifacts(
 
     monkeypatch.setattr(runner, "load_panel", lambda path: panel)
     monkeypatch.setattr(runner, "relative_panel_split", lambda *args, **kwargs: split)
+    monkeypatch.setattr(runner, "run_vara_family", capture_run_vara_family)
     monkeypatch.setattr(vara_runner, "rolling_har_vara_corrections", fake_vara)
     monkeypatch.setattr(vara_runner, "rolling_refit_group_lambdas", fake_lambdas)
     monkeypatch.setattr(runner, "evaluate_risk_forecasts", fake_evaluate)
@@ -547,6 +581,12 @@ def test_student_t_runner_uses_own_residuals_and_dynamic_artifacts(
     runner.main()
 
     expected_error = target - adjusted_student_t
+    typed_request = captured_typed["request"]
+    assert isinstance(typed_request, VARARunRequest)
+    assert typed_request.base.model_name == STUDENT_T_GARCH_OFFSET_MODEL
+    np.testing.assert_allclose(typed_request.base.forecast, adjusted_student_t)
+    np.testing.assert_allclose(typed_request.base.error, expected_error)
+    assert isinstance(captured_typed["config"], RollingVARAConfig)
     np.testing.assert_allclose(captured_vara["baseline_errors"], expected_error)
     assert captured_vara["response_standardization"] == "training_zscore"
     assert captured_evaluation["benchmark_name"] == STUDENT_T_GARCH_OFFSET_MODEL
@@ -644,6 +684,12 @@ def test_riskmetrics_ewma_runner_uses_own_residuals_and_provenance(
     captured_lambda: dict[str, object] = {}
     captured_evaluation: dict[str, object] = {}
     captured_dm: dict[str, object] = {}
+    captured_typed: dict[str, object] = {}
+    real_run_vara_family = runner.run_vara_family
+
+    def capture_run_vara_family(request, config, **kwargs):
+        captured_typed.update({"request": request, "config": config})
+        return real_run_vara_family(request, config, **kwargs)
 
     def fake_ewma(returns, *, decay, variance_floor):
         captured_ewma.update({
@@ -725,6 +771,7 @@ def test_riskmetrics_ewma_runner_uses_own_residuals_and_provenance(
     monkeypatch.setattr(runner, "load_panel", lambda path: panel)
     monkeypatch.setattr(runner, "relative_panel_split", lambda *args, **kwargs: split)
     monkeypatch.setattr(runner, "riskmetrics_ewma_variance_forecast", fake_ewma)
+    monkeypatch.setattr(runner, "run_vara_family", capture_run_vara_family)
     monkeypatch.setattr(vara_runner, "rolling_har_vara_corrections", fake_vara)
     monkeypatch.setattr(vara_runner, "rolling_refit_group_lambdas", fake_lambdas)
     monkeypatch.setattr(runner, "evaluate_risk_forecasts", fake_evaluate)
@@ -749,6 +796,12 @@ def test_riskmetrics_ewma_runner_uses_own_residuals_and_provenance(
     offset = 2.5
     adjusted = raw_log_forecast - offset
     expected_error = target - adjusted
+    typed_request = captured_typed["request"]
+    assert isinstance(typed_request, VARARunRequest)
+    assert typed_request.base.model_name == EWMA_OFFSET_MODEL
+    np.testing.assert_allclose(typed_request.base.forecast, adjusted)
+    np.testing.assert_allclose(typed_request.base.error, expected_error)
+    assert isinstance(captured_typed["config"], RollingVARAConfig)
     np.testing.assert_allclose(captured_vara["baseline_errors"], expected_error)
     assert captured_vara["response_standardization"] == "training_zscore"
     np.testing.assert_allclose(captured_lambda["baseline_error"], expected_error)

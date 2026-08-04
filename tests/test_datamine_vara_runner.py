@@ -6,6 +6,16 @@ import pytest
 
 import vara.datamine_vara_runner as runner
 from vara.datamine import RollingHARVARAResult, rolling_refit_group_lambdas
+from vara.forecast_contracts import (
+    BaseForecastResult,
+    ExecutionConfig,
+    ForecastPanel,
+    PaperEtaConfig,
+    RollingEvaluationPlan,
+    RollingVARAConfig,
+    StaticFeatureSet,
+    VARARunRequest,
+)
 
 
 def test_combine_base_vara_forecasts_accepts_scalar_and_panel_weights() -> None:
@@ -234,3 +244,152 @@ def test_fit_rolling_vara_family_routes_sequential_and_composes_output(
     assert result.correction_execution["task_unit"] == "rolling_refit_block"
     assert result.correction_execution["task_count"] == 2
     assert result.correction_execution["elapsed_seconds"] >= 0.0
+
+
+def test_typed_run_vara_family_matches_legacy_keyword_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = np.arange(14, dtype=float).reshape(7, 2) / 10.0
+    base_error = np.zeros_like(base)
+    base_error[3:] = np.asarray(
+        [[1.0, 2.0], [2.0, 1.0], [3.0, 4.0], [4.0, 3.0]]
+    )
+    target = base + base_error
+    correction = np.full_like(base, 0.5)
+    evaluation = np.arange(3, 7, dtype=np.int64)
+    refit_index = np.full(len(base), -1, dtype=np.int64)
+    refit_index[evaluation] = [2, 2, 4, 4]
+    fit_summary = pd.DataFrame({"refit_index": [2, 4], "eta_hat": [0.2, 0.4]})
+    feature_matrix = np.asarray([[1.0, 0.0], [0.0, 1.0]])
+    metadata = pd.DataFrame({"formula_type": ["a", "b"]})
+
+    def fake_sequential(**kwargs):
+        return RollingHARVARAResult(
+            standardized_forecast=np.zeros_like(base),
+            correction=correction,
+            refit_index=refit_index,
+            fit_summary=fit_summary,
+        )
+
+    monkeypatch.setattr(runner, "rolling_har_vara_corrections", fake_sequential)
+
+    eta = PaperEtaConfig(
+        lower=-0.4,
+        upper=0.7,
+        grid_size=9,
+        local_tolerance=0.002,
+    )
+    config = RollingVARAConfig(
+        error_window_months=37,
+        response_standardization="training_zscore",
+        response_clip=7.5,
+        refit_frequency_months=2,
+        ridge=0.012,
+        attention_top_k=1,
+        attention_cache_mode="exact",
+        attention_batch_size=16,
+        eta=eta,
+        lambda_window_months=2,
+        lambda_ridge=0.125,
+        zero_own_lag_coefficients=True,
+    )
+    execution = ExecutionConfig(
+        ray_num_cpus=1,
+        max_cpus_per_task=1,
+        ray_debug=False,
+    )
+    callback = lambda row: None
+    legacy = runner.fit_rolling_vara_family(
+        base_forecast=base,
+        base_error=base_error,
+        metadata=metadata,
+        evaluation_indices=evaluation,
+        feature_matrix=feature_matrix,
+        error_window_months=config.error_window_months,
+        response_standardization=config.response_standardization,
+        response_clip=config.response_clip,
+        refit_frequency_months=config.refit_frequency_months,
+        ridge=config.ridge,
+        attention_top_k=config.attention_top_k,
+        attention_cache_mode=config.attention_cache_mode,
+        attention_batch_size=config.attention_batch_size,
+        eta_bounds=eta.resolve(len(metadata)).effective_bounds,
+        eta_grid_size=eta.grid_size,
+        eta_local_tolerance=eta.resolve(len(metadata)).effective_local_tolerance,
+        lambda_window_months=config.lambda_window_months,
+        lambda_ridge=config.lambda_ridge,
+        zero_own_lag_coefficients=config.zero_own_lag_coefficients,
+        ray_num_cpus=execution.ray_num_cpus,
+        max_cpus_per_task=execution.max_cpus_per_task,
+        ray_debug=execution.ray_debug,
+        progress_callback=callback,
+    )
+    request = VARARunRequest(
+        panel=ForecastPanel(
+            dates=pd.date_range("2000-01-01", periods=len(base), freq="MS"),
+            series_ids=("a", "b"),
+            target=target,
+            metadata=metadata,
+        ),
+        evaluation=RollingEvaluationPlan(
+            validation_indices=evaluation,
+            test_indices=np.asarray([], dtype=np.int64),
+        ),
+        features=StaticFeatureSet(
+            values=feature_matrix,
+            names=("feature_a", "feature_b"),
+            provenance={"source": "test"},
+        ),
+        base=BaseForecastResult(
+            model_name="baseline",
+            forecast=base,
+            error=base_error,
+        ),
+    )
+    typed = runner.run_vara_family(
+        request,
+        config,
+        execution=execution,
+        progress_callback=callback,
+    )
+
+    np.testing.assert_allclose(typed.correction, legacy.correction, rtol=0.0, atol=0.0)
+    np.testing.assert_array_equal(typed.refit_index, legacy.refit_index)
+    pd.testing.assert_frame_equal(typed.core_fit_summary, legacy.core_fit_summary)
+    np.testing.assert_allclose(
+        typed.rolling_lambdas,
+        legacy.rolling_lambdas,
+        equal_nan=True,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        typed.lambda_weights,
+        legacy.lambda_weights,
+        rtol=0.0,
+        atol=0.0,
+    )
+    pd.testing.assert_frame_equal(typed.lambda_refit_fits, legacy.lambda_refit_fits)
+    np.testing.assert_allclose(
+        typed.unit_forecast,
+        legacy.unit_forecast,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        typed.lambda_forecast,
+        legacy.lambda_forecast,
+        rtol=0.0,
+        atol=0.0,
+    )
+    legacy_execution = {
+        key: value
+        for key, value in legacy.correction_execution.items()
+        if key != "elapsed_seconds"
+    }
+    typed_execution = {
+        key: value
+        for key, value in typed.correction_execution.items()
+        if key != "elapsed_seconds"
+    }
+    assert typed_execution == legacy_execution

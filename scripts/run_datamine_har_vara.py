@@ -49,8 +49,18 @@ from vara.datamine_vara_runner import (
     _validate_ray_resources,
     combine_base_vara_forecasts,
     combine_rolling_vara_family,
-    fit_rolling_vara_family,
+    run_vara_family,
     rolling_har_vara_corrections_ray,
+)
+from vara.forecast_contracts import (
+    BaseForecastResult,
+    ExecutionConfig,
+    ForecastPanel,
+    PaperEtaConfig,
+    RollingEvaluationPlan,
+    RollingVARAConfig,
+    StaticFeatureSet,
+    VARARunRequest,
 )
 from vara.forecast_significance import diebold_mariano_test
 
@@ -329,12 +339,44 @@ def main() -> None:
         )
         if features.ndim != 2 or features.shape[0] != len(panel.component_ids):
             raise ValueError("Feature rows do not match the processed panel components.")
-        vara_family = fit_rolling_vara_family(
-            base_forecast=baseline,
-            base_error=error,
-            metadata=panel.metadata,
-            evaluation_indices=evaluation,
-            feature_matrix=features,
+        typed_evaluation = RollingEvaluationPlan(
+            validation_indices=np.asarray(split.validation_indices, dtype=np.int64),
+            test_indices=(
+                np.asarray(split.test_indices, dtype=np.int64)
+                if args.full
+                else np.asarray([], dtype=np.int64)
+            ),
+        )
+        typed_request = VARARunRequest(
+            panel=ForecastPanel(
+                dates=pd.DatetimeIndex(panel.dates),
+                series_ids=tuple(str(value) for value in panel.component_ids),
+                target=target,
+                metadata=panel.metadata,
+            ),
+            evaluation=typed_evaluation,
+            features=StaticFeatureSet(
+                values=features,
+                names=tuple(
+                    f"feature_{feature_index}"
+                    for feature_index in range(features.shape[1])
+                ),
+                provenance={
+                    "source": (
+                        args.source_output
+                        / "features"
+                        / args.feature_snapshot
+                        / "Z.npy"
+                    ).resolve().as_posix(),
+                },
+            ),
+            base=BaseForecastResult(
+                model_name="har_ridge",
+                forecast=baseline,
+                error=error,
+            ),
+        )
+        typed_config = RollingVARAConfig(
             error_window_months=args.error_window_months,
             response_standardization=args.response_standardization,
             response_clip=args.response_clip,
@@ -343,15 +385,24 @@ def main() -> None:
             attention_top_k=args.attention_top_k,
             attention_cache_mode=args.attention_cache_mode,
             attention_batch_size=args.attention_batch_size,
-            eta_bounds=eta_specification.effective_bounds,
-            eta_grid_size=args.eta_grid_size,
-            eta_local_tolerance=eta_specification.effective_local_tolerance,
+            eta=PaperEtaConfig(
+                lower=args.eta_lower,
+                upper=args.eta_upper,
+                grid_size=args.eta_grid_size,
+                local_tolerance=args.eta_local_tolerance,
+            ),
             lambda_window_months=args.lambda_window_months,
             lambda_ridge=args.lambda_ridge,
             zero_own_lag_coefficients=args.zero_own_lag_coefficients,
-            ray_num_cpus=args.ray_num_cpus,
-            max_cpus_per_task=args.max_cpus_per_task,
-            ray_debug=args.ray_debug,
+        )
+        vara_family = run_vara_family(
+            typed_request,
+            typed_config,
+            execution=ExecutionConfig(
+                ray_num_cpus=args.ray_num_cpus,
+                max_cpus_per_task=args.max_cpus_per_task,
+                ray_debug=args.ray_debug,
+            ),
             progress_callback=lambda row: _print_eta_refit(row, eta_specification),
         )
         fit_summary = eta_specification.convert_core_fit_summary(

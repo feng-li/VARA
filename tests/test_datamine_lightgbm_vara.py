@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import sys
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -319,3 +323,350 @@ def test_fixed_lightgbm_parameters_reject_invalid_values(
     values.update(overrides)
     with pytest.raises(ValueError, match=message):
         runner.fixed_lightgbm_parameters(**values)  # type: ignore[arg-type]
+
+
+def test_lightgbm_main_forwards_typed_vara_request_and_preserves_outputs(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    for directory in (
+        source / "baseline",
+        source / "features" / "snapshot_200712",
+        source / "forecasts",
+        source / "processed",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    time_count, component_count, feature_count = 60, 4, 3
+    shape = (time_count, component_count)
+    target = np.ones(shape, dtype=np.float32)
+    base_forecast = np.zeros(shape, dtype=np.float32)
+    base_error = target.astype(float) - base_forecast.astype(float)
+    ar1 = np.full(shape, 0.2, dtype=np.float32)
+    har = np.full(shape, 0.3, dtype=np.float32)
+    features = np.arange(
+        component_count * feature_count,
+        dtype=np.float32,
+    ).reshape(component_count, feature_count)
+    np.save(source / "baseline" / "target.npy", target)
+    np.save(source / "baseline" / "baseline_forecast.npy", har)
+    np.save(source / "baseline" / "ar1_forecast.npy", ar1)
+    np.save(source / "features" / "snapshot_200712" / "Z.npy", features)
+    np.save(source / "processed" / "dates.npy", np.arange(time_count))
+    (source / "processed" / "component_order.csv").write_text(
+        "component\n0\n1\n2\n3\n",
+        encoding="utf-8",
+    )
+    (source / "forecasts" / "locked_test_config.json").write_text(
+        json.dumps(
+            {
+                "validation_months": 6,
+                "test_months": 6,
+                "epsilon": 1e-6,
+                "variance_floor": 1e-8,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dates = pd.date_range("2000-01-31", periods=time_count, freq="ME")
+    metadata = pd.DataFrame({"component": np.arange(component_count)})
+    panel = SimpleNamespace(
+        dates=dates,
+        component_ids=np.arange(component_count),
+        metadata=metadata,
+        returns=np.zeros(shape, dtype=np.float32),
+    )
+    split = SimpleNamespace(
+        validation_indices=np.arange(48, 54, dtype=np.int64),
+        test_indices=np.arange(54, 60, dtype=np.int64),
+    )
+    base_refit_index = np.full(time_count, -1, dtype=np.int64)
+    base_refit_index[24:] = 23
+    normalization_audit = {
+        "refit_index": np.asarray([23], dtype=np.int64),
+        "mean": np.zeros((1, component_count), dtype=np.float32),
+        "variance": np.ones((1, component_count), dtype=np.float32),
+        "scale": np.ones((1, component_count), dtype=np.float32),
+        "finite_count": np.full((1, component_count), 24, dtype=np.int64),
+        "scale_fallback": np.zeros((1, component_count), dtype=bool),
+    }
+    captured: dict[str, object] = {}
+
+    class _MainFakeRay:
+        __version__ = "fake-main-ray"
+
+        def __init__(self) -> None:
+            self.initialized = False
+            self.init_kwargs: dict[str, object] | None = None
+            self.shutdown_calls = 0
+
+        def is_initialized(self) -> bool:
+            return self.initialized
+
+        def init(self, **kwargs) -> None:
+            self.initialized = True
+            self.init_kwargs = kwargs
+
+        def shutdown(self) -> None:
+            self.initialized = False
+            self.shutdown_calls += 1
+
+    fake_ray = _MainFakeRay()
+
+    def fake_base_fit(**kwargs):
+        captured["base_kwargs"] = kwargs
+        assert kwargs["ray_module"] is fake_ray
+        return (
+            base_forecast.copy(),
+            base_refit_index.copy(),
+            pd.DataFrame({"refit_index": [23], "elapsed_seconds": [0.5]}),
+            {
+                "backend": "ray",
+                "ray_used": True,
+                "task_unit": "rolling_refit_block",
+                "task_count": 1,
+                "elapsed_seconds": 0.5,
+            },
+            normalization_audit,
+        )
+
+    correction = np.full(shape, 0.25, dtype=np.float32)
+    lambda_weights = np.full(shape, 0.4, dtype=float)
+    unit_forecast = base_forecast.astype(float) + correction.astype(float)
+    lambda_forecast = base_forecast.astype(float) + 0.4 * correction.astype(float)
+    vara_refit_index = np.full(time_count, -1, dtype=np.int64)
+    vara_refit_index[np.concatenate((split.validation_indices, split.test_indices))] = 47
+    eta_scale = np.log(component_count)
+    core_fit_summary = pd.DataFrame(
+        {
+            "refit_index": [47],
+            "eta_hat": [0.4 * eta_scale],
+            "eta_on_boundary": [False],
+            "eta_grid_best": [0.2 * eta_scale],
+            "eta_grid_best_objective": [-2.0],
+            "eta_objective": [-1.5],
+            "eta_bounds_lower": [-1.5 * eta_scale],
+            "eta_bounds_upper": [1.25 * eta_scale],
+            "eta_grid_size": [9],
+            "eta_local_tolerance": [2e-4 * eta_scale],
+        }
+    )
+    lambda_table = pd.DataFrame(
+        {
+            "refit_index": [47],
+            "group": ["__global__"],
+            "series": ["__global__"],
+            "lambda": [0.4],
+            "lambda_unbounded": [0.4],
+            "ridge": [0.007],
+            "fallback_global": [False],
+            "lambda_history_sufficient": [True],
+        }
+    )
+
+    def fake_typed_vara(
+        request,
+        config,
+        *,
+        execution,
+        progress_callback,
+        ray_module,
+    ):
+        captured["request"] = request
+        captured["config"] = config
+        captured["execution"] = execution
+        captured["progress_callback"] = progress_callback
+        captured["ray_module"] = ray_module
+        assert ray_module is fake_ray
+        return SimpleNamespace(
+            correction=correction.copy(),
+            refit_index=vara_refit_index.copy(),
+            core_fit_summary=core_fit_summary.copy(),
+            correction_execution={
+                "backend": "ray",
+                "ray_used": True,
+                "task_unit": "rolling_refit_block",
+                "task_count": 1,
+                "elapsed_seconds": 0.75,
+            },
+            rolling_lambdas=lambda_weights.copy(),
+            lambda_refit_fits=lambda_table.copy(),
+            lambda_weights=lambda_weights.copy(),
+            unit_forecast=unit_forecast.copy(),
+            lambda_forecast=lambda_forecast.copy(),
+        )
+
+    metric_models = (
+        runner.POOLED_LIGHTGBM_MODEL,
+        runner.POOLED_LIGHTGBM_VARA_UNIT_MODEL,
+        runner.POOLED_LIGHTGBM_VARA_LAMBDA_MODEL,
+        "har_ridge",
+        "ar1_ridge",
+    )
+    metrics = pd.DataFrame(
+        {
+            "model": metric_models,
+            "log_risk_rmse": np.ones(len(metric_models)),
+            "log_risk_mae": np.ones(len(metric_models)),
+            "gaussian_return_crps": np.ones(len(metric_models)),
+            "log_risk_bias": np.zeros(len(metric_models)),
+            "absolute_r2": np.zeros(len(metric_models)),
+            "rank_score": np.zeros(len(metric_models)),
+        }
+    )
+
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setitem(
+        sys.modules,
+        "lightgbm",
+        SimpleNamespace(__version__="fake-lightgbm"),
+    )
+    monkeypatch.setattr(runner, "load_panel", lambda path: panel)
+    monkeypatch.setattr(runner, "relative_panel_split", lambda *args, **kwargs: split)
+    monkeypatch.setattr(runner, "rolling_pooled_lightgbm_forecast", fake_base_fit)
+    monkeypatch.setattr(runner, "run_vara_family", fake_typed_vara)
+    monkeypatch.setattr(
+        runner,
+        "evaluate_risk_forecasts",
+        lambda **kwargs: (metrics, pd.DataFrame(), {}),
+    )
+    monkeypatch.setattr(runner, "_dm_table", lambda monthly: pd.DataFrame())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_datamine_lightgbm_vara.py",
+            str(source),
+            str(output),
+            "--error-window-months",
+            "24",
+            "--response-standardization",
+            "training_zscore",
+            "--response-clip",
+            "6.5",
+            "--refit-frequency-months",
+            "12",
+            "--ridge",
+            "0.004",
+            "--attention-top-k",
+            "3",
+            "--attention-cache-mode",
+            "cluster",
+            "--attention-batch-size",
+            "16",
+            "--eta-lower",
+            "-1.5",
+            "--eta-upper",
+            "1.25",
+            "--eta-grid-size",
+            "9",
+            "--eta-local-tolerance",
+            "0.0002",
+            "--lambda-window-months",
+            "12",
+            "--lambda-ridge",
+            "0.007",
+            "--ray-num-cpus",
+            "2",
+            "--max-cpus-per-task",
+            "1",
+            "--ray-debug",
+        ],
+    )
+
+    runner.main()
+
+    request = captured["request"]
+    assert isinstance(request, runner.VARARunRequest)
+    assert isinstance(request.panel, runner.ForecastPanel)
+    np.testing.assert_array_equal(request.panel.target, target)
+    assert request.panel.series_ids == ("0", "1", "2", "3")
+    pd.testing.assert_frame_equal(request.panel.metadata, metadata)
+    np.testing.assert_array_equal(
+        request.evaluation.validation_indices,
+        split.validation_indices,
+    )
+    np.testing.assert_array_equal(request.evaluation.test_indices, split.test_indices)
+    np.testing.assert_array_equal(request.features.values, features)
+    assert request.features.names == ("feature_0", "feature_1", "feature_2")
+    assert request.features.provenance["source"] == (
+        source / "features" / "snapshot_200712" / "Z.npy"
+    ).resolve().as_posix()
+    assert request.base.model_name == runner.POOLED_LIGHTGBM_MODEL
+    np.testing.assert_array_equal(request.base.forecast, base_forecast)
+    np.testing.assert_array_equal(request.base.error, base_error)
+
+    config = captured["config"]
+    assert isinstance(config, runner.RollingVARAConfig)
+    assert config.error_window_months == 24
+    assert config.response_standardization == "training_zscore"
+    assert config.response_clip == pytest.approx(6.5)
+    assert config.refit_frequency_months == 12
+    assert config.ridge == pytest.approx(0.004)
+    assert config.attention_top_k == 3
+    assert config.attention_cache_mode == "cluster"
+    assert config.attention_batch_size == 16
+    assert config.eta.lower == pytest.approx(-1.5)
+    assert config.eta.upper == pytest.approx(1.25)
+    assert config.eta.grid_size == 9
+    assert config.eta.local_tolerance == pytest.approx(2e-4)
+    assert config.lambda_window_months == 12
+    assert config.lambda_ridge == pytest.approx(0.007)
+    assert config.zero_own_lag_coefficients is False
+
+    execution = captured["execution"]
+    assert isinstance(execution, runner.ExecutionConfig)
+    assert execution.ray_num_cpus == 2
+    assert execution.max_cpus_per_task == 1
+    assert execution.ray_debug is True
+    assert captured["ray_module"] is fake_ray
+    assert callable(captured["progress_callback"])
+    assert fake_ray.shutdown_calls == 1
+
+    forecast_dir = output / "forecasts"
+    np.testing.assert_array_equal(
+        np.load(forecast_dir / "pooled_lightgbm_forecast.npy"),
+        base_forecast,
+    )
+    np.testing.assert_array_equal(
+        np.load(forecast_dir / "pooled_lightgbm_error.npy"),
+        base_error.astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.load(forecast_dir / "vara_correction.npy"),
+        correction,
+    )
+    np.testing.assert_array_equal(
+        np.load(forecast_dir / "pooled_lightgbm_vara_unit_forecast.npy"),
+        unit_forecast.astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.load(forecast_dir / "pooled_lightgbm_vara_lambda_forecast.npy"),
+        lambda_forecast.astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.load(forecast_dir / "vara_refit_index.npy"),
+        vara_refit_index,
+    )
+    np.testing.assert_array_equal(
+        np.load(forecast_dir / "lambda_by_origin.npy"),
+        np.full(time_count, 0.4, dtype=np.float32),
+    )
+    fit_summary = pd.read_csv(forecast_dir / "fit_summary.csv")
+    assert fit_summary.loc[0, "eta_hat"] == pytest.approx(0.4)
+    assert fit_summary.loc[0, "eta_effective_slope_hat"] == pytest.approx(
+        0.4 * eta_scale
+    )
+    assert fit_summary.loc[0, "lambda_hat"] == pytest.approx(0.4)
+    contract = json.loads((forecast_dir / "contract.json").read_text(encoding="utf-8"))
+    assert contract["model_ids"] == {
+        "base": runner.POOLED_LIGHTGBM_MODEL,
+        "unit_vara": runner.POOLED_LIGHTGBM_VARA_UNIT_MODEL,
+        "lambda_vara": runner.POOLED_LIGHTGBM_VARA_LAMBDA_MODEL,
+    }
+    assert contract["response_standardization"] == "training_zscore"
+    assert contract["rolling_refit_execution"]["backend"] == "ray"
+    assert contract["eta_estimation"]["bounds"] == [-1.5, 1.25]

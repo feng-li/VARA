@@ -69,7 +69,17 @@ from vara.datamine_vara_runner import (
     _rolling_refit_blocks,
     _validate_ray_resources,
     combine_base_vara_forecasts,
-    fit_rolling_vara_family,
+    run_vara_family,
+)
+from vara.forecast_contracts import (
+    BaseForecastResult,
+    ExecutionConfig,
+    ForecastPanel,
+    PaperEtaConfig,
+    RollingEvaluationPlan,
+    RollingVARAConfig,
+    StaticFeatureSet,
+    VARARunRequest,
 )
 from vara.forecast_significance import diebold_mariano_test
 
@@ -967,12 +977,42 @@ def main() -> None:
         )
         if features.shape[0] != len(panel.component_ids):
             raise ValueError("VARA feature rows do not match panel components.")
-        vara_family = fit_rolling_vara_family(
-            base_forecast=base_forecast,
-            base_error=base_error,
-            metadata=panel.metadata,
-            evaluation_indices=vara_evaluation,
-            feature_matrix=features,
+        typed_request = VARARunRequest(
+            panel=ForecastPanel(
+                dates=pd.DatetimeIndex(panel.dates),
+                series_ids=tuple(str(value) for value in panel.component_ids),
+                target=target,
+                metadata=panel.metadata,
+            ),
+            evaluation=RollingEvaluationPlan(
+                validation_indices=np.asarray(
+                    split.validation_indices,
+                    dtype=np.int64,
+                ),
+                test_indices=np.asarray(split.test_indices, dtype=np.int64),
+            ),
+            features=StaticFeatureSet(
+                values=features,
+                names=tuple(
+                    f"feature_{feature_index}"
+                    for feature_index in range(features.shape[1])
+                ),
+                provenance={
+                    "source": (
+                        args.source_output
+                        / "features"
+                        / args.feature_snapshot
+                        / "Z.npy"
+                    ).resolve().as_posix(),
+                },
+            ),
+            base=BaseForecastResult(
+                model_name=POOLED_LIGHTGBM_MODEL,
+                forecast=base_forecast,
+                error=base_error,
+            ),
+        )
+        typed_config = RollingVARAConfig(
             error_window_months=args.error_window_months,
             response_standardization=args.response_standardization,
             response_clip=args.response_clip,
@@ -981,14 +1021,23 @@ def main() -> None:
             attention_top_k=args.attention_top_k,
             attention_cache_mode=args.attention_cache_mode,
             attention_batch_size=args.attention_batch_size,
-            eta_bounds=eta_specification.effective_bounds,
-            eta_grid_size=args.eta_grid_size,
-            eta_local_tolerance=eta_specification.effective_local_tolerance,
+            eta=PaperEtaConfig(
+                lower=args.eta_lower,
+                upper=args.eta_upper,
+                grid_size=args.eta_grid_size,
+                local_tolerance=args.eta_local_tolerance,
+            ),
             lambda_window_months=args.lambda_window_months,
             lambda_ridge=args.lambda_ridge,
-            ray_num_cpus=args.ray_num_cpus,
-            max_cpus_per_task=args.max_cpus_per_task,
-            ray_debug=args.ray_debug,
+        )
+        vara_family = run_vara_family(
+            typed_request,
+            typed_config,
+            execution=ExecutionConfig(
+                ray_num_cpus=args.ray_num_cpus,
+                max_cpus_per_task=args.max_cpus_per_task,
+                ray_debug=args.ray_debug,
+            ),
             ray_module=ray_module,
             progress_callback=lambda row: _print_eta_refit(row, eta_specification),
         )
