@@ -5,6 +5,7 @@ import pandas as pd
 
 from vara.forecast_metrics import (
     add_composite_rank_score,
+    add_origin_win_rank_score,
     forecast_metric_tables,
     normal_crps,
     out_of_sample_r2,
@@ -13,6 +14,65 @@ from vara.forecast_metrics import (
 
 
 class ForecastMetricTests(unittest.TestCase):
+    def test_origin_win_rank_score_matches_tourism_strict_win_definition(self):
+        comparison = pd.DataFrame({"model": ["a", "b", "c"]})
+        origin_errors = pd.DataFrame({
+            "date": np.repeat(pd.to_datetime(["2020-01-31", "2020-02-29"]), 3),
+            "model": ["a", "b", "c", "a", "b", "c"],
+            "mae": [1.0, 2.0, 2.0, 3.0, 1.0, 2.0],
+        })
+
+        ranked, audit = add_origin_win_rank_score(
+            comparison,
+            origin_errors,
+            error_column="mae",
+        )
+        indexed = ranked.set_index("model")
+
+        self.assertEqual(float(indexed.loc["a", "rank_score"]), 50.0)
+        self.assertEqual(float(indexed.loc["b", "rank_score"]), 50.0)
+        self.assertEqual(float(indexed.loc["c", "rank_score"]), 25.0)
+        self.assertEqual(int(indexed.loc["a", "n_rank_score_comparators"]), 2)
+        self.assertEqual(len(audit), 6)
+        tied = audit.loc[
+            audit["date"].eq(pd.Timestamp("2020-01-31"))
+            & audit["model"].isin(["b", "c"])
+        ]
+        self.assertTrue(tied["absolute_error_wins"].eq(0).all())
+
+    def test_origin_win_rank_score_uses_literal_unrounded_comparisons(self):
+        comparison = pd.DataFrame({"model": ["a", "b"]})
+        origin_errors = pd.DataFrame({
+            "date": pd.to_datetime(["2020-01-31", "2020-01-31"]),
+            "model": ["a", "b"],
+            "mae": [1.0, 1.0 + 1e-12],
+        })
+
+        ranked, _ = add_origin_win_rank_score(
+            comparison,
+            origin_errors,
+            error_column="mae",
+        )
+        indexed = ranked.set_index("model")
+
+        self.assertEqual(float(indexed.loc["a", "rank_score"]), 100.0)
+        self.assertEqual(float(indexed.loc["b", "rank_score"]), 0.0)
+
+    def test_origin_win_rank_score_rejects_incomplete_method_origin_grid(self):
+        comparison = pd.DataFrame({"model": ["a", "b"]})
+        origin_errors = pd.DataFrame({
+            "date": pd.to_datetime(["2020-01-31", "2020-02-29", "2020-02-29"]),
+            "model": ["a", "a", "b"],
+            "mae": [1.0, 1.0, 2.0],
+        })
+
+        with self.assertRaisesRegex(ValueError, "one finite error"):
+            add_origin_win_rank_score(
+                comparison,
+                origin_errors,
+                error_column="mae",
+            )
+
     def test_composite_rank_score_supports_loss_gain_and_zero_targets(self):
         comparison = pd.DataFrame({
             "model": ["best", "middle", "worst"],

@@ -63,17 +63,24 @@ source_workflow:
   formula_svd_drop_components: 0
   formula_type_columns_retained: 2
   row_normalize_features: true
-  rank_score_components:
-    - log_risk_rmse
-    - log_risk_mae
-    - gaussian_return_crps
-    - absolute_log_risk_bias
+  rank_score_definition: monthly_strict_absolute_error_win_rate
+  rank_score_absolute_prediction_error: cross_sectional_mean_absolute_log_risk_error
   rank_score_comparison_methods:
-    - har_vara
-    - baseline
-    - ar1
-    - garch11
-  rank_score_tie_method: average
+    - har_ridge
+    - har_vara_lambda
+    - pooled_lightgbm
+    - pooled_lightgbm_vara_lambda
+    - riskmetrics_ewma_validation_offset
+    - riskmetrics_ewma_vara_lambda
+    - garch11_offset
+    - garch_vara_lambda
+    - garch11_student_t_offset
+    - garch11_student_t_vara_lambda
+  rank_score_origins: 120
+  rank_score_comparators_per_method: 9
+  rank_score_comparison: strict_unrounded_less_than
+  rank_score_tie_method: no_win_for_either_method
+  rank_score_common_matched_cell_mask: true
 
 # This is the model reported in Tables 8 and 9. For a clean run, omit
 # --reuse-saved-correction; that flag in the saved contract only avoided
@@ -153,13 +160,254 @@ exploratory_garch_vara:
   lambda_held_fixed_within_refit_block: true
   reuse_saved_correction: false
 
+# Exploratory fixed-decay RiskMetrics-style EWMA pair. The base recursion uses
+# monthly returns directly; only the additive log-risk offset is estimated on
+# validation data. VARA is refitted to this base forecast's own genuine errors.
+exploratory_riskmetrics_ewma_vara:
+  entrypoint: scripts/run_datamine_garch_vara.py
+  source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
+  output_dir: outputs/datamine_vara/ew_log_risk_riskmetrics_ewma_vara_papereta_logp_topk500_w240_refit12_lambda24_ray15
+  har_vara_output: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
+  base_variant: riskmetrics_ewma
+  ewma_riskmetrics: true
+  ewma_decay: 0.97
+  ewma_decay_tuned: false
+  observation_frequency: monthly
+  conditional_mean: 0.0
+  forecast_horizon_months: 1
+  variance_recursion: "v[t+1] = 0.97 * v[t] + 0.03 * return[t]^2"
+  variance_initialization: first_finite_squared_return_per_series
+  missing_return_update: carry_previous_variance_state
+  burn_in: full_available_pre_test_history_without_reinitialization
+  log_risk_transform: "log(1.0e-6 + v[t+1])"
+  log_risk_offset: validation_only_pooled_additive
+  vara_response: own_validation_offset_ewma_genuine_forecast_errors
+  feature_snapshot: snapshot_200712
+  component_count: 21800
+  error_window_months: 240
+  refit_frequency_months: 12
+  response_standardization: componentwise_median_mad
+  response_clip: 8.0
+  ridge: 0.001
+  attention_mode: topk
+  attention_top_k: 500
+  attention_cache_mode: exact
+  attention_batch_size: 512
+  parallel_backend: ray
+  ray_num_cpus: 15
+  max_cpus_per_task: 1
+  ray_task_unit: rolling_refit_block
+  ray_debug: false
+  eta_estimation: ridge_penalized_concentrated_qmle
+  eta_parameterization: paper_eta_log_component_count_v1
+  eta_score_scale_rule: log_component_count
+  eta_score_scale_value: 9.98966524877718
+  eta_bounds: [-2.0, 2.0]
+  eta_effective_slope_bounds: [-19.97933049755436, 19.97933049755436]
+  eta_grid_size: 7
+  eta_local_tolerance: 0.0001
+  eta_effective_slope_local_tolerance: 0.0009989665248777181
+  attention_support: deterministic_fixed_smallest_scores
+  lambda_window_months: 24
+  lambda_ridge: 0.001
+  lambda_estimation: rolling_refit_block_pooled_bounded_lse
+  lambda_bounds: [0.0, 1.0]
+  lambda_minimum_history_months: 24
+  lambda_held_fixed_within_refit_block: true
+  model_ids:
+    raw: riskmetrics_ewma_raw
+    validation_offset: riskmetrics_ewma_validation_offset
+    unit_vara: riskmetrics_ewma_vara_unit
+    lambda_vara: riskmetrics_ewma_vara_lambda
+    raw_unit_vara: riskmetrics_ewma_raw_vara_unit
+  forecast_artifacts:
+    raw: riskmetrics_ewma_raw_forecast.npy
+    conditional_variance: riskmetrics_ewma_variance_forecast.npy
+    validation_offset: riskmetrics_ewma_validation_offset_forecast.npy
+    unit_vara: riskmetrics_ewma_vara_unit_forecast.npy
+    lambda_vara: riskmetrics_ewma_vara_lambda_forecast.npy
+    raw_unit_vara_correction: riskmetrics_ewma_raw_vara_unit_correction.npy
+    raw_unit_vara: riskmetrics_ewma_raw_vara_unit_forecast.npy
+  reuse_saved_correction: false
+
+# Exploratory nonlinear base. One LightGBM is pooled across all component-month
+# cells using only the causal HAR-equivalent own-series features. The base does
+# not receive formula features or component identifiers; formula information
+# enters only through its dedicated VARA residual correction.
+exploratory_pooled_lightgbm_vara:
+  entrypoint: scripts/run_datamine_lightgbm_vara.py
+  source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
+  output_dir: outputs/datamine_vara/ew_log_risk_pooled_lightgbm_vara_papereta_logp_topk500_w240_refit12_lambda24_ray15
+  har_vara_output: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
+  base_variant: pooled_lightgbm
+  component_count: 21800
+  target: log_squared_return
+  base_features: [lag_1, mean_3, mean_12]
+  base_feature_windows: [1, 3, 12]
+  pooling: all_finite_component_month_cells_equal_weight
+  formula_features_in_base: false
+  component_identifiers_in_base: false
+  base_normalization: none
+  lightgbm_version: 4.6.0
+  lightgbm_training_window_months: 240
+  lightgbm_num_boost_round: 100
+  lightgbm_learning_rate: 0.05
+  lightgbm_num_leaves: 15
+  lightgbm_max_depth: 4
+  lightgbm_min_data_in_leaf: 5000
+  lightgbm_lambda_l2: 1.0
+  lightgbm_max_bin: 63
+  lightgbm_hyperparameter_tuning: none
+  seed: 202407
+  base_forecast_start: "1988-01-31"
+  base_forecast_end: "2022-12-31"
+  base_refit_blocks: 35
+  vara_refit_blocks: 15
+  feature_snapshot: snapshot_200712
+  error_window_months: 240
+  refit_frequency_months: 12
+  response_standardization: componentwise_median_mad
+  response_clip: 8.0
+  ridge: 0.001
+  attention_mode: topk
+  attention_top_k: 500
+  attention_cache_mode: exact
+  attention_batch_size: 512
+  parallel_backend: ray
+  ray_num_cpus: 15
+  max_cpus_per_task: 1
+  ray_task_unit: rolling_refit_block
+  ray_debug: false
+  eta_estimation: ridge_penalized_concentrated_qmle
+  eta_parameterization: paper_eta_log_component_count_v1
+  eta_score_scale_rule: log_component_count
+  eta_score_scale_value: 9.98966524877718
+  eta_bounds: [-2.0, 2.0]
+  eta_effective_slope_bounds: [-19.97933049755436, 19.97933049755436]
+  eta_grid_size: 7
+  eta_local_tolerance: 0.0001
+  eta_effective_slope_local_tolerance: 0.0009989665248777181
+  attention_support: deterministic_fixed_smallest_scores
+  lambda_window_months: 24
+  lambda_ridge: 0.001
+  lambda_estimation: rolling_refit_block_pooled_bounded_lse
+  lambda_minimum_history_months: 24
+  lambda_held_fixed_within_refit_block: true
+  model_ids:
+    base: pooled_lightgbm
+    unit_vara: pooled_lightgbm_vara_unit
+    lambda_vara: pooled_lightgbm_vara_lambda
+  forecast_artifacts:
+    base: pooled_lightgbm_forecast.npy
+    base_error: pooled_lightgbm_error.npy
+    unit_vara: pooled_lightgbm_vara_unit_forecast.npy
+    lambda_vara: pooled_lightgbm_vara_lambda_forecast.npy
+    vara_correction: vara_correction.npy
+
+student_t_garch:
+  entrypoint: scripts/run_datamine_t_garch.py
+  source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
+  output_dir: outputs/datamine_vara/ew_log_risk_garch11_t_ray15
+  minimum_observations: 120
+  return_scale: 100.0
+  max_iterations: 300
+  tolerance: 1.0e-8
+  component_block_size: 256
+  parallel_backend: ray
+  ray_num_cpus: 15
+  max_cpus_per_task: 1
+  ray_task_unit: component_block
+  ray_debug: false
+
+exploratory_student_t_garch_vara:
+  entrypoint: scripts/run_datamine_garch_vara.py
+  source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
+  output_dir: outputs/datamine_vara/ew_log_risk_garch11_t_vara_papereta_logp_topk500_w240_refit12_lambda24_ray15
+  student_t_garch_output: outputs/datamine_vara/ew_log_risk_garch11_t_ray15
+  har_vara_output: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
+  feature_snapshot: snapshot_200712
+  component_count: 21800
+  error_window_months: 240
+  refit_frequency_months: 12
+  response_standardization: componentwise_median_mad
+  response_clip: 8.0
+  ridge: 0.001
+  attention_mode: topk
+  attention_top_k: 500
+  attention_cache_mode: exact
+  attention_batch_size: 512
+  parallel_backend: ray
+  ray_num_cpus: 15
+  max_cpus_per_task: 1
+  ray_task_unit: rolling_refit_block
+  ray_debug: false
+  eta_estimation: ridge_penalized_concentrated_qmle
+  eta_parameterization: paper_eta_log_component_count_v1
+  eta_score_scale_rule: log_component_count
+  eta_score_scale_value: 9.98966524877718
+  eta_bounds: [-2.0, 2.0]
+  eta_effective_slope_bounds: [-19.97933049755436, 19.97933049755436]
+  eta_grid_size: 7
+  eta_local_tolerance: 0.0001
+  eta_effective_slope_local_tolerance: 0.0009989665248777181
+  attention_support: deterministic_fixed_smallest_scores
+  lambda_window_months: 24
+  lambda_ridge: 0.001
+  lambda_estimation: rolling_refit_block_pooled_bounded_lse
+  lambda_minimum_history_months: 24
+  lambda_held_fixed_within_refit_block: true
+  reuse_saved_correction: false
+
 paper_results:
   entrypoint: scripts/build_datamine_risk_paper_results.py
   source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
   har_vara_output: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
   garch_vara_output: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24
+  riskmetrics_ewma_vara_output: outputs/datamine_vara/ew_log_risk_riskmetrics_ewma_vara_papereta_logp_topk500_w240_refit12_lambda24_ray15
+  pooled_lightgbm_vara_output: outputs/datamine_vara/ew_log_risk_pooled_lightgbm_vara_papereta_logp_topk500_w240_refit12_lambda24_ray15
+  student_t_garch_output: outputs/datamine_vara/ew_log_risk_garch11_t_ray15
+  student_t_garch_vara_output: outputs/datamine_vara/ew_log_risk_garch11_t_vara_papereta_logp_topk500_w240_refit12_lambda24_ray15
   output_dir: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24/paper
   require_matching_application_contracts: true
+  training_zscore_evaluation:
+    enabled: true
+    cli_option: --write-training-zscore-table
+    evaluation_only: true
+    forecast_refit: false
+    training_window: fixed_pre_validation
+    training_window_months: 240
+    training_start: "1988-01-31"
+    training_end: "2007-12-31"
+    statistics: finite_only_componentwise_mean_and_population_variance
+    scale_ddof: 0
+    scale_floor: 1.0e-12
+    crps_included: false
+    metrics_artifact: paper_table_metrics_training_zscore.csv
+    monthly_losses_artifact: paper_table_monthly_losses_training_zscore.csv
+    rankscore_artifact: paper_table_rankscore_by_month_training_zscore.csv
+    scaler_artifact: paper_table_training_zscore_scalers.csv
+    markdown_artifact: paper_table_training_zscore.md
+    latex_artifact: paper_table_training_zscore.tex
+
+training_zscore_model_results:
+  workflow_config: data/DataMine/full_quality_formula_topk500_exact_training_zscore.yml
+  source_output: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24_training_zscore
+  har_vara_output: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24_training_zscore_ray15
+  garch_vara_output: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24_training_zscore_ray15
+  riskmetrics_ewma_vara_output: outputs/datamine_vara/ew_log_risk_riskmetrics_ewma_vara_papereta_logp_topk500_w240_refit12_lambda24_training_zscore_ray15
+  pooled_lightgbm_vara_output: outputs/datamine_vara/ew_log_risk_pooled_lightgbm_vara_papereta_logp_topk500_w240_refit12_lambda24_training_zscore_ray15
+  student_t_garch_output: outputs/datamine_vara/ew_log_risk_garch11_t_training_zscore_ray15
+  student_t_garch_vara_output: outputs/datamine_vara/ew_log_risk_garch11_t_vara_papereta_logp_topk500_w240_refit12_lambda24_training_zscore_ray15
+  output_dir: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24_training_zscore_ray15/paper
+  baseline_response_normalization: training_zscore
+  lightgbm_response_normalization: training_zscore
+  vara_response_standardization: training_zscore
+  garch_and_ewma_base_scale: natural_return_variance_scale
+  stored_forecast_scale: original_log_risk
+  response_scale_ddof: 0
+  ray_num_cpus: 15
+  max_cpus_per_task: 1
+  write_training_zscore_evaluation_table: true
 
 locked_split:
   universe_selection_end: "2007-12-31"
@@ -178,13 +426,30 @@ locked_parameters:
 paper_reference:
   status: current_paper_eta_results
   eta_parameterization: paper_eta_log_component_count_v1
+  rank_score_definition: monthly_strict_absolute_error_win_rate
+  rank_score_methods: 10
+  rank_score_comparators_per_method: 9
+  rank_score_origins: 120
+  rank_score_audit_rows: 1200
   output_dir: outputs/datamine_vara/ew_log_risk_har_vara_papereta_logp_topk500_w240_refit12_lambda24
-  seven_method_results_dir: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24/paper
+  comparison_results_dir: outputs/datamine_vara/ew_log_risk_garch_vara_papereta_logp_topk500_w240_refit12_lambda24/paper
   eta_refits:
     count: 15
     minimum: 0.0457966870794996
     median: 0.4489439586033112
     maximum: 0.9006674125180961
+    boundary_count: 0
+  riskmetrics_ewma_eta_refits:
+    count: 15
+    minimum: -0.0042121355846765456
+    median: 0.419870046234313
+    maximum: 0.7837130947301847
+    boundary_count: 0
+  pooled_lightgbm_eta_refits:
+    count: 15
+    minimum: 0.11569554961241989
+    median: 0.3873475644377338
+    maximum: 0.7487196163031906
     boundary_count: 0
   garch_eta_refits:
     count: 15
@@ -192,22 +457,104 @@ paper_reference:
     median: 0.4083161190725726
     maximum: 0.9154727716243952
     boundary_count: 0
+  student_t_garch_eta_refits:
+    count: 15
+    minimum: -0.007748823945677617
+    median: 0.38827060222900334
+    maximum: 0.8481539011507975
+    boundary_count: 0
   lambda_test_blocks:
     count: 10
     minimum: 0.20884931029369816
     median: 0.3958336709900646
     maximum: 0.5288242762349109
+  riskmetrics_ewma_lambda_test_blocks:
+    count: 10
+    minimum: 0.056740893942978855
+    median: 0.40004091498151
+    maximum: 0.707100737867498
+  pooled_lightgbm_lambda_test_blocks:
+    count: 10
+    minimum: 0.39409238513936795
+    median: 0.481148212231278
+    maximum: 0.5463497476176754
+  garch_lambda_test_blocks:
+    count: 10
+    minimum: 0.29683624507853884
+    median: 0.42261333384505306
+    maximum: 0.46276917152191077
+  student_t_garch_lambda_test_blocks:
+    count: 10
+    minimum: 0.23221264694309063
+    median: 0.3846636273715414
+    maximum: 0.4712181802631418
   vara_har_lambda:
     log_risk_rmse: 1.976292364141233
     log_risk_mae: 1.586171665470425
     crps: 0.015364262712780512
     bias: -0.036433974029882084
     absolute_r2: 0.15647626354294575
-    rank_score: 83.33333333333333
+    rank_score: 60.1851851852
   har_ridge:
     log_risk_rmse: 1.98595665373675
     log_risk_mae: 1.5986088174291724
     crps: 0.015371086709209536
     bias: -0.07127934206640403
     absolute_r2: 0.1482062423125855
-    rank_score: 33.333333333333336
+    rank_score: 44.7222222222
+  pooled_lightgbm:
+    log_risk_rmse: 1.9916674206
+    log_risk_mae: 1.6023755326
+    crps: 0.0154004286
+    bias: -0.0611780791
+    absolute_r2: 0.1433004056
+    rank_score: 31.2962962963
+  pooled_lightgbm_vara_lambda:
+    log_risk_rmse: 1.977029488
+    log_risk_mae: 1.5850092046
+    crps: 0.015384019
+    bias: -0.0205053937
+    absolute_r2: 0.1558469058
+    rank_score: 58.5185185185
+  riskmetrics_ewma:
+    log_risk_rmse: 1.993945837839792
+    log_risk_mae: 1.6266955940231616
+    crps: 0.015344621243218464
+    bias: -0.24863478047350887
+    absolute_r2: 0.14133919904545256
+    rank_score: 32.7777777778
+  riskmetrics_ewma_vara_lambda:
+    log_risk_rmse: 1.9852357393253943
+    log_risk_mae: 1.612514174387201
+    crps: 0.015369513283999771
+    bias: -0.18757543121350828
+    absolute_r2: 0.14882454275596102
+    rank_score: 36.7592592593
+  garch11:
+    log_risk_rmse: 1.9826245485179734
+    log_risk_mae: 1.5955949824512372
+    crps: 0.015369305680784276
+    bias: -0.06353103095860879
+    absolute_r2: 0.15106218113712155
+    rank_score: 45.9259259259
+  garch11_vara_lambda:
+    log_risk_rmse: 1.973982489743779
+    log_risk_mae: 1.5856897439508157
+    crps: 0.015367791673971428
+    bias: -0.04223313847496175
+    absolute_r2: 0.15844691855432358
+    rank_score: 63.7962962963
+  student_t_garch:
+    log_risk_rmse: 1.9806451374443157
+    log_risk_mae: 1.5930106260183194
+    crps: 0.01536624130127297
+    bias: -0.061526917313809264
+    absolute_r2: 0.15275645863823417
+    rank_score: 56.5740740741
+  student_t_garch_vara_lambda:
+    log_risk_rmse: 1.9735917351396848
+    log_risk_mae: 1.5843697001135721
+    crps: 0.01536966277436081
+    bias: -0.037944754189067696
+    absolute_r2: 0.15878006051020543
+    rank_score: 69.4444444444

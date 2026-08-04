@@ -13,7 +13,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from vara.forecast_metrics import add_composite_rank_score, normal_crps
+from vara.forecast_metrics import add_origin_win_rank_score, normal_crps
 
 
 RETURN_REQUIRED_COLUMNS = {"signalid", "year", "month", "ret"}
@@ -70,12 +70,18 @@ class DataMinePanel:
 
 @dataclass(frozen=True)
 class RobustPanelScaler:
-    """Componentwise median/MAD response transformation."""
+    """Componentwise affine response transformation with optional clipping.
+
+    The historical class name is retained for compatibility.  ``method``
+    records whether the fitted center and scale use the robust median/MAD
+    rule or the training-window mean/population-standard-deviation rule.
+    """
 
     center: np.ndarray
     scale: np.ndarray
     scale_floor: float
     clip: float | None
+    method: str = "median_mad"
 
     def transform(self, values: np.ndarray) -> np.ndarray:
         values = np.asarray(values, dtype=float)
@@ -815,16 +821,25 @@ def rolling_ridge_forecast(
     baseline_type: str,
     ridge: float,
     minimum_observations: int,
+    response_normalization: str = "none",
+    scale_floor: float = 1e-12,
 ) -> np.ndarray:
     """Generate expanding-window genuine one-step ridge forecasts.
 
     For target month ``t``, sufficient statistics include responses only through
-    ``t - 1``. Missing component-level regression rows are skipped.
+    ``t - 1``. Missing component-level regression rows are skipped. With
+    ``training_zscore``, each component's response and nonconstant regressors
+    use the expanding training mean and population standard deviation available
+    at that origin; forecasts are then returned to the original response scale.
     """
     if baseline_type not in BASELINE_TYPES:
         raise ValueError(f"baseline_type must be one of {sorted(BASELINE_TYPES)}.")
     if ridge < 0:
         raise ValueError("ridge must be nonnegative.")
+    if response_normalization not in {"none", "training_zscore"}:
+        raise ValueError("response_normalization must be none or training_zscore.")
+    if not np.isfinite(scale_floor) or scale_floor <= 0.0:
+        raise ValueError("scale_floor must be finite and positive.")
     values = np.asarray(target, dtype=float)
     if values.ndim != 2:
         raise ValueError("target must have shape (time, components).")
@@ -834,6 +849,7 @@ def rolling_ridge_forecast(
     forecast = np.full((T, p), np.nan, dtype=float)
     sxx = np.zeros((p, dimension, dimension), dtype=float)
     sxy = np.zeros((p, dimension), dtype=float)
+    syy = np.zeros(p, dtype=float)
     count = np.zeros(p, dtype=np.int32)
     penalty = np.eye(dimension, dtype=float) * float(ridge)
     penalty[0, 0] = 0.0
@@ -848,6 +864,7 @@ def rolling_ridge_forecast(
             yp = y_previous[valid_previous]
             sxx[valid_previous] += xp[:, :, None] * xp[:, None, :]
             sxy[valid_previous] += xp * yp[:, None]
+            syy[valid_previous] += np.square(yp)
             count[valid_previous] += 1
 
         x_target = _window_design(values, t, baseline_type)
@@ -855,8 +872,52 @@ def rolling_ridge_forecast(
         if not eligible.any():
             continue
         indices = np.flatnonzero(eligible)
-        systems = sxx[indices] + penalty[None, :, :]
-        rhs = sxy[indices]
+        x_prediction = x_target[indices]
+        centers: np.ndarray | None = None
+        scales: np.ndarray | None = None
+        if response_normalization == "none":
+            systems = sxx[indices] + penalty[None, :, :]
+            rhs = sxy[indices]
+        else:
+            counts = count[indices].astype(float)
+            centers = sxy[indices, 0] / counts
+            variances = syy[indices] / counts - np.square(centers)
+            scales = np.sqrt(np.maximum(variances, float(scale_floor) ** 2))
+            inverse_scales = 1.0 / scales
+            transformations = np.zeros(
+                (len(indices), dimension, dimension),
+                dtype=float,
+            )
+            transformations[:, 0, 0] = 1.0
+            transformations[:, 0, 1:] = (
+                -centers * inverse_scales
+            )[:, None]
+            diagonal = np.arange(1, dimension)
+            transformations[:, diagonal, diagonal] = inverse_scales[:, None]
+            raw_sxx = sxx[indices]
+            standardized_sxx = np.einsum(
+                "nki,nkl,nlj->nij",
+                transformations,
+                raw_sxx,
+                transformations,
+                optimize=True,
+            )
+            centered_sxy = (
+                sxy[indices] - centers[:, None] * raw_sxx[:, :, 0]
+            ) * inverse_scales[:, None]
+            rhs = np.einsum(
+                "nki,nk->ni",
+                transformations,
+                centered_sxy,
+                optimize=True,
+            )
+            systems = standardized_sxx + penalty[None, :, :]
+            x_prediction = np.einsum(
+                "ni,nij->nj",
+                x_prediction,
+                transformations,
+                optimize=True,
+            )
         try:
             coefficients = np.linalg.solve(systems, rhs[:, :, None])[:, :, 0]
         except np.linalg.LinAlgError:
@@ -864,7 +925,10 @@ def rolling_ridge_forecast(
                 np.linalg.lstsq(system, vector, rcond=None)[0]
                 for system, vector in zip(systems, rhs, strict=True)
             ])
-        forecast[t, indices] = np.sum(x_target[indices] * coefficients, axis=1)
+        prediction = np.sum(x_prediction * coefficients, axis=1)
+        if centers is not None and scales is not None:
+            prediction = centers + scales * prediction
+        forecast[t, indices] = prediction
     return forecast
 
 
@@ -967,6 +1031,48 @@ def fixed_garch11_grid_forecast(
     return second_moment, parameters
 
 
+def riskmetrics_ewma_variance_forecast(
+    returns: np.ndarray,
+    *,
+    decay: float = 0.97,
+    variance_floor: float = 1e-8,
+) -> np.ndarray:
+    """Return leakage-safe one-step RiskMetrics-style EWMA variances.
+
+    The recursion is ``h[t+1] = decay * h[t] + (1-decay) * r[t]**2``
+    with zero conditional mean. Each series is initialized from its first
+    finite squared return. A missing return leaves the existing state
+    unchanged, so every forecast uses observations available strictly before
+    its target month.
+    """
+    values = np.asarray(returns, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("returns must be a two-dimensional time-by-series array.")
+    if not 0.0 < float(decay) < 1.0:
+        raise ValueError("decay must lie strictly between zero and one.")
+    if not np.isfinite(variance_floor) or variance_floor <= 0.0:
+        raise ValueError("variance_floor must be finite and positive.")
+
+    forecast = np.full(values.shape, np.nan, dtype=float)
+    state = np.full(values.shape[1], np.nan, dtype=float)
+    for time_index in range(values.shape[0]):
+        initialized = np.isfinite(state)
+        forecast[time_index, initialized] = np.maximum(
+            state[initialized],
+            variance_floor,
+        )
+
+        observed = np.isfinite(values[time_index])
+        continuing = observed & initialized
+        state[continuing] = (
+            float(decay) * state[continuing]
+            + (1.0 - float(decay)) * np.square(values[time_index, continuing])
+        )
+        starting = observed & ~initialized
+        state[starting] = np.square(values[time_index, starting])
+    return forecast
+
+
 def rolling_mean_forecast(target: np.ndarray, window: int) -> np.ndarray:
     """Forecast each component with its trailing finite-window mean."""
     values = np.asarray(target, dtype=float)
@@ -1004,6 +1110,7 @@ def select_ridge_forecast(
     baseline_type: str,
     ridge_candidates: Sequence[float],
     minimum_observations: int,
+    response_normalization: str = "none",
 ) -> tuple[float, np.ndarray, pd.DataFrame]:
     """Select one common ridge penalty using pooled validation squared error."""
     rows: list[dict[str, float]] = []
@@ -1016,6 +1123,7 @@ def select_ridge_forecast(
             baseline_type=baseline_type,
             ridge=ridge,
             minimum_observations=minimum_observations,
+            response_normalization=response_normalization,
         )
         forecasts[ridge] = candidate_forecast
         error = candidate_forecast[validation_indices] - np.asarray(target)[validation_indices]
@@ -1023,6 +1131,7 @@ def select_ridge_forecast(
         mse = float(np.mean(np.square(error[finite]))) if finite.any() else np.inf
         rows.append({
             "baseline_type": baseline_type,
+            "response_normalization": response_normalization,
             "ridge": ridge,
             "validation_cells": int(finite.sum()),
             "validation_rmse": float(np.sqrt(mse)),
@@ -1034,28 +1143,102 @@ def select_ridge_forecast(
     return selected, forecasts[selected], selection
 
 
-def fit_robust_panel_scaler(
+PANEL_SCALER_METHODS = frozenset({"median_mad", "training_zscore"})
+PANEL_SCALE_EPSILON = 1e-12
+
+
+def _stabilize_panel_scales(
+    raw_scale: np.ndarray,
+    *,
+    floor_quantile: float,
+) -> tuple[np.ndarray, float]:
+    """Apply the shared cross-component fallback to degenerate scales."""
+    quantile = float(floor_quantile)
+    if not np.isfinite(quantile) or not 0.0 <= quantile <= 1.0:
+        raise ValueError("floor_quantile must be finite and lie in [0, 1].")
+    raw = np.asarray(raw_scale, dtype=float)
+    positive = raw[np.isfinite(raw) & (raw > PANEL_SCALE_EPSILON)]
+    scale_floor = float(np.quantile(positive, quantile)) if positive.size else 1.0
+    scale = np.where(
+        np.isfinite(raw) & (raw >= scale_floor),
+        raw,
+        scale_floor,
+    )
+    return np.asarray(scale, dtype=float), scale_floor
+
+
+def fit_panel_scaler(
     values: np.ndarray,
     *,
+    method: str = "median_mad",
     clip: float | None,
     floor_quantile: float = 0.05,
 ) -> RobustPanelScaler:
-    """Fit a componentwise median/MAD scaler on historical values only."""
+    """Fit a selectable componentwise scaler on historical values only.
+
+    ``median_mad`` is the existing default. ``training_zscore`` uses the
+    finite observations in each component to estimate its mean and population
+    standard deviation (``ddof=0``). Both methods apply the same explicit
+    cross-component scale floor, so constant, all-missing, and numerically
+    near-constant components remain invertible.
+    """
     history = np.asarray(values, dtype=float)
     if history.ndim != 2 or history.shape[0] < 2:
         raise ValueError("values must have shape (time >= 2, components).")
-    center = np.nanmedian(history, axis=0)
-    mad = np.nanmedian(np.abs(history - center[None, :]), axis=0)
-    raw_scale = 1.4826 * mad
-    positive = raw_scale[np.isfinite(raw_scale) & (raw_scale > 0.0)]
-    scale_floor = float(np.quantile(positive, float(floor_quantile))) if positive.size else 1.0
-    scale = np.where(np.isfinite(raw_scale) & (raw_scale >= scale_floor), raw_scale, scale_floor)
+    selected_method = str(method)
+    if selected_method not in PANEL_SCALER_METHODS:
+        raise ValueError(
+            "method must be one of " + ", ".join(sorted(PANEL_SCALER_METHODS)) + "."
+        )
+
+    if selected_method == "median_mad":
+        center = np.nanmedian(history, axis=0)
+        mad = np.nanmedian(np.abs(history - center[None, :]), axis=0)
+        raw_scale = 1.4826 * mad
+    else:
+        finite = np.isfinite(history)
+        count = finite.sum(axis=0)
+        center = np.divide(
+            np.where(finite, history, 0.0).sum(axis=0),
+            count,
+            out=np.full(history.shape[1], np.nan, dtype=float),
+            where=count > 0,
+        )
+        centered = np.where(finite, history - center[None, :], 0.0)
+        variance = np.divide(
+            np.square(centered).sum(axis=0),
+            count,
+            out=np.full(history.shape[1], np.nan, dtype=float),
+            where=count > 0,
+        )
+        raw_scale = np.sqrt(np.maximum(variance, 0.0))
+
+    scale, scale_floor = _stabilize_panel_scales(
+        raw_scale,
+        floor_quantile=floor_quantile,
+    )
     center = np.where(np.isfinite(center), center, 0.0)
     return RobustPanelScaler(
         center=np.asarray(center, dtype=float),
         scale=np.asarray(scale, dtype=float),
         scale_floor=scale_floor,
         clip=None if clip is None else float(clip),
+        method=selected_method,
+    )
+
+
+def fit_robust_panel_scaler(
+    values: np.ndarray,
+    *,
+    clip: float | None,
+    floor_quantile: float = 0.05,
+) -> RobustPanelScaler:
+    """Fit the historical componentwise median/MAD scaler."""
+    return fit_panel_scaler(
+        values,
+        method="median_mad",
+        clip=clip,
+        floor_quantile=floor_quantile,
     )
 
 
@@ -2059,6 +2242,12 @@ def evaluate_risk_forecasts(
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """Evaluate log-risk and calibrated variance forecasts on matched test cells.
 
+    ``rank_score`` uses the same origin-wise strict-win definition as the
+    Tourism application: each method's cross-sectional mean absolute log-risk
+    error is compared with every other method at each test month, and the
+    percentage of strict wins is averaged across months.  All comparisons use
+    the common matched-cell mask and unrounded errors.
+
     ``absolute_r2`` is the conventional pooled coefficient of determination on
     the out-of-sample cells.  Its denominator is the total sum of squares about
     the observed test-cell mean, so it does not use the supplied benchmark.
@@ -2171,6 +2360,12 @@ def evaluate_risk_forecasts(
                 out=np.full(len(test_indices), np.nan),
                 where=monthly_valid > 0,
             ),
+            "log_risk_mae": np.divide(
+                np.where(valid, np.abs(error), 0.0).sum(axis=1),
+                monthly_valid,
+                out=np.full(len(test_indices), np.nan),
+                where=monthly_valid > 0,
+            ),
             "gaussian_return_crps": np.divide(
                 np.where(valid, gaussian_return_crps, 0.0).sum(axis=1),
                 monthly_valid,
@@ -2184,16 +2379,24 @@ def evaluate_risk_forecasts(
                 where=monthly_valid > 0,
             ),
         }))
-    summary = add_composite_rank_score(
+    monthly = pd.concat(monthly_rows, ignore_index=True)
+    summary, rank_audit = add_origin_win_rank_score(
         pd.DataFrame(summary_rows),
-        lower_is_better=(
-            "log_risk_rmse",
-            "log_risk_mae",
-            "gaussian_return_crps",
-        ),
-        closest_to_zero=("log_risk_bias",),
+        monthly,
+        error_column="log_risk_mae",
     )
-    return summary, pd.concat(monthly_rows, ignore_index=True), calibrations
+    monthly = monthly.merge(
+        rank_audit.loc[:, [
+            "date",
+            "model",
+            "absolute_error_wins",
+            "rank_score_s",
+        ]],
+        on=["date", "model"],
+        how="left",
+        validate="one_to_one",
+    )
+    return summary, monthly, calibrations
 
 
 def evaluate_raw_return_forecasts(
@@ -2586,8 +2789,13 @@ def rolling_group_vara_corrections(
     response_clip: float | None,
     refit_frequency_months: int,
     ridge: float,
+    response_standardization: str = "median_mad",
 ) -> RollingGroupVARAResult:
-    """Forecast baseline errors with own-lag and hard group-attention heads."""
+    """Forecast baseline errors with own-lag and hard group-attention heads.
+
+    ``response_standardization`` is fitted afresh on each historical refit
+    window and may be ``median_mad`` or ``training_zscore``.
+    """
     errors = np.asarray(baseline_errors, dtype=float)
     evaluation = np.asarray(evaluation_indices, dtype=np.int64)
     metadata_frame = metadata.reset_index(drop=True)
@@ -2623,7 +2831,11 @@ def rolling_group_vara_corrections(
                 raise ValueError(
                     f"Group VARA refit at index {origin_index} has only {history.shape[0]} rows."
                 )
-            scaler = fit_robust_panel_scaler(history, clip=response_clip)
+            scaler = fit_panel_scaler(
+                history,
+                method=response_standardization,
+                clip=response_clip,
+            )
             response = scaler.transform(history)
             imputed_cells = int((~np.isfinite(response)).sum())
             response = np.where(np.isfinite(response), response, 0.0)
@@ -2723,6 +2935,7 @@ def rolling_har_vara_corrections(
     eta_grid_size: int = 7,
     eta_local_tolerance: float = 1e-4,
     zero_own_lag_coefficients: bool = False,
+    response_standardization: str = "median_mad",
     progress_callback: Any | None = None,
 ) -> RollingHARVARAResult:
     """Forecast errors using rolling QMLE-estimated HAR--VARA corrections.
@@ -2732,7 +2945,8 @@ def rolling_har_vara_corrections(
     are fitted.  This supplies a no-own-lag VARA ablation without changing the
     HAR windows used to aggregate the peer errors. Eta is estimated at every
     scheduled refit by profiling the same componentwise HAR regressions used
-    for forecasting.
+    for forecasting. ``response_standardization`` is fitted only on that
+    refit's historical error window.
     """
     import jax.numpy as jnp
 
@@ -2788,7 +3002,11 @@ def rolling_har_vara_corrections(
                 raise ValueError(
                     f"HAR-VARA refit at index {origin_index} has only {history.shape[0]} rows."
                 )
-            scaler = fit_robust_panel_scaler(history, clip=response_clip)
+            scaler = fit_panel_scaler(
+                history,
+                method=response_standardization,
+                clip=response_clip,
+            )
             response = scaler.transform(history)
             imputed_cells = int((~np.isfinite(response)).sum())
             response = np.where(np.isfinite(response), response, 0.0)
@@ -3008,6 +3226,7 @@ def rolling_vara_corrections(
     attention_cache_mode: str,
     batch_size: int,
     dense_threshold: int,
+    response_standardization: str = "median_mad",
     top_neighbors: int = 10,
     refit_artifact_callback: Any | None = None,
 ) -> RollingVARAResult:
@@ -3016,6 +3235,8 @@ def rolling_vara_corrections(
     ``feature_builder(origin_index)`` must return ``(Z, feature_info)`` and may
     only use data through ``origin_index``. Evaluation indices identify target
     months, so each corresponding origin is ``target_index - 1``.
+    ``response_standardization`` is fitted only on the corresponding
+    historical error window.
     """
     import jax.numpy as jnp
 
@@ -3059,7 +3280,11 @@ def rolling_vara_corrections(
                 raise ValueError(
                     f"VARA refit at index {origin_index} has only {history.shape[0]} historical error rows."
                 )
-            scaler = fit_robust_panel_scaler(history, clip=response_clip)
+            scaler = fit_panel_scaler(
+                history,
+                method=response_standardization,
+                clip=response_clip,
+            )
             response = scaler.transform(history)
             imputed_cells = int((~np.isfinite(response)).sum())
             response = np.where(np.isfinite(response), response, 0.0)

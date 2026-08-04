@@ -92,6 +92,7 @@ class WorkflowConfig:
     target_type: str = "log_squared_return"
     epsilon: float = 1e-6
     minimum_baseline_observations: int = 120
+    baseline_response_normalization: str = "none"
     baseline_ridge_candidates: list[float] = field(
         default_factory=lambda: [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0]
     )
@@ -216,6 +217,10 @@ def _config_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-type", choices=("log_squared_return", "raw_return"))
     parser.add_argument("--epsilon", type=float)
     parser.add_argument("--minimum-baseline-observations", type=int)
+    parser.add_argument(
+        "--baseline-response-normalization",
+        choices=("none", "training_zscore"),
+    )
     parser.add_argument("--baseline-ridge-candidates", type=_parse_float_list)
     parser.add_argument("--benchmark-ar1-ridge-candidates", type=_parse_float_list)
     parser.add_argument("--garch-alpha-candidates", type=_parse_float_list)
@@ -313,6 +318,10 @@ def _load_config(args: argparse.Namespace) -> WorkflowConfig:
         raise ValueError(f"formula_encoding must be one of {FORMULA_ENCODINGS}.")
     if config.formula_role_embedding_dim < 2:
         raise ValueError("formula_role_embedding_dim must be at least 2.")
+    if config.baseline_response_normalization not in {"none", "training_zscore"}:
+        raise ValueError(
+            "baseline_response_normalization must be none or training_zscore."
+        )
     return config
 
 
@@ -556,6 +565,7 @@ def stage_baseline(config: WorkflowConfig) -> dict[str, Any]:
         baseline_type=baseline_type,
         ridge_candidates=config.baseline_ridge_candidates,
         minimum_observations=config.minimum_baseline_observations,
+        response_normalization=config.baseline_response_normalization,
     )
     benchmarks: dict[str, np.ndarray] = {}
     benchmark_manifest: dict[str, Any] = {}
@@ -569,6 +579,7 @@ def stage_baseline(config: WorkflowConfig) -> dict[str, Any]:
             baseline_type="ar1_ridge",
             ridge_candidates=config.benchmark_ar1_ridge_candidates,
             minimum_observations=config.minimum_baseline_observations,
+            response_normalization=config.baseline_response_normalization,
         )
         garch_variance, garch_parameters = fixed_garch11_grid_forecast(
             panel.returns,
@@ -643,6 +654,7 @@ def stage_baseline(config: WorkflowConfig) -> dict[str, Any]:
         "target_type": config.target_type,
         "epsilon": config.epsilon,
         "baseline_type": baseline_type,
+        "response_normalization": config.baseline_response_normalization,
         "selected_ridge": selected_ridge,
         "minimum_baseline_observations": config.minimum_baseline_observations,
         "genuine_one_step_errors": True,

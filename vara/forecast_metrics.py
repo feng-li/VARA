@@ -186,6 +186,91 @@ def add_composite_rank_score(
     return ranked
 
 
+def add_origin_win_rank_score(
+    comparison: pd.DataFrame,
+    origin_errors: pd.DataFrame,
+    *,
+    error_column: str,
+    origin_column: str = "date",
+    method_column: str = "model",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Add the Tourism-style strict-win RankScore and return its audit table.
+
+    At each forecast origin, every method is compared with every other method
+    using the unrounded error in ``error_column``.  A strict loss reduction is
+    one win and an exact tie is no win for either method.  Origin scores are
+    divided by the number of competing methods and then averaged with equal
+    weight across origins.
+    """
+    required_comparison = {method_column}
+    missing_comparison = sorted(required_comparison.difference(comparison.columns))
+    if missing_comparison:
+        raise ValueError(
+            f"RankScore comparison is missing columns: {missing_comparison}"
+        )
+    if comparison.empty:
+        raise ValueError("At least two methods are required to compute RankScore.")
+    if comparison[method_column].duplicated().any():
+        raise ValueError("RankScore comparison contains duplicate methods.")
+
+    methods = comparison[method_column].tolist()
+    method_count = len(methods)
+    if method_count < 2:
+        raise ValueError("At least two methods are required to compute RankScore.")
+
+    required_errors = {origin_column, method_column, error_column}
+    missing_errors = sorted(required_errors.difference(origin_errors.columns))
+    if missing_errors:
+        raise ValueError(f"RankScore origin errors are missing columns: {missing_errors}")
+    if origin_errors.empty:
+        raise ValueError("At least one forecast origin is required to compute RankScore.")
+    if origin_errors.duplicated([origin_column, method_column]).any():
+        raise ValueError("RankScore origin errors contain duplicate method-origin rows.")
+
+    error_methods = set(origin_errors[method_column])
+    comparison_methods = set(methods)
+    if error_methods != comparison_methods:
+        raise ValueError(
+            "RankScore origin errors and comparison contain different method sets."
+        )
+
+    absolute = origin_errors.pivot(
+        index=origin_column,
+        columns=method_column,
+        values=error_column,
+    ).sort_index()
+    absolute = absolute.reindex(columns=methods)
+    values = absolute.to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError(
+            "RankScore requires one finite error for every method at every origin."
+        )
+
+    wins = (values[:, :, None] < values[:, None, :]).sum(axis=2)
+    comparator_count = method_count - 1
+    scores = 100.0 * wins / float(comparator_count)
+    origin_count = len(absolute)
+    audit = pd.DataFrame({
+        origin_column: np.repeat(absolute.index.to_numpy(), method_count),
+        method_column: np.tile(np.asarray(methods, dtype=object), origin_count),
+        error_column: values.reshape(-1),
+        "absolute_error_wins": wins.reshape(-1),
+        "rank_score_s": scores.reshape(-1),
+    })
+
+    mean_wins = audit.groupby(method_column, sort=False)["absolute_error_wins"].mean()
+    mean_scores = audit.groupby(method_column, sort=False)["rank_score_s"].mean()
+    ranked = comparison.copy()
+    ranked["mean_monthly_absolute_error_wins"] = ranked[method_column].map(mean_wins)
+    ranked["n_rank_score_origins"] = origin_count
+    ranked["n_rank_score_comparators"] = comparator_count
+    ranked["rank_score"] = ranked[method_column].map(mean_scores)
+    ranked["overall_rank"] = (
+        ranked["rank_score"].rank(method="min", ascending=False).astype(int)
+    )
+    return ranked, audit
+
+
 def forecast_metric_tables(
     forecasts: Mapping[str, np.ndarray],
     test: np.ndarray,

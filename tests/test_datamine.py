@@ -19,7 +19,9 @@ from vara.datamine import (
     estimate_global_lambda,
     estimate_group_lambdas,
     estimate_series_lambdas,
+    riskmetrics_ewma_variance_forecast,
     evaluate_risk_forecasts,
+    fit_panel_scaler,
     fit_robust_panel_scaler,
     fixed_garch11_grid_forecast,
     formula_feature_blocks,
@@ -196,6 +198,56 @@ class DataMineDataTests(unittest.TestCase):
         self.assertGreater(scores[0], scores[2])
 
 class DataMineForecastTests(unittest.TestCase):
+    def test_riskmetrics_ewma_variance_is_one_step_and_handles_missing_returns(self):
+        returns = np.asarray([
+            [2.0, np.nan],
+            [4.0, 3.0],
+            [1.0, np.nan],
+            [5.0, 1.0],
+        ])
+
+        forecast = riskmetrics_ewma_variance_forecast(
+            returns,
+            decay=0.5,
+            variance_floor=1e-12,
+        )
+
+        np.testing.assert_allclose(
+            forecast[:, 0],
+            np.asarray([np.nan, 4.0, 10.0, 5.5]),
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            forecast[:, 1],
+            np.asarray([np.nan, np.nan, 9.0, 9.0]),
+            equal_nan=True,
+        )
+
+    def test_riskmetrics_ewma_default_decay_is_point_97(self):
+        returns = np.asarray([[1.0], [2.0], [3.0]])
+
+        forecast = riskmetrics_ewma_variance_forecast(
+            returns,
+            variance_floor=1e-12,
+        )
+
+        np.testing.assert_allclose(
+            forecast[:, 0],
+            np.asarray([np.nan, 1.0, 1.09]),
+            equal_nan=True,
+        )
+
+    def test_riskmetrics_ewma_forecast_is_future_perturbation_safe(self):
+        rng = np.random.default_rng(2026)
+        returns = rng.normal(scale=0.03, size=(80, 4))
+        original = riskmetrics_ewma_variance_forecast(returns)
+        perturbed = returns.copy()
+        perturbed[50:] += 10.0
+        changed = riskmetrics_ewma_variance_forecast(perturbed)
+
+        np.testing.assert_allclose(original[:51], changed[:51], equal_nan=True)
+        self.assertFalse(np.allclose(original[51:], changed[51:]))
+
     def test_risk_metrics_include_rank_score_bias_and_gaussian_return_crps(self):
         returns = np.asarray([
             [0.10, -0.08, 0.06],
@@ -235,13 +287,23 @@ class DataMineForecastTests(unittest.TestCase):
         self.assertTrue((metrics["gaussian_return_crps"] > 0.0).all())
         self.assertIn("rank_score", metrics.columns)
         self.assertIn("overall_rank", metrics.columns)
-        self.assertGreater(
-            float(indexed.loc["baseline", "rank_score"]),
-            float(indexed.loc["candidate", "rank_score"]),
+        self.assertEqual(float(indexed.loc["baseline", "rank_score"]), 100.0)
+        self.assertEqual(float(indexed.loc["candidate", "rank_score"]), 0.0)
+        self.assertEqual(
+            int(indexed.loc["baseline", "n_rank_score_comparators"]),
+            1,
         )
         self.assertNotIn("mean_monthly_spearman", metrics.columns)
         self.assertIn("log_risk_bias", monthly.columns)
+        self.assertIn("log_risk_mae", monthly.columns)
         self.assertIn("gaussian_return_crps", monthly.columns)
+        self.assertIn("absolute_error_wins", monthly.columns)
+        self.assertIn("rank_score_s", monthly.columns)
+        self.assertTrue(
+            monthly.loc[monthly["model"].eq("baseline"), "rank_score_s"]
+            .eq(100.0)
+            .all()
+        )
         self.assertNotIn("spearman", monthly.columns)
 
     def test_risk_metrics_use_one_common_matched_test_set(self):
@@ -258,7 +320,7 @@ class DataMineForecastTests(unittest.TestCase):
         baseline[2, 0] = np.nan
         candidate[3, 1] = np.nan
 
-        metrics, _, _ = evaluate_risk_forecasts(
+        metrics, monthly, _ = evaluate_risk_forecasts(
             target=target,
             returns=returns,
             dates=pd.date_range("2020-01-31", periods=4, freq="ME"),
@@ -273,6 +335,11 @@ class DataMineForecastTests(unittest.TestCase):
         self.assertEqual(set(metrics["test_cells"]), {2})
         self.assertAlmostEqual(float(indexed.loc["baseline", "log_risk_rmse"]), 0.1)
         self.assertAlmostEqual(float(indexed.loc["candidate", "log_risk_rmse"]), 0.2)
+        self.assertTrue(monthly["observed_cells"].eq(1).all())
+        np.testing.assert_allclose(
+            monthly.loc[monthly["model"].eq("baseline"), "log_risk_mae"],
+            0.1,
+        )
 
     def test_formula_svd_can_drop_leading_components(self):
         metadata = _metadata(range(1, 25))
@@ -367,6 +434,58 @@ class DataMineForecastTests(unittest.TestCase):
         np.testing.assert_allclose(original[:61], perturbed[:61], equal_nan=True)
         self.assertFalse(np.allclose(original[62:], perturbed[62:], equal_nan=True))
 
+    def test_ridge_training_zscore_matches_direct_standardized_fit(self):
+        target = np.asarray([[1.0], [2.0], [4.0], [8.0], [16.0], [32.0]])
+        ridge = 1.2
+
+        forecast = rolling_ridge_forecast(
+            target,
+            baseline_type="ar1_ridge",
+            ridge=ridge,
+            minimum_observations=4,
+            response_normalization="training_zscore",
+        )
+
+        response = target[1:5, 0]
+        lag = target[:4, 0]
+        center = float(np.mean(response))
+        scale = float(np.std(response, ddof=0))
+        design = np.column_stack((np.ones(4), (lag - center) / scale))
+        standardized_response = (response - center) / scale
+        penalty = np.diag([0.0, ridge])
+        coefficients = np.linalg.solve(
+            design.T @ design + penalty,
+            design.T @ standardized_response,
+        )
+        expected = center + scale * (
+            coefficients[0]
+            + coefficients[1] * (target[4, 0] - center) / scale
+        )
+        self.assertAlmostEqual(float(forecast[5, 0]), float(expected))
+
+    def test_ridge_training_zscore_is_future_perturbation_safe(self):
+        rng = np.random.default_rng(71)
+        target = rng.normal(size=(90, 3))
+        original = rolling_ridge_forecast(
+            target,
+            baseline_type="har_ridge",
+            ridge=0.1,
+            minimum_observations=15,
+            response_normalization="training_zscore",
+        )
+        changed = target.copy()
+        changed[60:] += 500.0
+        perturbed = rolling_ridge_forecast(
+            changed,
+            baseline_type="har_ridge",
+            ridge=0.1,
+            minimum_observations=15,
+            response_normalization="training_zscore",
+        )
+
+        np.testing.assert_allclose(original[:61], perturbed[:61], equal_nan=True)
+        self.assertFalse(np.allclose(original[62:], perturbed[62:], equal_nan=True))
+
     def test_log_squared_return_target_preserves_missing_cells(self):
         returns = np.asarray([[0.1, np.nan], [-0.2, 0.0]])
         target = make_target(returns, target_type="log_squared_return", epsilon=1e-6)
@@ -386,10 +505,81 @@ class DataMineForecastTests(unittest.TestCase):
         transformed = scaler.transform(values)
         recovered_center = scaler.inverse(np.zeros(3))
 
+        self.assertEqual(scaler.method, "median_mad")
         self.assertGreater(scaler.scale_floor, 0.0)
         self.assertTrue(np.isfinite(transformed).all())
         self.assertLessEqual(np.max(np.abs(transformed)), 8.0)
         np.testing.assert_allclose(recovered_center, scaler.center)
+
+    def test_training_zscore_scaler_uses_finite_population_moments(self):
+        values = np.asarray([
+            [1.0, 10.0, 5.0, np.nan],
+            [2.0, np.inf, 5.0, np.nan],
+            [3.0, 14.0, 5.0, np.nan],
+            [4.0, 16.0, 5.0, np.nan],
+        ])
+
+        scaler = fit_panel_scaler(
+            values,
+            method="training_zscore",
+            clip=None,
+            floor_quantile=0.0,
+        )
+
+        first_scale = np.std([1.0, 2.0, 3.0, 4.0], ddof=0)
+        second_scale = np.std([10.0, 14.0, 16.0], ddof=0)
+        self.assertEqual(scaler.method, "training_zscore")
+        np.testing.assert_allclose(
+            scaler.center,
+            [2.5, 40.0 / 3.0, 5.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            scaler.scale,
+            [first_scale, second_scale, first_scale, first_scale],
+        )
+        self.assertAlmostEqual(scaler.scale_floor, first_scale)
+        np.testing.assert_allclose(
+            scaler.transform(scaler.center),
+            np.zeros(values.shape[1]),
+        )
+        np.testing.assert_allclose(
+            scaler.inverse(np.zeros(values.shape[1])),
+            scaler.center,
+        )
+
+    def test_training_zscore_scaler_falls_back_for_near_constant_components(self):
+        values = np.asarray([
+            [-1.0, 1.0 - 1e-15, 4.0],
+            [0.0, 1.0, 4.0],
+            [1.0, 1.0 + 1e-15, 4.0],
+            [0.0, 1.0, 4.0],
+        ])
+
+        scaler = fit_panel_scaler(
+            values,
+            method="training_zscore",
+            clip=2.0,
+        )
+
+        self.assertGreater(scaler.scale_floor, 1e-12)
+        np.testing.assert_allclose(
+            scaler.scale[1:],
+            np.repeat(scaler.scale_floor, 2),
+        )
+        transformed = scaler.transform(np.asarray([100.0, 100.0, 100.0]))
+        self.assertLessEqual(np.max(np.abs(transformed)), 2.0)
+
+    def test_panel_scaler_rejects_unknown_method_and_invalid_floor_quantile(self):
+        values = np.arange(12, dtype=float).reshape(4, 3)
+        with self.assertRaisesRegex(ValueError, "method must be one of"):
+            fit_panel_scaler(values, method="unknown", clip=None)
+        with self.assertRaisesRegex(ValueError, "floor_quantile"):
+            fit_panel_scaler(
+                values,
+                method="training_zscore",
+                clip=None,
+                floor_quantile=1.1,
+            )
 
     def test_feature_preprocessing_balances_and_row_normalizes(self):
         blocks = {
@@ -622,6 +812,47 @@ class DataMineForecastTests(unittest.TestCase):
             equal_nan=True,
         )
         self.assertFalse(np.allclose(original.correction[65], perturbed.correction[65]))
+
+    def test_group_vara_selects_training_zscore_without_changing_default(self):
+        rng = np.random.default_rng(32)
+        errors = rng.normal(size=(70, 5))
+        metadata = _metadata(range(1, 6))
+        arguments = {
+            "baseline_errors": errors,
+            "evaluation_indices": np.arange(60, 64),
+            "metadata": metadata,
+            "group_cols": ("numerator",),
+            "include_global_head": True,
+            "error_window_months": 40,
+            "response_clip": 8.0,
+            "refit_frequency_months": 2,
+            "ridge": 0.01,
+        }
+
+        default = rolling_group_vara_corrections(**arguments)
+        explicit_default = rolling_group_vara_corrections(
+            **arguments,
+            response_standardization="median_mad",
+        )
+        zscore = rolling_group_vara_corrections(
+            **arguments,
+            response_standardization="training_zscore",
+        )
+
+        np.testing.assert_allclose(
+            default.correction,
+            explicit_default.correction,
+            equal_nan=True,
+            rtol=0.0,
+            atol=0.0,
+        )
+        self.assertTrue(np.isfinite(zscore.correction[60:64]).all())
+        self.assertFalse(
+            np.allclose(
+                default.correction[60:64],
+                zscore.correction[60:64],
+            )
+        )
 
     def test_fixed_smallest_attention_support_is_continuous_at_zero(self):
         import jax.numpy as jnp
