@@ -11,6 +11,7 @@ data/tourism/*
 !data/tourism/config.yaml
 data/DataMine/*
 !data/DataMine/config.yaml
+!data/DataMine/README.md
 results_coverage_@*.csv
 *.npz
 *.pdf
