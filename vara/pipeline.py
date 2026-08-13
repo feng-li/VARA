@@ -87,6 +87,10 @@ class ForecastStudyResult:
             "validation_indices": [int(plan.validation_indices[0]), int(plan.validation_indices[-1])],
             "test_indices": [int(plan.test_indices[0]), int(plan.test_indices[-1])],
             "base_models": list(self.bases),
+            "base_diagnostics": {
+                name: dict(result.diagnostics)
+                for name, result in self.bases.items()
+            },
             "forecast_files": names,
             "evaluation_details": dict(self.evaluation.details),
         }

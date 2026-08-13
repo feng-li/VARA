@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
 import numpy as np
@@ -12,11 +13,64 @@ AUTO_ETS_ALIAS = "auto_ets"
 AUTO_ETS_MODEL_SPECIFICATION = "ZZZ"
 AUTO_ETS_DAMPED = None
 AUTO_ETS_PHI = None
+AUTO_ARIMA_ALIAS = "auto_arima"
+NBEATS_ALIAS = "nbeats"
 STATSMODELS_ETS_ALIAS = "statsmodels_ets"
 SEASONAL_ETS_ALIAS = "seasonal_ets"
 FORECAST_VARIANCE_LEVEL = 95
 _FORECAST_VARIANCE_Z = 1.959963984540054
 RESPONSE_NORMALIZATIONS = ("none", "training_zscore")
+
+
+@dataclass(frozen=True, slots=True)
+class NeuralModelConfig:
+    """Prespecified neural benchmark settings shared with the legacy runner."""
+
+    input_size: int = 0
+    max_steps: int = 200
+    hidden_size: int = 64
+    num_layers: int = 2
+    batch_size: int = 32
+    learning_rate: float = 1e-3
+    scaler_type: str = "robust"
+    random_seed: int = 2026
+
+    def __post_init__(self) -> None:
+        if isinstance(self.input_size, (bool, np.bool_)) or int(self.input_size) != self.input_size:
+            raise TypeError("input_size must be an integer.")
+        if int(self.input_size) < 0:
+            raise ValueError("input_size must be nonnegative.")
+        for name in ("max_steps", "hidden_size", "num_layers", "batch_size"):
+            value = getattr(self, name)
+            if isinstance(value, (bool, np.bool_)) or int(value) != value:
+                raise TypeError(f"{name} must be an integer.")
+            if int(value) < 1:
+                raise ValueError(f"{name} must be positive.")
+        if not np.isfinite(self.learning_rate) or float(self.learning_rate) <= 0.0:
+            raise ValueError("learning_rate must be finite and positive.")
+        if not str(self.scaler_type).strip():
+            raise ValueError("scaler_type must be nonempty.")
+
+    def legacy_config(self) -> dict[str, Any]:
+        """Return names used by existing benchmark configuration files."""
+        return {
+            "deepar_input_size": int(self.input_size),
+            "deepar_max_steps": int(self.max_steps),
+            "deepar_hidden_size": int(self.hidden_size),
+            "deepar_lstm_layers": int(self.num_layers),
+            "deepar_batch_size": int(self.batch_size),
+            "deepar_learning_rate": float(self.learning_rate),
+            "deepar_scaler_type": str(self.scaler_type),
+            "deepar_random_seed": int(self.random_seed),
+            "nbeats_input_size": int(self.input_size),
+            "nbeats_max_steps": int(self.max_steps),
+            "nbeats_hidden_size": int(self.hidden_size),
+            "nbeats_num_layers": int(self.num_layers),
+            "nbeats_batch_size": int(self.batch_size),
+            "nbeats_learning_rate": float(self.learning_rate),
+            "nbeats_scaler_type": str(self.scaler_type),
+            "nbeats_random_seed": int(self.random_seed),
+        }
 
 
 def auto_ets_config(
@@ -62,6 +116,17 @@ def auto_ets_config(
         "selection_criterion": "AICc" if selects_family else None,
         "optimization_criterion": "likelihood",
         "allow_multiplicative_trend": False,
+        "freq": 1,
+    }
+
+
+def auto_arima_config(seasonal_lag: int) -> dict[str, Any]:
+    """Return the existing StatsForecast AutoARIMA specification."""
+    return {
+        "model": "AutoARIMA",
+        "implementation": "statsforecast.models.AutoARIMA",
+        "alias": AUTO_ARIMA_ALIAS,
+        "season_length": max(1, int(seasonal_lag)),
         "freq": 1,
     }
 
@@ -121,11 +186,23 @@ def _statsforecast_long_from_panel(values: np.ndarray, series_ids: Sequence[str]
     values = np.asarray(values, dtype=float)
     frame = pd.DataFrame(values, columns=list(series_ids))
     frame.insert(0, "ds", np.arange(values.shape[0]))
-    return frame.melt(id_vars="ds", var_name="unique_id", value_name="y")
+    return frame.melt(
+        id_vars="ds",
+        var_name="unique_id",
+        value_name="y",
+    ).dropna(subset=["y"])
 
 
-def _statsforecast_wide(frame: pd.DataFrame, series_ids: Sequence[str], value_col: str) -> np.ndarray:
+def _statsforecast_wide(
+    frame: pd.DataFrame,
+    series_ids: Sequence[str],
+    value_col: str,
+    *,
+    expected_index: Sequence[int] | np.ndarray | None = None,
+) -> np.ndarray:
     wide = frame.pivot(index="ds", columns="unique_id", values=value_col).sort_index()
+    if expected_index is not None:
+        wide = wide.reindex(np.asarray(expected_index))
     return wide.loc[:, list(series_ids)].to_numpy(dtype=float)
 
 
@@ -136,6 +213,15 @@ def _interval_variance(lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
     return np.where(np.isfinite(var) & (var >= 0.0), var, np.nan)
 
 
+def _panel_forecast_horizon(values: np.ndarray, horizon: int) -> int:
+    """Extend a common horizon enough to span trailing missing observations."""
+    observed = np.isfinite(values)
+    if np.any(observed.sum(axis=0) == 0):
+        raise ValueError("Every training panel series needs one observed value.")
+    reverse_last = np.argmax(observed[::-1], axis=0)
+    return int(horizon) + int(reverse_last.max())
+
+
 def normalize_training_panel(
     values: np.ndarray,
     method: str,
@@ -144,8 +230,11 @@ def normalize_training_panel(
     history = np.asarray(values, dtype=float)
     if history.ndim != 2:
         raise ValueError("Training normalization expects a two-dimensional panel.")
-    training_mean = np.mean(history, axis=0)
-    training_variance = np.var(history, axis=0)
+    observed = np.isfinite(history)
+    if np.any(observed.sum(axis=0) == 0):
+        raise ValueError("Every training panel series needs one observed value.")
+    training_mean = np.nanmean(history, axis=0)
+    training_variance = np.nanvar(history, axis=0)
     training_scale = np.sqrt(training_variance)
     training_scale = np.where(training_scale > 1e-12, training_scale, 1.0)
     if method == "none":
@@ -221,21 +310,39 @@ def auto_ets_baseline_panel(
         freq=config["freq"],
         n_jobs=1,
     )
-    forecast_long = sf.forecast(h=int(horizon), df=long, fitted=True, level=[FORECAST_VARIANCE_LEVEL])
+    forecast_horizon = _panel_forecast_horizon(values, int(horizon))
+    forecast_long = sf.forecast(
+        h=forecast_horizon,
+        df=long,
+        fitted=True,
+        level=[FORECAST_VARIANCE_LEVEL],
+    )
     fitted_long = sf.forecast_fitted_values()
     fitted_normalized = _statsforecast_wide(
         fitted_long,
         series_ids,
         AUTO_ETS_ALIAS,
+        expected_index=np.arange(values.shape[0]),
     )
     forecast_normalized = _statsforecast_wide(
         forecast_long,
         series_ids,
         AUTO_ETS_ALIAS,
+        expected_index=np.arange(values.shape[0], values.shape[0] + int(horizon)),
     )
     forecast_variance_normalized = _interval_variance(
-        _statsforecast_wide(forecast_long, series_ids, f"{AUTO_ETS_ALIAS}-lo-{FORECAST_VARIANCE_LEVEL}"),
-        _statsforecast_wide(forecast_long, series_ids, f"{AUTO_ETS_ALIAS}-hi-{FORECAST_VARIANCE_LEVEL}"),
+        _statsforecast_wide(
+            forecast_long,
+            series_ids,
+            f"{AUTO_ETS_ALIAS}-lo-{FORECAST_VARIANCE_LEVEL}",
+            expected_index=np.arange(values.shape[0], values.shape[0] + int(horizon)),
+        ),
+        _statsforecast_wide(
+            forecast_long,
+            series_ids,
+            f"{AUTO_ETS_ALIAS}-hi-{FORECAST_VARIANCE_LEVEL}",
+            expected_index=np.arange(values.shape[0], values.shape[0] + int(horizon)),
+        ),
     )
     if response_normalization == "training_zscore":
         fitted = (
@@ -268,6 +375,182 @@ def auto_ets_baseline_panel(
         "training_scale": training_scale,
         "response_normalization": response_normalization,
         "config": config,
+    }
+
+
+def auto_arima_baseline_panel(
+    history: np.ndarray,
+    horizon: int,
+    seasonal_lag: int,
+    series_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Fit the existing StatsForecast AutoARIMA benchmark to a panel."""
+    from statsforecast import StatsForecast
+    from statsforecast.models import AutoARIMA
+
+    values = np.asarray(history, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("history must have shape (T, p).")
+    if values.shape[0] < 3:
+        raise ValueError("AutoARIMA requires at least three training observations.")
+    if values.shape[1] != len(series_ids):
+        raise ValueError("history column count must match series_ids.")
+    if int(horizon) < 1:
+        raise ValueError("horizon must be positive.")
+
+    config = auto_arima_config(seasonal_lag)
+    model = AutoARIMA(
+        season_length=config["season_length"],
+        alias=AUTO_ARIMA_ALIAS,
+    )
+    forecast_horizon = _panel_forecast_horizon(values, int(horizon))
+    forecast_long = StatsForecast(
+        models=[model],
+        freq=config["freq"],
+        n_jobs=1,
+    ).forecast(
+        h=forecast_horizon,
+        df=_statsforecast_long_from_panel(values, series_ids),
+        level=[FORECAST_VARIANCE_LEVEL],
+    )
+    forecast = _statsforecast_wide(
+        forecast_long,
+        series_ids,
+        AUTO_ARIMA_ALIAS,
+        expected_index=np.arange(values.shape[0], values.shape[0] + int(horizon)),
+    )
+    lower_name = f"{AUTO_ARIMA_ALIAS}-lo-{FORECAST_VARIANCE_LEVEL}"
+    upper_name = f"{AUTO_ARIMA_ALIAS}-hi-{FORECAST_VARIANCE_LEVEL}"
+    if lower_name in forecast_long.columns and upper_name in forecast_long.columns:
+        variance = _interval_variance(
+            _statsforecast_wide(
+                forecast_long,
+                series_ids,
+                lower_name,
+                expected_index=np.arange(values.shape[0], values.shape[0] + int(horizon)),
+            ),
+            _statsforecast_wide(
+                forecast_long,
+                series_ids,
+                upper_name,
+                expected_index=np.arange(values.shape[0], values.shape[0] + int(horizon)),
+            ),
+        )
+    else:
+        variance = np.full(forecast.shape, np.nan, dtype=float)
+    return {
+        "forecast": forecast,
+        "forecast_variance": variance,
+        "config": config,
+    }
+
+
+def _nbeats_stack_config(
+    horizon: int,
+    hidden_size: int,
+    num_layers: int,
+) -> tuple[list[str], list[int], list[list[int]]]:
+    layers = [int(hidden_size)] * max(int(num_layers), 2)
+    if int(horizon) <= 1:
+        return ["identity"], [1], [layers.copy()]
+    return (
+        ["identity", "trend", "seasonality"],
+        [1, 1, 1],
+        [layers.copy(), layers.copy(), layers.copy()],
+    )
+
+
+def nbeats_baseline_panel(
+    history: np.ndarray,
+    horizon: int,
+    seasonal_lag: int,
+    series_ids: Sequence[str],
+    *,
+    neural_config: NeuralModelConfig = NeuralModelConfig(),
+) -> dict[str, Any]:
+    """Fit the existing pooled NeuralForecast N-BEATS benchmark."""
+    try:
+        from neuralforecast import NeuralForecast
+        from neuralforecast.models import NBEATS
+    except Exception as exc:
+        raise RuntimeError(
+            "N-BEATS requires neuralforecast and its PyTorch dependencies."
+        ) from exc
+
+    values = np.asarray(history, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("history must have shape (T, p).")
+    if values.shape[1] != len(series_ids):
+        raise ValueError("history column count must match series_ids.")
+    requested_horizon = int(horizon)
+    if requested_horizon < 1:
+        raise ValueError("horizon must be positive.")
+    h = _panel_forecast_horizon(values, requested_horizon)
+    input_size = (
+        int(neural_config.input_size)
+        if int(neural_config.input_size) > 0
+        else int(max(3 * h, 2 * int(seasonal_lag), 1))
+    )
+    if values.shape[0] <= input_size:
+        raise ValueError("N-BEATS history must exceed its input_size.")
+
+    try:
+        import torch
+
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    stack_types, n_blocks, mlp_units = _nbeats_stack_config(
+        h,
+        neural_config.hidden_size,
+        neural_config.num_layers,
+    )
+    model = NBEATS(
+        h=h,
+        input_size=input_size,
+        max_steps=int(neural_config.max_steps),
+        learning_rate=float(neural_config.learning_rate),
+        batch_size=int(neural_config.batch_size),
+        scaler_type=str(neural_config.scaler_type),
+        random_seed=int(neural_config.random_seed),
+        alias=NBEATS_ALIAS,
+        accelerator="cpu",
+        devices=1,
+        enable_progress_bar=False,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        logger=False,
+        stack_types=stack_types,
+        n_blocks=n_blocks,
+        mlp_units=mlp_units,
+    )
+    long = _statsforecast_long_from_panel(values, series_ids)
+    neural_forecast = NeuralForecast(models=[model], freq=1)
+    neural_forecast.fit(
+        df=long,
+        verbose=False,
+    )
+    forecast_long = neural_forecast.predict(verbose=False)
+    forecast = _statsforecast_wide(
+        forecast_long.reset_index(),
+        series_ids,
+        NBEATS_ALIAS,
+        expected_index=np.arange(
+            values.shape[0],
+            values.shape[0] + requested_horizon,
+        ),
+    )
+    return {
+        "forecast": forecast,
+        "forecast_variance": np.full(forecast.shape, np.nan, dtype=float),
+        "config": {
+            "model": "N-BEATS",
+            "implementation": "neuralforecast.models.NBEATS",
+            "alias": NBEATS_ALIAS,
+            "season_length": int(seasonal_lag),
+            "input_size": input_size,
+            **asdict(neural_config),
+        },
     }
 
 

@@ -104,3 +104,49 @@ result = study.run(
 )
 result.save("outputs/risk_study")
 ```
+
+To reuse the exact five fitted risk benchmarks from a completed paper run:
+
+```python
+from vara.api import RiskBenchmarkArtifacts
+
+benchmarks = RiskBenchmarkArtifacts.from_paper_contract(
+    "outputs/datamine_vara/<paper-run>/paper/paper_contract.json"
+)
+result = study.run(benchmarks.forecasters(panel, study.split))
+```
+
+This loads HAR ridge, pooled LightGBM, RiskMetrics EWMA, Gaussian GARCH(1,1),
+and Student-t GARCH(1,1) in the fixed paper-table order. The framework then
+applies the configured VARA correction to each model's genuine forecast errors.
+
+Previously used rolling-origin benchmarks are also native base models:
+
+```python
+from vara.api import AutoARIMAForecaster, AutoETSForecaster, NBEATSForecaster
+
+models = [
+    AutoETSForecaster(season_length=12),
+    AutoARIMAForecaster(season_length=12),
+    NBEATSForecaster(season_length=12),
+]
+result = study.run(models, execution=ExecutionConfig(ray_num_cpus=16))
+```
+
+Each target is forecast from observations ending at the preceding origin. The
+adapters also generate the pre-validation error history required by VARA;
+`error_history_months` should match `VARAConfig.error_window_months`.
+
+The risk application has one thin, resumable entry point. It defaults to a
+reproducible 200-series validation subset and checkpoints every completed
+native rolling origin before VARA is fitted:
+
+```bash
+python scripts/run_risk_study.py --models har_ridge,auto_ets,auto_arima
+```
+
+Rerunning the command reuses valid base caches. Use `--refresh-base-cache` to
+refit them, `--models paper_five` to reuse the five fitted paper benchmarks,
+or `--max-series 0` after the subset run passes to use the complete prepared
+21,800-series panel. Keep a separate `--output-dir` for materially different
+model or VARA configurations.

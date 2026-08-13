@@ -25,6 +25,7 @@ from vara.forecast_baselines import (
     AUTO_ETS_MODEL_SPECIFICATION,
     AUTO_ETS_PHI,
     FORECAST_VARIANCE_LEVEL,
+    NeuralModelConfig,
     RESPONSE_NORMALIZATIONS,
     auto_ets_baseline_panel,
     auto_ets_config,
@@ -82,38 +83,6 @@ _INTERVAL_Z_BY_LEVEL = {
     90: 1.6448536269514722,
     95: _FORECAST_VARIANCE_Z,
 }
-
-
-@dataclass(frozen=True)
-class NeuralModelConfig:
-    input_size: int = 0
-    max_steps: int = 200
-    hidden_size: int = 64
-    num_layers: int = 2
-    batch_size: int = 32
-    learning_rate: float = 1e-3
-    scaler_type: str = "robust"
-    random_seed: int = 2026
-
-    def legacy_config(self) -> dict[str, Any]:
-        return {
-            "deepar_input_size": int(self.input_size),
-            "deepar_max_steps": int(self.max_steps),
-            "deepar_hidden_size": int(self.hidden_size),
-            "deepar_lstm_layers": int(self.num_layers),
-            "deepar_batch_size": int(self.batch_size),
-            "deepar_learning_rate": float(self.learning_rate),
-            "deepar_scaler_type": str(self.scaler_type),
-            "deepar_random_seed": int(self.random_seed),
-            "nbeats_input_size": int(self.input_size),
-            "nbeats_max_steps": int(self.max_steps),
-            "nbeats_hidden_size": int(self.hidden_size),
-            "nbeats_num_layers": int(self.num_layers),
-            "nbeats_batch_size": int(self.batch_size),
-            "nbeats_learning_rate": float(self.learning_rate),
-            "nbeats_scaler_type": str(self.scaler_type),
-            "nbeats_random_seed": int(self.random_seed),
-        }
 
 
 @dataclass(frozen=True)

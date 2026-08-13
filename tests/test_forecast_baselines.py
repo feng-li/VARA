@@ -112,3 +112,47 @@ def test_autoets_training_zscore_returns_response_scale_forecasts() -> None:
         history - result["fitted"],
     )
     assert result["response_normalization"] == "training_zscore"
+
+
+def test_autoets_accepts_structurally_missing_early_history() -> None:
+    time = np.arange(60, dtype=float)
+    history = np.column_stack([
+        100.0 + 0.5 * time,
+        300.0 + 2.0 * time,
+    ])
+    history[:12, 1] = np.nan
+
+    result = auto_ets_baseline_panel(
+        history,
+        horizon=1,
+        seasonal_lag=1,
+        series_ids=["A", "B"],
+        model_specification="ANN",
+        damped=False,
+        response_normalization="training_zscore",
+    )
+
+    np.testing.assert_allclose(result["training_mean"], np.nanmean(history, axis=0))
+    assert np.isnan(result["fitted"][:12, 1]).all()
+    assert np.isfinite(result["forecast"]).all()
+
+
+def test_autoets_forecast_targets_global_next_date_after_trailing_missing() -> None:
+    history = np.column_stack([
+        np.arange(30, dtype=float),
+        np.arange(30, dtype=float) + 10.0,
+    ])
+    history[-1, 1] = np.nan
+
+    result = auto_ets_baseline_panel(
+        history,
+        horizon=1,
+        seasonal_lag=1,
+        series_ids=["A", "B"],
+        model_specification="AAN",
+        damped=False,
+    )
+
+    assert result["forecast"].shape == (1, 2)
+    assert np.isfinite(result["forecast"]).all()
+    assert result["forecast"][0, 1] > 39.5

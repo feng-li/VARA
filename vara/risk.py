@@ -3,13 +3,249 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
 
 import numpy as np
 
+from .base import BaseForecast, PrecomputedForecaster
 from .data import PanelData, RollingSplit
 from .datamine import evaluate_risk_forecasts
 from .evaluation import EvaluationResult
+
+
+HAR_RIDGE_RISK_MODEL = "har_ridge"
+POOLED_LIGHTGBM_RISK_MODEL = "pooled_lightgbm"
+RISKMETRICS_EWMA_RISK_MODEL = "riskmetrics_ewma_validation_offset"
+GARCH11_RISK_MODEL = "garch11_offset"
+STUDENT_T_GARCH11_RISK_MODEL = "garch11_student_t_offset"
+RISK_BENCHMARK_MODELS = (
+    HAR_RIDGE_RISK_MODEL,
+    POOLED_LIGHTGBM_RISK_MODEL,
+    RISKMETRICS_EWMA_RISK_MODEL,
+    GARCH11_RISK_MODEL,
+    STUDENT_T_GARCH11_RISK_MODEL,
+)
+
+
+def _artifact_location(value: Any, *, path_root: Path) -> Path:
+    location = Path(str(value)).expanduser()
+    if not location.is_absolute():
+        location = path_root / location
+    return location
+
+
+@dataclass(frozen=True, slots=True)
+class RiskBenchmarkArtifacts:
+    """The five base forecasts used by the Accounting-Signal Risk study.
+
+    The artifact adapter preserves the exact fitted forecasts used to construct
+    the paper table. Each loaded array becomes an ordinary ``BaseForecaster``
+    and can therefore receive a fresh VARA correction through ``ForecastStudy``.
+    """
+
+    files: Mapping[str, str | Path]
+    contract_path: str | Path | None = None
+    contract: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.files, Mapping):
+            raise TypeError("risk benchmark files must be a mapping.")
+        files = {str(name): Path(path) for name, path in self.files.items()}
+        expected = set(RISK_BENCHMARK_MODELS)
+        if set(files) != expected:
+            missing = sorted(expected.difference(files))
+            extra = sorted(set(files).difference(expected))
+            raise ValueError(
+                "risk benchmark files must contain exactly the five paper models; "
+                f"missing={missing}, extra={extra}."
+            )
+        if not isinstance(self.contract, Mapping):
+            raise TypeError("risk benchmark contract must be a mapping.")
+        contract_path = (
+            None if self.contract_path is None else Path(self.contract_path)
+        )
+        object.__setattr__(self, "files", MappingProxyType(files))
+        object.__setattr__(self, "contract_path", contract_path)
+        object.__setattr__(self, "contract", MappingProxyType(dict(self.contract)))
+
+    @classmethod
+    def from_paper_contract(
+        cls,
+        contract_path: str | Path,
+        *,
+        path_root: str | Path | None = None,
+    ) -> RiskBenchmarkArtifacts:
+        """Resolve the five base artifacts from a paper-result contract."""
+        source = Path(contract_path)
+        contract = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(contract, dict):
+            raise TypeError("paper contract must contain a JSON object.")
+        required = {
+            "source_output",
+            "pooled_lightgbm_vara_output",
+            "riskmetrics_ewma_vara_output",
+            "garch_vara_output",
+            "student_t_garch_output",
+        }
+        missing = sorted(required.difference(contract))
+        if missing:
+            raise ValueError(
+                "paper contract is missing risk benchmark locations: "
+                + ", ".join(missing)
+            )
+        root = Path.cwd() if path_root is None else Path(path_root)
+        source_output = _artifact_location(contract["source_output"], path_root=root)
+        lightgbm_output = _artifact_location(
+            contract["pooled_lightgbm_vara_output"], path_root=root
+        )
+        ewma_output = _artifact_location(
+            contract["riskmetrics_ewma_vara_output"], path_root=root
+        )
+        garch_output = _artifact_location(
+            contract["garch_vara_output"], path_root=root
+        )
+        student_t_output = _artifact_location(
+            contract["student_t_garch_output"], path_root=root
+        )
+        return cls(
+            files={
+                HAR_RIDGE_RISK_MODEL: (
+                    source_output / "baseline" / "baseline_forecast.npy"
+                ),
+                POOLED_LIGHTGBM_RISK_MODEL: (
+                    lightgbm_output
+                    / "forecasts"
+                    / "pooled_lightgbm_forecast.npy"
+                ),
+                RISKMETRICS_EWMA_RISK_MODEL: (
+                    ewma_output
+                    / "forecasts"
+                    / "riskmetrics_ewma_validation_offset_forecast.npy"
+                ),
+                GARCH11_RISK_MODEL: (
+                    garch_output
+                    / "forecasts"
+                    / "garch_validation_offset_forecast.npy"
+                ),
+                STUDENT_T_GARCH11_RISK_MODEL: (
+                    student_t_output
+                    / "forecasts"
+                    / "garch11_t_validation_offset_forecast.npy"
+                ),
+            },
+            contract_path=source,
+            contract=contract,
+        )
+
+    def forecasters(
+        self,
+        data: PanelData,
+        split: RollingSplit,
+        *,
+        component_indices: np.ndarray | None = None,
+        mmap_mode: str | None = "r",
+    ) -> tuple[PrecomputedForecaster, ...]:
+        """Load the five forecasts in stable paper-table order.
+
+        ``component_indices`` may select a deterministic subset from the full
+        artifact panel. The caller remains responsible for constructing
+        ``data`` in exactly that selected source-component order.
+        """
+        if mmap_mode not in (None, "r"):
+            raise ValueError("mmap_mode must be None or 'r'.")
+        component_count = self.contract.get("component_count")
+        indices = None
+        if component_indices is not None:
+            raw_indices = np.asarray(component_indices)
+            if (
+                raw_indices.ndim != 1
+                or np.issubdtype(raw_indices.dtype, np.bool_)
+                or not np.issubdtype(raw_indices.dtype, np.integer)
+            ):
+                raise TypeError("component_indices must be a one-dimensional integer array.")
+            indices = np.asarray(raw_indices, dtype=np.int64)
+            if len(indices) != data.component_count:
+                raise ValueError("component_indices must contain one index per data series.")
+            if len(np.unique(indices)) != len(indices) or np.any(indices < 0):
+                raise ValueError("component_indices must be nonnegative and unique.")
+        if (
+            indices is None
+            and component_count is not None
+            and int(component_count) != data.component_count
+        ):
+            raise ValueError(
+                "paper contract component_count does not match the panel."
+            )
+        plan = split.plan(data)
+        contract_split = self.contract.get("split")
+        if isinstance(contract_split, Mapping):
+            expected_dates = {
+                "validation_start": data.dates[int(plan.validation_indices[0])],
+                "validation_end": data.dates[int(plan.validation_indices[-1])],
+                "test_start": data.dates[int(plan.test_indices[0])],
+                "test_end": data.dates[int(plan.test_indices[-1])],
+            }
+            for field_name, expected_date in expected_dates.items():
+                observed = contract_split.get(field_name)
+                if observed is not None and np.datetime64(observed, "ns") != expected_date:
+                    raise ValueError(
+                        f"paper contract {field_name} does not match the panel split."
+                    )
+
+        evaluation = plan.evaluation_indices
+        models: list[PrecomputedForecaster] = []
+        for name in RISK_BENCHMARK_MODELS:
+            path = self.files[name]
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            source_point = np.load(path, mmap_mode=mmap_mode, allow_pickle=False)
+            expected_source_components = (
+                int(component_count)
+                if component_count is not None
+                else source_point.shape[1]
+            )
+            if source_point.shape != (data.time_count, expected_source_components):
+                raise ValueError(
+                    f"risk forecast {name!r} has shape {source_point.shape}; "
+                    "it does not match the source panel contract."
+                )
+            if indices is not None:
+                if len(indices) and int(indices.max()) >= source_point.shape[1]:
+                    raise ValueError("component_indices are outside the artifact panel.")
+                point = np.asarray(source_point[:, indices])
+            else:
+                point = source_point
+            if point.shape != data.shape:
+                raise ValueError(
+                    f"selected risk forecast {name!r} has shape {point.shape}; "
+                    f"expected {data.shape}."
+                )
+            error = np.asarray(data.target) - np.asarray(point)
+            observed = np.isfinite(error[evaluation])
+            if np.any(observed.sum(axis=1) == 0):
+                raise ValueError(
+                    f"risk forecast {name!r} has no observed error at an "
+                    "evaluation origin."
+                )
+            models.append(PrecomputedForecaster(BaseForecast(
+                name=name,
+                point=point,
+                error=error,
+                diagnostics={
+                    "source": "risk_paper_artifact",
+                    "artifact": path.as_posix(),
+                    "paper_contract": (
+                        None
+                        if self.contract_path is None
+                        else self.contract_path.as_posix()
+                    ),
+                },
+            )))
+        return tuple(models)
 
 
 def log_risk_target(returns: np.ndarray, *, epsilon: float = 1e-6) -> np.ndarray:
