@@ -15,6 +15,7 @@ from .base import BaseForecast, PrecomputedForecaster
 from .data import PanelData, RollingSplit
 from .datamine import evaluate_risk_forecasts
 from .evaluation import EvaluationResult
+from .forecast_contracts import ExecutionConfig, PaperEtaConfig, RollingVARAConfig
 
 
 HAR_RIDGE_RISK_MODEL = "har_ridge"
@@ -29,6 +30,88 @@ RISK_BENCHMARK_MODELS = (
     GARCH11_RISK_MODEL,
     STUDENT_T_GARCH11_RISK_MODEL,
 )
+RISK_VARA_MODELS = MappingProxyType({
+    HAR_RIDGE_RISK_MODEL: "har_vara_lambda",
+    POOLED_LIGHTGBM_RISK_MODEL: "pooled_lightgbm_vara_lambda",
+    RISKMETRICS_EWMA_RISK_MODEL: "riskmetrics_ewma_vara_lambda",
+    GARCH11_RISK_MODEL: "garch_vara_lambda",
+    STUDENT_T_GARCH11_RISK_MODEL: "garch11_student_t_vara_lambda",
+})
+RISK_PAPER_TABLE_MODELS = tuple(
+    model
+    for base_model in RISK_BENCHMARK_MODELS
+    for model in (base_model, RISK_VARA_MODELS[base_model])
+)
+
+RISK_PAPER_PROFILE = "accounting_signal_risk_primary_v1"
+RISK_PAPER_COMPONENT_COUNT = 21_800
+RISK_PAPER_VALIDATION_MONTHS = 60
+RISK_PAPER_TEST_MONTHS = 120
+RISK_PAPER_RAY_NUM_CPUS = 15
+RISK_PAPER_MAX_CPUS_PER_TASK = 1
+
+
+def risk_paper_split() -> RollingSplit:
+    """Return the validation/test split used by the primary Risk table."""
+    return RollingSplit(
+        validation=RISK_PAPER_VALIDATION_MONTHS,
+        test=RISK_PAPER_TEST_MONTHS,
+    )
+
+
+def risk_paper_vara_config(
+    component_count: int = RISK_PAPER_COMPONENT_COUNT,
+) -> RollingVARAConfig:
+    """Return the primary full-dense Risk VARA specification.
+
+    ``component_count`` permits a smaller diagnostic panel while preserving
+    all other paper settings. Dense attention still uses every off-diagonal
+    component in that panel.
+    """
+    if isinstance(component_count, (bool, np.bool_)) or not isinstance(
+        component_count, (int, np.integer)
+    ):
+        raise TypeError("component_count must be an integer.")
+    count = int(component_count)
+    if count < 2:
+        raise ValueError("component_count must be at least two.")
+    return RollingVARAConfig(
+        error_window_months=240,
+        response_standardization="median_mad",
+        response_clip=8.0,
+        refit_frequency_months=12,
+        ridge=0.001,
+        attention_top_k=count - 1,
+        attention_cache_mode="exact",
+        attention_batch_size=count,
+        attention_mode="dense",
+        lambda_window_months=24,
+        lambda_ridge=0.001,
+        eta=PaperEtaConfig(
+            lower=-2.0,
+            upper=2.0,
+            grid_size=7,
+            local_tolerance=1e-4,
+        ),
+    )
+
+
+def risk_paper_execution_config() -> ExecutionConfig:
+    """Return the Ray resource allocation used by the primary Risk run."""
+    return ExecutionConfig(
+        ray_num_cpus=RISK_PAPER_RAY_NUM_CPUS,
+        max_cpus_per_task=RISK_PAPER_MAX_CPUS_PER_TASK,
+    )
+
+
+def risk_paper_corrector(component_count: int = RISK_PAPER_COMPONENT_COUNT):
+    """Return a VARA corrector with the paper config and model identifiers."""
+    from .correction import VARAResidualCorrector
+
+    return VARAResidualCorrector(
+        risk_paper_vara_config(component_count),
+        model_names=RISK_VARA_MODELS,
+    )
 
 
 def _artifact_location(value: Any, *, path_root: Path) -> Path:
@@ -247,6 +330,46 @@ class RiskBenchmarkArtifacts:
             )))
         return tuple(models)
 
+    def validate_primary_profile(self) -> None:
+        """Require the artifact contract used by the primary paper table."""
+        contract = self.contract
+        expected_fields = {
+            "component_count": RISK_PAPER_COMPONENT_COUNT,
+            "response_standardization": "median_mad",
+            "lightgbm_response_normalization": "none",
+            "table_methods": list(RISK_PAPER_TABLE_MODELS),
+        }
+        for name, expected in expected_fields.items():
+            if contract.get(name) != expected:
+                raise ValueError(
+                    f"paper contract has {name}={contract.get(name)!r}; "
+                    f"expected {expected!r}."
+                )
+        eta = contract.get("eta_estimation")
+        expected_eta = risk_paper_vara_config().eta
+        if not isinstance(eta, Mapping):
+            raise ValueError("paper contract has no eta_estimation mapping.")
+        eta_fields = {
+            "attention_support": "full_dense_off_diagonal_scores",
+            "bounds": [expected_eta.lower, expected_eta.upper],
+            "grid_size": expected_eta.grid_size,
+            "local_tolerance": expected_eta.local_tolerance,
+            "parameterization": "paper_eta_log_component_count_v1",
+        }
+        for name, expected in eta_fields.items():
+            if eta.get(name) != expected:
+                raise ValueError(
+                    f"paper contract eta_estimation has {name}={eta.get(name)!r}; "
+                    f"expected {expected!r}."
+                )
+        table = contract.get("standalone_table")
+        if (
+            not isinstance(table, Mapping)
+            or table.get("attention_support") != "full_dense_off_diagonal_scores"
+            or table.get("full_dense_attention_comparison") is not True
+        ):
+            raise ValueError("paper contract does not identify a full-dense table.")
+
 
 def log_risk_target(returns: np.ndarray, *, epsilon: float = 1e-6) -> np.ndarray:
     """Return ``log(epsilon + return**2)`` while preserving missing cells."""
@@ -307,5 +430,8 @@ class RiskForecastEvaluator:
                 "benchmark": benchmark,
                 "variance_calibration": calibration,
                 "returns_field": self.returns_field,
+                "target": "log(epsilon + squared return)",
+                "evaluation_scale": "original_log_risk",
+                "squared_error_metric": "log_risk_mspe",
             },
         )

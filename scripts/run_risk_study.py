@@ -27,25 +27,36 @@ from vara.api import (
     PaperEtaConfig,
     PrecomputedForecaster,
     RISK_BENCHMARK_MODELS,
+    RISK_PAPER_COMPONENT_COUNT,
+    RISK_PAPER_PROFILE,
+    RISK_VARA_MODELS,
     RiskBenchmarkArtifacts,
     RiskForecastEvaluator,
     RollingSplit,
     StaticFeatureSet,
     VARAConfig,
+    VARAResidualCorrector,
+    risk_paper_execution_config,
+    risk_paper_split,
+    risk_paper_vara_config,
 )
 from vara.datamine import load_panel
 
 
 DEFAULT_SOURCE_OUTPUT = Path(
     "outputs/datamine_vara/"
-    "ew_log_risk_full_formula_topk500_exact_lambda24_training_zscore"
+    "ew_log_risk_full_formula_topk500_exact_lambda24"
 )
 DEFAULT_PAPER_CONTRACT = Path(
     "outputs/datamine_vara/"
-    "ew_log_risk_dense_attention_training_zscore_table11/"
+    "ew_log_risk_dense_attention_table10/"
     "paper/paper_contract.json"
 )
-DEFAULT_MODELS = "har_ridge"
+DEFAULT_FEATURE_SNAPSHOT = DEFAULT_SOURCE_OUTPUT / "features" / "snapshot_200712"
+PAPER_SPLIT = risk_paper_split()
+PAPER_VARA = risk_paper_vara_config()
+PAPER_EXECUTION = risk_paper_execution_config()
+DEFAULT_MODELS = "paper_five"
 PAPER_MODEL_ALIASES = {
     "paper_har_ridge": RISK_BENCHMARK_MODELS[0],
     "pooled_lightgbm": RISK_BENCHMARK_MODELS[1],
@@ -81,33 +92,97 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-series",
         type=int,
-        default=200,
-        help="Deterministic validation subset size; use 0 for every series.",
+        default=0,
+        help=(
+            "Deterministic diagnostic subset size; 0 (the default) uses the "
+            "paper's complete 21,800-series universe."
+        ),
     )
     parser.add_argument("--seed", type=int, default=202407)
-    parser.add_argument("--validation-months", type=int, default=60)
-    parser.add_argument("--test-months", type=int, default=120)
+    parser.add_argument(
+        "--validation-months",
+        type=int,
+        default=PAPER_SPLIT.validation,
+    )
+    parser.add_argument("--test-months", type=int, default=PAPER_SPLIT.test)
     parser.add_argument("--season-length", type=int, default=12)
-    parser.add_argument("--error-window-months", type=int, default=240)
-    parser.add_argument("--refit-frequency-months", type=int, default=12)
-    parser.add_argument("--lambda-window-months", type=int, default=24)
+    parser.add_argument(
+        "--error-window-months",
+        type=int,
+        default=PAPER_VARA.error_window_months,
+    )
+    parser.add_argument(
+        "--refit-frequency-months",
+        type=int,
+        default=PAPER_VARA.refit_frequency_months,
+    )
+    parser.add_argument(
+        "--lambda-window-months",
+        type=int,
+        default=PAPER_VARA.lambda_window_months,
+    )
     parser.add_argument(
         "--response-standardization",
         choices=("median_mad", "training_zscore"),
-        default="training_zscore",
+        default=PAPER_VARA.response_standardization,
+        help=(
+            "Componentwise normalization fitted on each rolling VARA residual "
+            "window; median_mad matches the Risk application."
+        ),
     )
-    parser.add_argument("--response-clip", type=float, default=8.0)
-    parser.add_argument("--vara-ridge", type=float, default=1e-3)
-    parser.add_argument("--lambda-ridge", type=float, default=1e-3)
-    parser.add_argument("--eta-lower", type=float, default=-2.0)
-    parser.add_argument("--eta-upper", type=float, default=2.0)
-    parser.add_argument("--eta-grid-size", type=int, default=7)
-    parser.add_argument("--attention-mode", choices=("dense", "topk"), default="dense")
-    parser.add_argument("--attention-top-k", type=int, default=500)
-    parser.add_argument("--attention-cache-mode", choices=("exact", "cluster"), default="exact")
-    parser.add_argument("--attention-batch-size", type=int, default=512)
-    parser.add_argument("--ray-num-cpus", type=int, default=1)
-    parser.add_argument("--max-cpus-per-task", type=int, default=1)
+    parser.add_argument(
+        "--response-clip",
+        type=float,
+        default=PAPER_VARA.response_clip,
+    )
+    parser.add_argument("--vara-ridge", type=float, default=PAPER_VARA.ridge)
+    parser.add_argument(
+        "--lambda-ridge",
+        type=float,
+        default=PAPER_VARA.lambda_ridge,
+    )
+    parser.add_argument("--eta-lower", type=float, default=PAPER_VARA.eta.lower)
+    parser.add_argument("--eta-upper", type=float, default=PAPER_VARA.eta.upper)
+    parser.add_argument(
+        "--eta-grid-size",
+        type=int,
+        default=PAPER_VARA.eta.grid_size,
+    )
+    parser.add_argument(
+        "--eta-local-tolerance",
+        type=float,
+        default=PAPER_VARA.eta.local_tolerance,
+    )
+    parser.add_argument(
+        "--attention-mode",
+        choices=("dense", "topk"),
+        default=PAPER_VARA.attention_mode,
+    )
+    parser.add_argument(
+        "--attention-top-k",
+        type=int,
+        default=PAPER_VARA.attention_top_k,
+    )
+    parser.add_argument(
+        "--attention-cache-mode",
+        choices=("exact", "cluster"),
+        default=PAPER_VARA.attention_cache_mode,
+    )
+    parser.add_argument(
+        "--attention-batch-size",
+        type=int,
+        default=PAPER_VARA.attention_batch_size,
+    )
+    parser.add_argument(
+        "--ray-num-cpus",
+        type=int,
+        default=PAPER_EXECUTION.ray_num_cpus,
+    )
+    parser.add_argument(
+        "--max-cpus-per-task",
+        type=int,
+        default=PAPER_EXECUTION.max_cpus_per_task,
+    )
     parser.add_argument("--refresh-base-cache", action="store_true")
     parser.add_argument("--nbeats-max-steps", type=int, default=200)
     return parser
@@ -228,6 +303,7 @@ def _paper_forecasters(
     component_indices: np.ndarray,
 ) -> dict[str, Any]:
     artifacts = RiskBenchmarkArtifacts.from_paper_contract(contract_path)
+    artifacts.validate_primary_profile()
     contract_source = Path(str(artifacts.contract["source_output"]))
     if contract_source.resolve() != source_output.resolve():
         raise ValueError(
@@ -274,7 +350,7 @@ def _build_models(
             selected.append(HARRidgeForecaster(
                 ridge_candidates=(1.0,),
                 minimum_observations=120,
-                response_normalization="training_zscore",
+                response_normalization="none",
             ))
         elif name == "auto_ets":
             selected.append(AutoETSForecaster(
@@ -327,8 +403,23 @@ def _write_run_config(
     vara_config: VARAConfig,
     execution: ExecutionConfig,
 ) -> None:
+    departures = _paper_profile_departures(
+        model_names=model_names,
+        component_indices=component_indices,
+        validation_months=args.validation_months,
+        test_months=args.test_months,
+        vara_config=vara_config,
+        source_output=args.source_output,
+        feature_snapshot=args.feature_snapshot,
+        paper_contract=args.paper_contract,
+        execution=execution,
+    )
+
     payload = {
         "schema": "vara_risk_study_run_v1",
+        "application_profile": RISK_PAPER_PROFILE,
+        "paper_consistent": not departures,
+        "paper_departures": departures,
         "source_output": args.source_output.as_posix(),
         "feature_snapshot": args.feature_snapshot.as_posix(),
         "paper_contract": args.paper_contract.as_posix(),
@@ -342,6 +433,71 @@ def _write_run_config(
         "execution": asdict(execution),
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _paper_profile_departures(
+    *,
+    model_names: Sequence[str],
+    component_indices: np.ndarray,
+    validation_months: int,
+    test_months: int,
+    vara_config: VARAConfig,
+    source_output: Path = DEFAULT_SOURCE_OUTPUT,
+    feature_snapshot: Path = DEFAULT_FEATURE_SNAPSHOT,
+    paper_contract: Path = DEFAULT_PAPER_CONTRACT,
+    execution: ExecutionConfig = PAPER_EXECUTION,
+) -> dict[str, dict[str, Any]]:
+    """Return a machine-readable audit of deviations from the paper run."""
+    indices = np.asarray(component_indices, dtype=np.int64)
+    if indices.ndim != 1:
+        raise ValueError("component_indices must be one-dimensional.")
+    departures: dict[str, dict[str, Any]] = {}
+
+    def compare(name: str, actual: Any, expected: Any) -> None:
+        if actual != expected:
+            departures[name] = {"actual": actual, "paper": expected}
+
+    compare("models", list(model_names), list(RISK_BENCHMARK_MODELS))
+    compare(
+        "source_output",
+        Path(source_output).resolve().as_posix(),
+        DEFAULT_SOURCE_OUTPUT.resolve().as_posix(),
+    )
+    compare(
+        "paper_contract",
+        Path(paper_contract).resolve().as_posix(),
+        DEFAULT_PAPER_CONTRACT.resolve().as_posix(),
+    )
+    compare(
+        "feature_snapshot",
+        Path(feature_snapshot).resolve().as_posix(),
+        DEFAULT_FEATURE_SNAPSHOT.resolve().as_posix(),
+    )
+    compare(
+        "selected_component_count",
+        int(len(indices)),
+        RISK_PAPER_COMPONENT_COUNT,
+    )
+    expected_full_universe = (
+        len(indices) == RISK_PAPER_COMPONENT_COUNT
+        and np.array_equal(
+            indices,
+            np.arange(RISK_PAPER_COMPONENT_COUNT, dtype=np.int64),
+        )
+    )
+    if not expected_full_universe:
+        departures["selected_source_indices"] = {
+            "actual": "diagnostic_subset",
+            "paper": f"0:{RISK_PAPER_COMPONENT_COUNT}",
+        }
+    compare("validation_months", int(validation_months), PAPER_SPLIT.validation)
+    compare("test_months", int(test_months), PAPER_SPLIT.test)
+    compare("execution", asdict(execution), asdict(PAPER_EXECUTION))
+    expected_vara = asdict(risk_paper_vara_config(len(indices)))
+    actual_vara = asdict(vara_config)
+    for setting, expected in expected_vara.items():
+        compare(f"vara.{setting}", actual_vara[setting], expected)
+    return departures
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -367,6 +523,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("VARA requires at least two selected series.")
 
     attention_top_k = min(args.attention_top_k, data.component_count - 1)
+    attention_batch_size = min(args.attention_batch_size, data.component_count)
     vara_config = VARAConfig(
         error_window_months=args.error_window_months,
         response_standardization=args.response_standardization,
@@ -375,7 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ridge=args.vara_ridge,
         attention_top_k=attention_top_k,
         attention_cache_mode=args.attention_cache_mode,
-        attention_batch_size=args.attention_batch_size,
+        attention_batch_size=attention_batch_size,
         attention_mode=args.attention_mode,
         lambda_window_months=args.lambda_window_months,
         lambda_ridge=args.lambda_ridge,
@@ -383,6 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lower=args.eta_lower,
             upper=args.eta_upper,
             grid_size=args.eta_grid_size,
+            local_tolerance=args.eta_local_tolerance,
         ),
     )
     execution = ExecutionConfig(
@@ -402,11 +560,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         features=features,
         vara=vara_config,
         evaluator=RiskForecastEvaluator(),
+        corrector=VARAResidualCorrector(
+            vara_config,
+            model_names=RISK_VARA_MODELS,
+        ),
     )
 
     print(
-        f"Risk study: series={data.component_count:,} models={len(models)} "
-        f"attention={vara_config.attention_mode}",
+        f"Risk study profile={RISK_PAPER_PROFILE}: "
+        f"series={data.component_count:,} models={len(models)} "
+        f"attention={vara_config.attention_mode} "
+        f"normalization={vara_config.response_standardization}",
         flush=True,
     )
 
@@ -428,7 +592,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         vara_config=vara_config,
         execution=execution,
     )
-    print(result.metrics.to_string(index=False), flush=True)
+    paper_columns = [
+        "model",
+        "log_risk_mspe",
+        "absolute_r2",
+        "rank_score",
+        "overall_rank",
+    ]
+    print(result.metrics.loc[:, paper_columns].to_string(index=False), flush=True)
     print(f"Saved risk study to {output}", flush=True)
     return 0
 

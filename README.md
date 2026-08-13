@@ -78,10 +78,12 @@ from vara.api import (
     HARRidgeForecaster,
     PanelData,
     RiskForecastEvaluator,
-    RollingSplit,
     StaticFeatureSet,
-    VARAConfig,
     log_risk_target,
+    risk_paper_split,
+    risk_paper_vara_config,
+    risk_paper_execution_config,
+    risk_paper_corrector,
 )
 
 panel = PanelData(
@@ -93,17 +95,23 @@ panel = PanelData(
 )
 study = ForecastStudy(
     data=panel,
-    split=RollingSplit(validation=60, test=120),
+    split=risk_paper_split(),
     features=StaticFeatureSet(feature_matrix, feature_names, feature_provenance),
-    vara=VARAConfig(attention_mode="dense"),
+    vara=risk_paper_vara_config(panel.component_count),
     evaluator=RiskForecastEvaluator(),
+    corrector=risk_paper_corrector(panel.component_count),
 )
 result = study.run(
     [HARRidgeForecaster(ridge_candidates=(0.01, 0.1, 1.0))],
-    execution=ExecutionConfig(ray_num_cpus=16),
+    execution=risk_paper_execution_config(),
 )
 result.save("outputs/risk_study")
 ```
+
+By default, the pipeline applies the Risk specification's componentwise
+median--MAD normalization to each rolling base-residual window before fitting
+VARA, and transforms the residual correction back before forecast combination.
+The selected normalization is recorded in the saved study manifest.
 
 To reuse the exact five fitted risk benchmarks from a completed paper run:
 
@@ -137,16 +145,18 @@ Each target is forecast from observations ending at the preceding origin. The
 adapters also generate the pre-validation error history required by VARA;
 `error_history_months` should match `VARAConfig.error_window_months`.
 
-The risk application has one thin, resumable entry point. It defaults to a
-reproducible 200-series validation subset and checkpoints every completed
-native rolling origin before VARA is fitted:
+The risk application has one thin, resumable entry point. Its defaults reproduce
+the paper specification: the complete 21,800-series panel, the five fitted paper
+benchmarks, a 60-month validation and 120-month test split, full-dense attention,
+a 240-month median--MAD standardized residual window, annual refits, and a
+24-month rolling LSE combination coefficient. The 15 annual refit tasks use
+Ray with one CPU per task, matching the saved paper run:
 
 ```bash
-python scripts/run_risk_study.py --models har_ridge,auto_ets,auto_arima
+python scripts/run_risk_study.py
 ```
 
-Rerunning the command reuses valid base caches. Use `--refresh-base-cache` to
-refit them, `--models paper_five` to reuse the five fitted paper benchmarks,
-or `--max-series 0` after the subset run passes to use the complete prepared
-21,800-series panel. Keep a separate `--output-dir` for materially different
-model or VARA configurations.
+The saved `run_config.json` records the paper profile and reports whether any
+command-line override departed from it. For a quick diagnostic, add (for
+example) `--max-series 200 --models paper_har_ridge`; use a separate
+`--output-dir` for every materially different model or VARA configuration.

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
+import sys
 from types import MappingProxyType
 
 import numpy as np
@@ -24,6 +26,10 @@ from vara.api import (
     PointForecastEvaluator,
     PrecomputedForecaster,
     RISK_BENCHMARK_MODELS,
+    RISK_PAPER_COMPONENT_COUNT,
+    RISK_PAPER_PROFILE,
+    RISK_PAPER_TABLE_MODELS,
+    RISK_VARA_MODELS,
     RiskBenchmarkArtifacts,
     RiskForecastEvaluator,
     RollingSplit,
@@ -31,8 +37,28 @@ from vara.api import (
     VARAForecast,
     VARAResidualCorrector,
     log_risk_target,
+    risk_paper_split,
+    risk_paper_vara_config,
+    risk_paper_execution_config,
+    risk_paper_corrector,
 )
 from vara.datamine_vara_runner import RollingVARAFamilyResult
+
+
+def _risk_study_script():
+    script_dir = Path(__file__).resolve().parents[1] / "scripts"
+    sys.path.insert(0, str(script_dir))
+    try:
+        specification = importlib.util.spec_from_file_location(
+            "_test_run_risk_study",
+            script_dir / "run_risk_study.py",
+        )
+        assert specification is not None and specification.loader is not None
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(script_dir))
 
 
 def _panel(*, periods: int = 8, components: int = 2) -> PanelData:
@@ -151,6 +177,43 @@ def test_residual_corrector_routes_typed_inputs_to_existing_runner(
     assert result.execution == {"backend": "test"}
 
 
+def test_risk_corrector_uses_paper_model_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _panel()
+    split = RollingSplit(validation=2, test=2)
+    point = data.target - 1.0
+    base = BaseForecast("har_ridge", point, data.target - point)
+    expected = RollingVARAFamilyResult(
+        correction=np.zeros(data.shape),
+        refit_index=np.full(data.time_count, -1, dtype=np.int64),
+        core_fit_summary=pd.DataFrame(),
+        rolling_lambdas=np.zeros(data.shape),
+        lambda_weights=np.zeros(data.shape),
+        lambda_refit_fits=pd.DataFrame(),
+        unit_forecast=point,
+        lambda_forecast=point,
+        correction_execution={},
+    )
+    monkeypatch.setattr(
+        correction_module,
+        "run_vara_family",
+        lambda *args, **kwargs: expected,
+    )
+
+    result = VARAResidualCorrector(
+        model_names=RISK_VARA_MODELS,
+    ).forecast(
+        data,
+        split,
+        _features(),
+        base,
+        ExecutionConfig(),
+    )
+
+    assert result.name == "har_vara_lambda"
+
+
 class _HalfErrorCorrector:
     def forecast(
         self,
@@ -204,6 +267,7 @@ def test_forecast_study_orchestrates_precomputed_base_and_saves_outputs(tmp_path
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema"] == "vara_forecast_study_v1"
     assert manifest["base_models"] == ["base"]
+    assert manifest["vara_config"]["response_standardization"] == "median_mad"
 
 
 class _CountingForecaster:
@@ -284,10 +348,79 @@ def test_risk_evaluator_reuses_validation_calibration_and_risk_metrics() -> None
     )
 
     metrics = result.metrics.set_index("model")
+    assert metrics.loc["first", "log_risk_mspe"] == pytest.approx(0.01)
+    assert metrics.loc["second", "log_risk_mspe"] == pytest.approx(0.04)
     assert metrics.loc["first", "log_risk_rmse"] == pytest.approx(0.1)
     assert metrics.loc["second", "log_risk_rmse"] == pytest.approx(0.2)
     assert metrics.loc["first", "rank_score"] == pytest.approx(100.0)
     assert set(result.details["variance_calibration"]) == {"first", "second"}
+    assert result.details["evaluation_scale"] == "original_log_risk"
+
+
+def test_risk_paper_profile_is_the_primary_application_specification() -> None:
+    split = risk_paper_split()
+    config = risk_paper_vara_config()
+
+    assert RISK_PAPER_PROFILE == "accounting_signal_risk_primary_v1"
+    assert RISK_PAPER_COMPONENT_COUNT == 21_800
+    assert (split.validation, split.test) == (60, 120)
+    assert config.error_window_months == 240
+    assert config.response_standardization == "median_mad"
+    assert config.response_clip == 8.0
+    assert config.refit_frequency_months == 12
+    assert config.ridge == pytest.approx(0.001)
+    assert config.attention_mode == "dense"
+    assert config.attention_top_k == 21_799
+    assert config.attention_cache_mode == "exact"
+    assert config.attention_batch_size == 21_800
+    assert config.lambda_window_months == 24
+    assert config.lambda_ridge == pytest.approx(0.001)
+    assert (config.eta.lower, config.eta.upper) == (-2.0, 2.0)
+    assert config.eta.grid_size == 7
+    assert config.eta.local_tolerance == pytest.approx(1e-4)
+    diagnostic_config = risk_paper_vara_config(10)
+    assert diagnostic_config.attention_top_k == 9
+    assert diagnostic_config.attention_batch_size == 10
+    execution = risk_paper_execution_config()
+    assert execution.ray_num_cpus == 15
+    assert execution.max_cpus_per_task == 1
+    corrector = risk_paper_corrector(10)
+    assert corrector.config == diagnostic_config
+    assert corrector.model_names == RISK_VARA_MODELS
+
+
+def test_risk_application_defaults_and_departure_audit_match_paper() -> None:
+    runner = _risk_study_script()
+    args = runner._parser().parse_args([])
+    config = risk_paper_vara_config()
+    full_indices = np.arange(RISK_PAPER_COMPONENT_COUNT, dtype=np.int64)
+
+    assert args.models == "paper_five"
+    assert args.max_series == 0
+    assert (args.validation_months, args.test_months) == (60, 120)
+    assert args.response_standardization == "median_mad"
+    assert args.attention_mode == "dense"
+    assert (args.ray_num_cpus, args.max_cpus_per_task) == (15, 1)
+    assert runner._paper_profile_departures(
+        model_names=RISK_BENCHMARK_MODELS,
+        component_indices=full_indices,
+        validation_months=args.validation_months,
+        test_months=args.test_months,
+        vara_config=config,
+    ) == {}
+
+    departures = runner._paper_profile_departures(
+        model_names=(RISK_BENCHMARK_MODELS[0],),
+        component_indices=np.arange(10, dtype=np.int64),
+        validation_months=args.validation_months,
+        test_months=args.test_months,
+        vara_config=risk_paper_vara_config(10),
+    )
+    assert set(departures) == {
+        "models",
+        "selected_component_count",
+        "selected_source_indices",
+    }
 
 
 def test_native_har_ridge_adapter_returns_causal_errors() -> None:
@@ -378,6 +511,40 @@ def test_five_risk_artifacts_become_standard_base_forecasters(tmp_path) -> None:
     result = study.run(models)
     assert tuple(result.bases) == RISK_BENCHMARK_MODELS
     assert len(result.forecasts) == 2 * len(RISK_BENCHMARK_MODELS)
+
+
+def test_risk_artifact_contract_validates_primary_paper_profile(tmp_path) -> None:
+    paths = {
+        model: tmp_path / f"{model}.npy"
+        for model in RISK_BENCHMARK_MODELS
+    }
+    contract = {
+        "component_count": 21_800,
+        "response_standardization": "median_mad",
+        "lightgbm_response_normalization": "none",
+        "table_methods": list(RISK_PAPER_TABLE_MODELS),
+        "eta_estimation": {
+            "attention_support": "full_dense_off_diagonal_scores",
+            "bounds": [-2.0, 2.0],
+            "grid_size": 7,
+            "local_tolerance": 1e-4,
+            "parameterization": "paper_eta_log_component_count_v1",
+        },
+        "standalone_table": {
+            "attention_support": "full_dense_off_diagonal_scores",
+            "full_dense_attention_comparison": True,
+        },
+    }
+    artifacts = RiskBenchmarkArtifacts(files=paths, contract=contract)
+
+    artifacts.validate_primary_profile()
+
+    invalid = RiskBenchmarkArtifacts(
+        files=paths,
+        contract={**contract, "response_standardization": "training_zscore"},
+    )
+    with pytest.raises(ValueError, match="response_standardization"):
+        invalid.validate_primary_profile()
 
 
 def test_five_risk_artifacts_support_aligned_component_subset(tmp_path) -> None:

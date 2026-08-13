@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -42,6 +42,7 @@ class ForecastStudyResult:
 
     data: PanelData
     split: RollingSplit
+    vara_config: RollingVARAConfig
     bases: Mapping[str, BaseForecast]
     vara: Mapping[str, VARAForecast]
     forecasts: Mapping[str, np.ndarray]
@@ -86,6 +87,7 @@ class ForecastStudyResult:
             "shape": list(self.data.shape),
             "validation_indices": [int(plan.validation_indices[0]), int(plan.validation_indices[-1])],
             "test_indices": [int(plan.test_indices[0]), int(plan.test_indices[-1])],
+            "vara_config": asdict(self.vara_config),
             "base_models": list(self.bases),
             "base_diagnostics": {
                 name: dict(result.diagnostics)
@@ -158,6 +160,7 @@ class ForecastStudy:
         return ForecastStudyResult(
             data=self.data,
             split=self.split,
+            vara_config=self.vara,
             bases=bases,
             vara=vara_results,
             forecasts=forecasts,

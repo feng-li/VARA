@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help="MSE figure output (kept for backward compatibility).",
+        help="MSPE figure output (kept for backward compatibility).",
     )
     parser.add_argument("--r2-output", type=Path, default=DEFAULT_R2_OUTPUT)
     parser.add_argument("--rank-output", type=Path, default=DEFAULT_RANK_OUTPUT)
@@ -77,7 +77,10 @@ def load_table5_metrics(
 ) -> tuple[list[str], dict[str, tuple[np.ndarray, np.ndarray]]]:
     """Return exact paired Table 5 metrics in manuscript order."""
     metrics = pd.read_csv(metrics_path)
-    required = {"model", "log_risk_rmse", "absolute_r2", "rank_score"}
+    if "log_risk_mspe" not in metrics.columns and "log_risk_rmse" in metrics.columns:
+        rmse = pd.to_numeric(metrics["log_risk_rmse"], errors="coerce")
+        metrics["log_risk_mspe"] = np.square(rmse)
+    required = {"model", "log_risk_mspe", "absolute_r2", "rank_score"}
     missing = sorted(required.difference(metrics.columns))
     if missing:
         raise ValueError("Metrics file is missing columns: " + ", ".join(missing))
@@ -105,9 +108,9 @@ def load_table5_metrics(
             raise ValueError(f"Table 5 {column} values must be finite.")
         return base_values, vara_values
 
-    base_rmse, vara_rmse = paired_column("log_risk_rmse")
-    if np.any(base_rmse < 0.0) or np.any(vara_rmse < 0.0):
-        raise ValueError("Table 5 RMSE values must be nonnegative.")
+    base_mspe, vara_mspe = paired_column("log_risk_mspe")
+    if np.any(base_mspe < 0.0) or np.any(vara_mspe < 0.0):
+        raise ValueError("Table 5 MSPE values must be nonnegative.")
     base_r2, vara_r2 = paired_column("absolute_r2", scale=100.0)
     base_rank, vara_rank = paired_column("rank_score")
 
@@ -117,7 +120,7 @@ def load_table5_metrics(
 
     labels = [label for label, _, _ in MODEL_PAIRS]
     return labels, {
-        "mse": (np.square(base_rmse), np.square(vara_rmse)),
+        "mse": (base_mspe, vara_mspe),
         "r2": (base_r2, vara_r2),
         "rank": (base_rank, vara_rank),
     }
@@ -362,21 +365,21 @@ def plot_table5_mse(
     vara_mse: np.ndarray,
     output_path: Path,
 ) -> None:
-    """Write a vector-PDF grouped bar chart with a zero MSE baseline."""
+    """Write a vector-PDF grouped bar chart with a zero MSPE baseline."""
     reductions = 100.0 * (base_mse - vara_mse) / base_mse
     plot_table5_metric(
         labels,
         base_mse,
         vara_mse,
         output_path,
-        ylabel="Log-risk MSE",
+        ylabel="Log-risk MSPE",
         value_decimals=4,
         annotations=[f"-{reduction:.2f}%" for reduction in reductions],
         ylim_padding=0.34,
         bracket_offset=0.15,
         bracket_tick=0.025,
         text_offset=0.018,
-        metadata_title="Accounting-Signal Risk Table 5 MSE comparison",
+        metadata_title="Accounting-Signal Risk Table 5 MSPE comparison",
     )
 
 

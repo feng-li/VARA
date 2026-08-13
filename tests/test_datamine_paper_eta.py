@@ -23,6 +23,7 @@ from scripts.build_datamine_risk_paper_results import (
     TRAINING_ZSCORE_SCALE_FLOOR,
     build_argument_parser,
     build_paper_dm_results,
+    build_paper_paired_tests,
     evaluate_training_zscore_risk_table,
     validate_paper_input_contracts,
     validate_pooled_lightgbm_vara_contract,
@@ -1011,7 +1012,6 @@ def test_paper_dm_results_have_two_prespecified_five_pair_panels() -> None:
                     "date": dates,
                     "model": model,
                     "squared_error": scale * loss_shape,
-                    "gaussian_return_crps": 0.1 * scale * loss_shape[::-1],
                 }
             )
             for model, scale in scales.items()
@@ -1021,7 +1021,7 @@ def test_paper_dm_results_have_two_prespecified_five_pair_panels() -> None:
     metrics = pd.DataFrame(
         {
             "model": list(scales),
-            "log_risk_rmse": [math.sqrt(scale) for scale in scales.values()],
+            "log_risk_mspe": list(scales.values()),
         }
     )
 
@@ -1036,8 +1036,46 @@ def test_paper_dm_results_have_two_prespecified_five_pair_panels() -> None:
         )
     ) == list(DM_COMPARISONS)
     assert results["n_origins"].eq(6).all()
-    assert (results["rmse_gain_percent"] > 0.0).all()
+    assert (results["mspe_gain_percent"] > 0.0).all()
     assert (results["squared_error_dm_statistic"] < 0.0).all()
-    assert (results["crps_dm_statistic"] < 0.0).all()
     assert results["squared_error_p_value_two_sided"].between(0.0, 1.0).all()
-    assert results["crps_p_value_two_sided"].between(0.0, 1.0).all()
+
+
+def test_paper_paired_tests_use_monthly_r2_differences() -> None:
+    dates = pd.date_range("2020-01-31", periods=6, freq="ME")
+    base_loss = np.array([1.0, 1.8, 1.3, 2.4, 1.6, 2.1])
+    monthly_rows: list[pd.DataFrame] = []
+    metric_rows: list[dict[str, float | str]] = []
+    for pair_index, (base_model, vara_model) in enumerate(
+        zip(TABLE_METHODS[::2], TABLE_METHODS[1::2], strict=True)
+    ):
+        scale = 1.0 + pair_index / 10.0
+        base = scale * base_loss
+        vara = 0.8 * base
+        for model, loss in ((base_model, base), (vara_model, vara)):
+            monthly_rows.append(pd.DataFrame({
+                "date": dates,
+                "model": model,
+                "observed_cells": 10,
+                "squared_error": loss,
+            }))
+            metric_rows.append({
+                "model": model,
+                "log_risk_mspe": float(np.mean(loss)),
+            })
+
+    results = build_paper_paired_tests(
+        monthly=pd.concat(monthly_rows, ignore_index=True),
+        metrics=pd.DataFrame(metric_rows),
+        monthly_total_sum_squares=pd.DataFrame({
+            "date": dates,
+            "total_sum_squares": np.full(len(dates), 25.0),
+        }),
+    )
+
+    assert len(results) == 5
+    assert results["n_origins"].eq(6).all()
+    assert (results["delta_log_risk_mspe"] < 0.0).all()
+    assert (results["dm_statistic"] < 0.0).all()
+    assert (results["paired_r2_t_statistic"] > 0.0).all()
+    assert results["paired_r2_p_value_two_sided"].between(0.0, 1.0).all()

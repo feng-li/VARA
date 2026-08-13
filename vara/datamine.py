@@ -2315,6 +2315,7 @@ def evaluate_risk_forecasts(
             "target_type": "log_squared_return",
             "benchmark": benchmark_name,
             "test_cells": int(valid.sum()),
+            "log_risk_mspe": float(np.mean(squared_error[valid])),
             "log_risk_rmse": float(np.sqrt(np.mean(squared_error[valid]))),
             "log_risk_mae": float(np.mean(np.abs(error[valid]))),
             "log_risk_bias": float(np.mean(error[valid])),

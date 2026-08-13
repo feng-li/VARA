@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import t as student_t_distribution
 
 if __package__:
     from .datamine_paper_eta import (
@@ -60,6 +61,7 @@ TABLE_METHODS = (
     STUDENT_T_GARCH_METHOD,
     STUDENT_T_GARCH_VARA_METHOD,
 )
+TABLE_MODEL_PAIRS = tuple(zip(TABLE_METHODS[::2], TABLE_METHODS[1::2], strict=True))
 TABLE_METHOD_LABELS = {
     "har_ridge": "HAR ridge",
     "har_vara_lambda": "HAR ridge + lambda*VARA",
@@ -97,16 +99,12 @@ def render_risk_table(
 ) -> tuple[str, str]:
     """Render the original-scale ten-method comparison as Markdown and LaTeX.
 
-    The displayed order and within-family emphasis match Table 5: lower MSE
+    The displayed order and within-family emphasis match Table 5: lower MSPE
     and larger absolute R2 and RankScore are preferred. Exact ties are bolded
     on both rows.
     """
-    source_columns = (
-        "log_risk_rmse",
-        "absolute_r2",
-        "rank_score",
-    )
-    metric_columns = ("log_risk_mse", "absolute_r2", "rank_score")
+    source_columns = ("log_risk_mspe", "absolute_r2", "rank_score")
+    metric_columns = ("log_risk_mspe", "absolute_r2", "rank_score")
     required = {"model", *source_columns}
     missing = sorted(required.difference(metrics.columns))
     if missing:
@@ -122,8 +120,7 @@ def render_risk_table(
         pd.to_numeric,
         errors="coerce",
     )
-    values = source_values.loc[:, ["absolute_r2", "rank_score"]].copy()
-    values.insert(0, "log_risk_mse", np.square(source_values["log_risk_rmse"]))
+    values = source_values.copy()
     if not np.isfinite(values.to_numpy(dtype=float)).all():
         raise ValueError("Risk table rendering requires finite metric values.")
 
@@ -135,7 +132,7 @@ def render_risk_table(
             "Risk application. Each family reports its base forecast followed by "
             "the forecast with the refit-specific pooled LSE-weighted VARA "
             "correction. Every VARA correction uses all off-diagonal component "
-            "scores. Within each pair, bold entries identify lower MSE or "
+            "scores. Within each pair, bold entries identify lower MSPE or "
             "higher absolute R2 and RankScore."
         )
         label = "tab:datamine_forecasting_results_full_dense_attention"
@@ -145,12 +142,12 @@ def render_risk_table(
             "Standalone Table 5 comparison for the Accounting-Signal Risk "
             "application. Each family reports its base forecast followed by the "
             "forecast with the refit-specific pooled LSE-weighted VARA correction. "
-            "Within each pair, bold entries identify lower MSE or higher "
+            "Within each pair, bold entries identify lower MSPE or higher "
             "absolute R2 and RankScore."
         )
         label = "tab:datamine_forecasting_results_table10_comparison"
 
-    minimize = {"log_risk_mse"}
+    minimize = {"log_risk_mspe"}
     maximize = {"absolute_r2", "rank_score"}
 
     def preferred(model_position: int, column: str) -> bool:
@@ -164,7 +161,7 @@ def render_risk_table(
         raise ValueError(f"Unknown display preference for column {column!r}.")
 
     formats = {
-        "log_risk_mse": ".4f",
+        "log_risk_mspe": ".4f",
         "absolute_r2": ".4f",
         "rank_score": ".2f",
     }
@@ -177,7 +174,7 @@ def render_risk_table(
         "",
         caption,
         "",
-        "| Method | Log-risk MSE | Absolute R2 (%) | RankScore (%) |",
+        "| Method | Log-risk MSPE | Absolute R2 (%) | RankScore (%) |",
         "|---|---:|---:|---:|",
     ]
     latex = [
@@ -189,7 +186,7 @@ def render_risk_table(
         r"\resizebox{\textwidth}{!}{%",
         r"\begin{tabular}{lrrr}",
         r"\toprule",
-        r"Method & Log-risk MSE & $R^2_{\mathrm{abs}}$ (\%) & RankScore (\%) \\",
+        r"Method & Log-risk MSPE & $R^2_{\mathrm{abs}}$ (\%) & RankScore (\%) \\",
         r"\midrule",
     ]
     for position, model in enumerate(TABLE_METHODS):
@@ -237,6 +234,115 @@ def write_risk_table(
         metrics,
         attention_support=attention_support,
     )
+    markdown_path = Path(output_dir) / "paper_table.md"
+    latex_path = Path(output_dir) / "paper_table.tex"
+    markdown_path.write_text(markdown, encoding="utf-8")
+    latex_path.write_text(latex, encoding="utf-8")
+    return markdown_path, latex_path
+
+
+def render_mspe_comparison_table(paired_tests: pd.DataFrame) -> tuple[str, str]:
+    """Render the active five-row MSPE, DM, and paired-R2 paper table."""
+    columns = (
+        "base_model",
+        "vara_model",
+        "base_log_risk_mspe",
+        "vara_log_risk_mspe",
+        "dm_statistic",
+        "dm_p_value_two_sided",
+        "paired_r2_t_statistic",
+        "paired_r2_p_value_two_sided",
+    )
+    missing = sorted(set(columns).difference(paired_tests.columns))
+    if missing:
+        raise ValueError(
+            "MSPE comparison table is missing columns: " + ", ".join(missing)
+        )
+    if paired_tests["base_model"].duplicated().any():
+        raise ValueError("MSPE comparison table requires one row per base model.")
+    indexed = paired_tests.set_index("base_model")
+    expected_bases = [base_model for base_model, _ in TABLE_MODEL_PAIRS]
+    if set(indexed.index) != set(expected_bases):
+        raise ValueError("MSPE comparison table has the wrong base-model set.")
+    ordered = indexed.loc[expected_bases]
+    numeric_columns = columns[2:]
+    numeric = ordered.loc[:, numeric_columns].apply(pd.to_numeric, errors="coerce")
+    if not np.isfinite(numeric.to_numpy(dtype=float)).all():
+        raise ValueError("MSPE comparison table requires finite statistics.")
+    expected_vara = dict(TABLE_MODEL_PAIRS)
+    for base_model, row in ordered.iterrows():
+        if row["vara_model"] != expected_vara[base_model]:
+            raise ValueError("MSPE comparison table has an incorrect VARA pair.")
+
+    caption = (
+        "MSPE results for the five benchmark models and their VARA counterparts. "
+        "For each pair, the table reports the squared-error Diebold--Mariano "
+        "statistic and the paired $t$-statistic; parentheses contain raw "
+        "two-sided $p$-values."
+    )
+
+    def p_value(value: float) -> str:
+        return "<0.0001" if value < 0.0001 else f"{value:.4f}"
+
+    markdown = [
+        "### MSPE comparison",
+        "",
+        caption,
+        "",
+        "| Benchmark method | No VARA | VARA | DM statistic | DM p-value | "
+        "Paired t statistic | Paired t p-value |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    latex = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\small",
+        r"\setlength{\tabcolsep}{4pt}",
+        rf"\caption{{{caption}}}",
+        r"\label{tab:mspe-comparison}",
+        r"\begin{tabular}{lrrrrrr}",
+        r"\toprule",
+        r"& \multicolumn{2}{c}{MSPE} & \multicolumn{4}{c}{$\Delta$MSPE ($p$-Values)} \\",
+        r"\cmidrule(lr){2-3}\cmidrule(lr){4-7}",
+        r"Benchmark method & No VARA & VARA & DM statistic & DM $p$-value & Paired $t$ & Paired $t$ $p$-value \\",
+        r"\midrule",
+    ]
+    for base_model, row in ordered.iterrows():
+        label = TABLE_METHOD_LABELS[base_model]
+        latex_label = TABLE_METHOD_LATEX_LABELS[base_model]
+        values = (
+            float(row["base_log_risk_mspe"]),
+            float(row["vara_log_risk_mspe"]),
+            float(row["dm_statistic"]),
+            float(row["dm_p_value_two_sided"]),
+            float(row["paired_r2_t_statistic"]),
+            float(row["paired_r2_p_value_two_sided"]),
+        )
+        markdown.append(
+            f"| {label} | {values[0]:.4f} | {values[1]:.4f} | "
+            f"{values[2]:.3f} | {p_value(values[3])} | {values[4]:.3f} | "
+            f"{p_value(values[5])} |"
+        )
+        latex.append(
+            f"{latex_label} & {values[0]:.4f} & {values[1]:.4f} & "
+            f"{values[2]:.3f} & ({p_value(values[3])}) & {values[4]:.3f} & "
+            f"({p_value(values[5])}) \\\\"
+        )
+    latex.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
+        r"\end{table}",
+    ])
+    return "\n".join(markdown) + "\n", "\n".join(latex) + "\n"
+
+
+def write_mspe_comparison_table(
+    paired_tests: pd.DataFrame,
+    *,
+    output_dir: Path,
+) -> tuple[Path, Path]:
+    """Write the active paired paper table beside its test artifact."""
+    markdown, latex = render_mspe_comparison_table(paired_tests)
     markdown_path = Path(output_dir) / "paper_table.md"
     latex_path = Path(output_dir) / "paper_table.tex"
     markdown_path.write_text(markdown, encoding="utf-8")
@@ -863,7 +969,7 @@ def build_paper_dm_results(
     metrics: pd.DataFrame,
 ) -> pd.DataFrame:
     """Build the prespecified two-panel, ten-pair paper DM artifact."""
-    required_losses = ("squared_error", "gaussian_return_crps")
+    required_losses = ("squared_error",)
     required_monthly_columns = {"date", "model", *required_losses}
     missing_columns = required_monthly_columns.difference(monthly.columns)
     if missing_columns:
@@ -871,8 +977,8 @@ def build_paper_dm_results(
             "Monthly DM input is missing columns: "
             + ", ".join(sorted(missing_columns))
         )
-    if not {"model", "log_risk_rmse"}.issubset(metrics.columns):
-        raise ValueError("DM metric input must contain model and log_risk_rmse.")
+    if not {"model", "log_risk_mspe"}.issubset(metrics.columns):
+        raise ValueError("DM metric input must contain model and log_risk_mspe.")
     if metrics["model"].duplicated().any():
         raise ValueError("DM metric input must contain one row per model.")
 
@@ -898,15 +1004,15 @@ def build_paper_dm_results(
 
     rows: list[dict[str, float | int | str]] = []
     for panel, focal_name, comparator_name in DM_COMPARISONS:
-        focal_rmse = float(metric_index.loc[focal_name, "log_risk_rmse"])
-        comparator_rmse = float(
-            metric_index.loc[comparator_name, "log_risk_rmse"]
+        focal_mspe = float(metric_index.loc[focal_name, "log_risk_mspe"])
+        comparator_mspe = float(
+            metric_index.loc[comparator_name, "log_risk_mspe"]
         )
         row: dict[str, float | int | str] = {
             "panel": panel,
             "focal_model": focal_name,
             "comparator_model": comparator_name,
-            "rmse_gain_percent": 100.0 * (1.0 - focal_rmse / comparator_rmse),
+            "mspe_gain_percent": 100.0 * (1.0 - focal_mspe / comparator_mspe),
         }
         n_origins: int | None = None
         for loss in required_losses:
@@ -933,28 +1039,153 @@ def build_paper_dm_results(
             if n_origins is None:
                 n_origins = current_n_origins
             elif current_n_origins != n_origins:
-                raise ValueError(
-                    "Squared-error and CRPS DM tests use different month counts."
-                )
-            prefix = "crps" if loss == "gaussian_return_crps" else loss
+                raise ValueError("DM losses use different month counts.")
             # The paper defines the reported statistic and p-value as the raw
             # normal-reference, two-sided DM result. Retain the corrected result
             # as explicit audit columns rather than silently discarding it.
-            row[f"{prefix}_mean_loss_difference"] = float(
+            row[f"{loss}_mean_loss_difference"] = float(
                 test["mean_loss_difference"]
             )
-            row[f"{prefix}_standard_error"] = float(test["standard_error"])
-            row[f"{prefix}_dm_statistic"] = float(test["dm_statistic_raw"])
-            row[f"{prefix}_p_value_two_sided"] = float(
+            row[f"{loss}_standard_error"] = float(test["standard_error"])
+            row[f"{loss}_dm_statistic"] = float(test["dm_statistic_raw"])
+            row[f"{loss}_p_value_two_sided"] = float(
                 test["p_value_raw_two_sided"]
             )
-            row[f"{prefix}_dm_statistic_hln"] = float(test["dm_statistic"])
-            row[f"{prefix}_p_value_two_sided_hln"] = float(
+            row[f"{loss}_dm_statistic_hln"] = float(test["dm_statistic"])
+            row[f"{loss}_p_value_two_sided_hln"] = float(
                 test["p_value_two_sided"]
             )
         assert n_origins is not None
         row["n_origins"] = n_origins
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def build_paper_paired_tests(
+    *,
+    monthly: pd.DataFrame,
+    metrics: pd.DataFrame,
+    monthly_total_sum_squares: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build the five paper MSPE, DM, and paired monthly-R2 comparisons."""
+    required_monthly = {"date", "model", "observed_cells", "squared_error"}
+    missing_monthly = sorted(required_monthly.difference(monthly.columns))
+    if missing_monthly:
+        raise ValueError(
+            "Paired-test monthly input is missing columns: "
+            + ", ".join(missing_monthly)
+        )
+    required_metrics = {"model", "log_risk_mspe"}
+    missing_metrics = sorted(required_metrics.difference(metrics.columns))
+    if missing_metrics:
+        raise ValueError(
+            "Paired-test metric input is missing columns: "
+            + ", ".join(missing_metrics)
+        )
+    if metrics["model"].duplicated().any():
+        raise ValueError("Paired-test metrics require one row per model.")
+    denominator = monthly_total_sum_squares.copy()
+    if set(denominator.columns) != {"date", "total_sum_squares"}:
+        raise ValueError(
+            "monthly_total_sum_squares must contain date and total_sum_squares."
+        )
+    if denominator["date"].duplicated().any():
+        raise ValueError("Paired-test R2 denominators require one row per month.")
+    denominator["total_sum_squares"] = pd.to_numeric(
+        denominator["total_sum_squares"],
+        errors="coerce",
+    )
+    if (
+        not np.isfinite(denominator["total_sum_squares"]).all()
+        or (denominator["total_sum_squares"] <= 0.0).any()
+    ):
+        raise ValueError("Paired-test R2 denominators must be finite and positive.")
+
+    metric_index = metrics.set_index("model")
+    rows: list[dict[str, float | int | str]] = []
+    for base_model, vara_model in TABLE_MODEL_PAIRS:
+        selected = monthly.loc[
+            monthly["model"].isin((base_model, vara_model)),
+            ["date", "model", "observed_cells", "squared_error"],
+        ].copy()
+        if selected.duplicated(["date", "model"]).any():
+            raise ValueError("Paired-test input must contain one loss per model-month.")
+        wide_loss = selected.pivot(
+            index="date",
+            columns="model",
+            values="squared_error",
+        )
+        wide_cells = selected.pivot(
+            index="date",
+            columns="model",
+            values="observed_cells",
+        )
+        if set(wide_loss.columns) != {base_model, vara_model}:
+            raise ValueError("Paired-test input is missing a base/VARA method.")
+        if not wide_cells[base_model].equals(wide_cells[vara_model]):
+            raise ValueError("Paired-test methods must use the same monthly cells.")
+        aligned = (
+            wide_loss.join(wide_cells[[base_model]].rename(
+                columns={base_model: "observed_cells"}
+            ))
+            .reset_index()
+            .merge(denominator, on="date", how="inner", validate="one_to_one")
+            .dropna()
+        )
+        if len(aligned) != len(denominator):
+            raise ValueError("Paired-test methods do not cover every test month.")
+
+        base_sse = (
+            aligned[base_model].to_numpy(dtype=float)
+            * aligned["observed_cells"].to_numpy(dtype=float)
+        )
+        vara_sse = (
+            aligned[vara_model].to_numpy(dtype=float)
+            * aligned["observed_cells"].to_numpy(dtype=float)
+        )
+        tss = aligned["total_sum_squares"].to_numpy(dtype=float)
+        r2_difference = (base_sse - vara_sse) / tss
+        n_origins = int(len(r2_difference))
+        if n_origins < 2:
+            raise ValueError("Paired R2 tests require at least two test months.")
+        difference_sd = float(np.std(r2_difference, ddof=1))
+        t_statistic = (
+            float(np.mean(r2_difference))
+            / (difference_sd / np.sqrt(n_origins))
+            if difference_sd > 0.0
+            else np.nan
+        )
+        t_p_value = (
+            float(
+                2.0
+                * student_t_distribution.sf(
+                    abs(t_statistic),
+                    df=n_origins - 1,
+                )
+            )
+            if np.isfinite(t_statistic)
+            else np.nan
+        )
+        dm_test = diebold_mariano_test(
+            aligned[vara_model],
+            aligned[base_model],
+            forecast_horizon=1,
+        )
+        base_mspe = float(metric_index.loc[base_model, "log_risk_mspe"])
+        vara_mspe = float(metric_index.loc[vara_model, "log_risk_mspe"])
+        rows.append({
+            "base_model": base_model,
+            "vara_model": vara_model,
+            "base_log_risk_mspe": base_mspe,
+            "vara_log_risk_mspe": vara_mspe,
+            "delta_log_risk_mspe": vara_mspe - base_mspe,
+            "dm_statistic": float(dm_test["dm_statistic_raw"]),
+            "dm_p_value_two_sided": float(dm_test["p_value_raw_two_sided"]),
+            "paired_r2_t_statistic": t_statistic,
+            "paired_r2_p_value_two_sided": t_p_value,
+            "mean_monthly_r2_difference": float(np.mean(r2_difference)),
+            "n_origins": n_origins,
+        })
     return pd.DataFrame(rows)
 
 
@@ -1327,6 +1558,26 @@ def main() -> None:
     rankscore_exact_ties = rankscore_pair_months - rankscore_strict_wins
 
     dm = build_paper_dm_results(monthly=monthly, metrics=metrics)
+    test_actual = np.asarray(target[split.test_indices], dtype=float)
+    common_test_cells = np.isfinite(test_actual)
+    for method in displayed_methods:
+        common_test_cells &= np.isfinite(
+            np.asarray(forecasts[method][split.test_indices], dtype=float)
+        )
+    pooled_test_mean = float(np.mean(test_actual[common_test_cells]))
+    monthly_total_sum_squares = pd.DataFrame({
+        "date": panel.dates[split.test_indices],
+        "total_sum_squares": np.where(
+            common_test_cells,
+            np.square(test_actual - pooled_test_mean),
+            0.0,
+        ).sum(axis=1),
+    })
+    paired_tests = build_paper_paired_tests(
+        monthly=table_monthly,
+        metrics=table_metrics,
+        monthly_total_sum_squares=monthly_total_sum_squares,
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     metrics.to_csv(args.output_dir / "paper_metrics.csv", index=False)
@@ -1336,10 +1587,9 @@ def main() -> None:
     table_attention_support = str(
         eta_contract.get("attention_support", "unspecified")
     )
-    write_risk_table(
-        table_metrics,
+    write_mspe_comparison_table(
+        paired_tests,
         output_dir=args.output_dir,
-        attention_support=table_attention_support,
     )
     monthly.to_csv(args.output_dir / "paper_monthly_losses.csv", index=False)
     rankscore_audit.to_csv(
@@ -1381,6 +1631,10 @@ def main() -> None:
             encoding="utf-8",
         )
     dm.to_csv(args.output_dir / "paper_dm_results.csv", index=False)
+    paired_tests.to_csv(
+        args.output_dir / "paper_paired_tests.csv",
+        index=False,
+    )
     dm.loc[dm["panel"].str.startswith("A:")].to_csv(
         args.output_dir / "paper_dm_har_vara.csv",
         index=False,
@@ -1436,7 +1690,7 @@ def main() -> None:
                 "full_dense_attention_comparison": (
                     table_attention_support == FULL_DENSE_ATTENTION_SUPPORT
                 ),
-                "metrics": "paper_table_metrics.csv",
+                "metrics": "paper_paired_tests.csv",
                 "markdown": "paper_table.md",
                 "latex": "paper_table.tex",
             },
@@ -1474,13 +1728,24 @@ def main() -> None:
                     "A: primary versus alternative bases",
                     "B: incremental VARA within family",
                 ],
-                "losses": ["squared_error", "gaussian_return_crps"],
+                "losses": ["squared_error"],
                 "sampling_unit": "monthly_panel_average_loss",
                 "forecast_horizon": 1,
                 "reported_statistic": "raw_dm_statistic",
                 "reported_p_value": "raw_two_sided_standard_normal",
                 "multiplicity_adjustment": None,
                 "results_file": "paper_dm_results.csv",
+            },
+            "paired_tests": {
+                "comparison_count": len(TABLE_MODEL_PAIRS),
+                "sampling_unit": "monthly_origin",
+                "r2_definition": (
+                    "monthly_sse_over_monthly_tss_about_pooled_test_mean"
+                ),
+                "reported_p_value": "raw_two_sided_student_t",
+                "results_file": "paper_paired_tests.csv",
+                "markdown_table": "paper_table.md",
+                "latex_table": "paper_table.tex",
             },
             "input_contract_fingerprints": file_fingerprints(
                 contract_fingerprint_paths
@@ -1490,7 +1755,7 @@ def main() -> None:
 
     display_columns = [
         "model",
-        "log_risk_rmse",
+        "log_risk_mspe",
         "log_risk_mae",
         "gaussian_return_crps",
         "log_risk_bias",
@@ -1500,7 +1765,7 @@ def main() -> None:
     ]
     print(
         table_metrics.loc[:, display_columns]
-        .sort_values("log_risk_rmse")
+        .sort_values("log_risk_mspe")
         .to_string(index=False)
     )
     if zscore_metrics is not None:

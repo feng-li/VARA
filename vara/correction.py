@@ -75,6 +75,20 @@ class VARAResidualCorrector:
 
     config: RollingVARAConfig = field(default_factory=RollingVARAConfig)
     suffix: str = "+lambda*VARA"
+    model_names: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model_names, Mapping):
+            raise TypeError("model_names must be a mapping.")
+        normalized = {
+            str(base_name): str(vara_name)
+            for base_name, vara_name in self.model_names.items()
+        }
+        if any(not name.strip() for pair in normalized.items() for name in pair):
+            raise ValueError("model_names must contain nonempty names.")
+        if len(set(normalized.values())) != len(normalized):
+            raise ValueError("model_names must contain unique output names.")
+        object.__setattr__(self, "model_names", MappingProxyType(normalized))
 
     def forecast(
         self,
@@ -99,7 +113,7 @@ class VARAResidualCorrector:
             progress_callback=progress_callback,
         )
         return VARAForecast(
-            name=f"{base.name}{self.suffix}",
+            name=self.model_names.get(base.name, f"{base.name}{self.suffix}"),
             base=base,
             correction=np.asarray(result.correction),
             lambda_weights=np.asarray(result.lambda_weights),

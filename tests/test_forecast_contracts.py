@@ -175,6 +175,7 @@ def test_paper_eta_resolves_to_application_effective_slope() -> None:
 
 
 def test_vara_and_execution_configs_validate_current_modes() -> None:
+    assert RollingVARAConfig().response_standardization == "median_mad"
     config = RollingVARAConfig(
         response_standardization="training_zscore",
         eta=PaperEtaConfig(),
