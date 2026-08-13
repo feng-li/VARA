@@ -63,3 +63,44 @@ where:
 - The reusable code lives in the `vara` package and can be imported directly from notebooks or other scripts.
 - The scripts directory is intentionally lightweight; it contains runnable entrypoints rather than a large CLI framework.
 - `data/varying_p.csv` is the small checked-in plotting example that used to live at the repository root.
+
+## Forecasting API
+
+The stable array-first interface is available from `vara.api`. A study receives
+one panel, one trailing validation/test split, static series features, and one or
+more base forecasters. The existing risk runners can enter through
+`PrecomputedForecaster`; `HARRidgeForecaster` is the first native adapter.
+
+```python
+from vara.api import (
+    ExecutionConfig,
+    ForecastStudy,
+    HARRidgeForecaster,
+    PanelData,
+    RiskForecastEvaluator,
+    RollingSplit,
+    StaticFeatureSet,
+    VARAConfig,
+    log_risk_target,
+)
+
+panel = PanelData(
+    target=log_risk_target(returns),
+    dates=dates,
+    series_ids=series_ids,
+    metadata=metadata,
+    fields={"returns": returns},
+)
+study = ForecastStudy(
+    data=panel,
+    split=RollingSplit(validation=60, test=120),
+    features=StaticFeatureSet(feature_matrix, feature_names, feature_provenance),
+    vara=VARAConfig(attention_mode="dense"),
+    evaluator=RiskForecastEvaluator(),
+)
+result = study.run(
+    [HARRidgeForecaster(ridge_candidates=(0.01, 0.1, 1.0))],
+    execution=ExecutionConfig(ray_num_cpus=16),
+)
+result.save("outputs/risk_study")
+```
