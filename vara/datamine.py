@@ -2653,13 +2653,14 @@ def estimate_har_vara_eta(
     *,
     response: np.ndarray,
     feature_matrix: np.ndarray,
-    attention_cache: Any,
+    attention_cache: Any | None,
     attention_top_k: int,
     attention_batch_size: int,
     ridge: float,
     eta_bounds: tuple[float, float],
     eta_grid_size: int,
     eta_local_tolerance: float,
+    attention_mode: str = "topk",
     windows: Sequence[int] = (1, 3, 12),
     zero_own_lag_coefficients: bool = False,
 ) -> tuple[float, dict[str, Any], dict[str, Any]]:
@@ -2679,6 +2680,11 @@ def estimate_har_vara_eta(
         raise ValueError("eta_grid_size must be at least two.")
     if float(eta_local_tolerance) <= 0.0:
         raise ValueError("eta_local_tolerance must be positive.")
+    mode = str(attention_mode)
+    if mode not in {"topk", "dense"}:
+        raise ValueError("attention_mode must be topk or dense.")
+    if mode == "topk" and attention_cache is None:
+        raise ValueError("topk attention requires an attention cache.")
 
     values = np.asarray(response, dtype=float)
     Z = np.asarray(feature_matrix, dtype=float)
@@ -2687,7 +2693,19 @@ def estimate_har_vara_eta(
     def profile(eta_value: float) -> dict[str, Any]:
         key = float(eta_value)
         if key not in profile_cache:
-            if getattr(attention_cache, "mode", "") == "exact-fixed-smallest":
+            if mode == "dense":
+                peer_response = np.asarray(attention_weighted_lags(
+                    jnp.asarray(values),
+                    jnp.asarray(Z),
+                    key,
+                    {"eta_a": 1.0},
+                    batch_size=int(attention_batch_size),
+                    dense_threshold=0,
+                    attention_mode="dense",
+                    attention_top_k=None,
+                    attention_cache=None,
+                ))
+            elif getattr(attention_cache, "mode", "") == "exact-fixed-smallest":
                 peer_response = cached_topk_attention_weighted_lags(
                     values,
                     attention_cache,
@@ -2754,10 +2772,15 @@ def estimate_har_vara_eta(
         "eta_grid_size": int(eta_grid_size),
         "eta_local_tolerance": float(eta_local_tolerance),
         "eta_estimation": "ridge_penalized_concentrated_qmle",
+        "attention_mode": mode,
         "attention_support": (
-            "deterministic_fixed_smallest_scores"
-            if getattr(attention_cache, "mode", "") == "exact-fixed-smallest"
-            else "fixed_smallest_scores"
+            "full_dense_off_diagonal_scores"
+            if mode == "dense"
+            else (
+                "deterministic_fixed_smallest_scores"
+                if getattr(attention_cache, "mode", "") == "exact-fixed-smallest"
+                else "fixed_smallest_scores"
+            )
         ),
     }
     return eta_hat, diagnostics, selected_profile
@@ -2937,6 +2960,7 @@ def rolling_har_vara_corrections(
     zero_own_lag_coefficients: bool = False,
     response_standardization: str = "median_mad",
     progress_callback: Any | None = None,
+    attention_mode: str = "topk",
 ) -> RollingHARVARAResult:
     """Forecast errors using rolling QMLE-estimated HAR--VARA corrections.
 
@@ -2968,8 +2992,13 @@ def rolling_har_vara_corrections(
         raise ValueError("error_window_months must be at least 24.")
     if int(refit_frequency_months) < 1:
         raise ValueError("refit_frequency_months must be positive.")
+    mode = str(attention_mode)
+    if mode not in {"topk", "dense"}:
+        raise ValueError("attention_mode must be topk or dense.")
 
-    if str(attention_cache_mode) == "exact":
+    if mode == "dense":
+        cache = None
+    elif str(attention_cache_mode) == "exact":
         cache = build_fixed_smallest_topk_attention_cache(
             Z,
             top_k=int(attention_top_k),
@@ -3020,6 +3049,7 @@ def rolling_har_vara_corrections(
                 eta_bounds=(float(eta_bounds[0]), float(eta_bounds[1])),
                 eta_grid_size=int(eta_grid_size),
                 eta_local_tolerance=float(eta_local_tolerance),
+                attention_mode=mode,
                 windows=windows,
                 zero_own_lag_coefficients=zero_own_lag_coefficients,
             )
@@ -3035,7 +3065,9 @@ def rolling_har_vara_corrections(
                 "residual_variance_mean": float(
                     np.mean(profile_fit["residual_variance"])
                 ),
-                "attention_top_k": int(attention_top_k),
+                "attention_top_k": (
+                    int(attention_top_k) if mode == "topk" else None
+                ),
                 "own_lag_coefficients_fixed_zero": bool(zero_own_lag_coefficients),
             }
             row.update(eta_diagnostics)
@@ -3055,7 +3087,8 @@ def rolling_har_vara_corrections(
                 progress_callback(dict(row))
             attention_operator = (
                 build_cached_topk_attention_csr(cache, float(eta_hat))
-                if getattr(cache, "mode", "") == "exact-fixed-smallest"
+                if mode == "topk"
+                and getattr(cache, "mode", "") == "exact-fixed-smallest"
                 else None
             )
             state = {
@@ -3091,8 +3124,10 @@ def rolling_har_vara_corrections(
                 {"eta_a": 1.0},
                 batch_size=int(attention_batch_size),
                 dense_threshold=0,
-                attention_mode="topk",
-                attention_top_k=int(attention_top_k),
+                attention_mode=mode,
+                attention_top_k=(
+                    int(attention_top_k) if mode == "topk" else None
+                ),
                 attention_cache=cache,
             ))
         peer_regressors = [peer_matrix[index] for index in range(len(windows))]

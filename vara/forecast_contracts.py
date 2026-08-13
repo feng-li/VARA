@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 TARGET_CONSISTENCY_ATOL = 1e-6
 TARGET_CONSISTENCY_RTOL = 1e-7
 RESPONSE_STANDARDIZATION_CHOICES = frozenset({"median_mad", "training_zscore"})
+ATTENTION_MODE_CHOICES = frozenset({"topk", "dense"})
 ATTENTION_CACHE_MODE_CHOICES = frozenset({"exact", "cluster"})
 
 
@@ -287,6 +288,7 @@ class RollingVARAConfig:
     attention_top_k: int = 500
     attention_cache_mode: str = "exact"
     attention_batch_size: int = 512
+    attention_mode: str = "topk"
     lambda_window_months: int = 24
     lambda_ridge: float = 0.001
     zero_own_lag_coefficients: bool = False
@@ -317,6 +319,9 @@ class RollingVARAConfig:
         )
         ridge = _nonnegative_float(self.ridge, name="ridge")
         attention_top_k = _positive_integer(self.attention_top_k, name="attention_top_k")
+        attention_mode = str(self.attention_mode)
+        if attention_mode not in ATTENTION_MODE_CHOICES:
+            raise ValueError("attention_mode must be topk or dense.")
         cache_mode = str(self.attention_cache_mode)
         if cache_mode not in ATTENTION_CACHE_MODE_CHOICES:
             raise ValueError("attention_cache_mode must be exact or cluster.")
@@ -340,6 +345,7 @@ class RollingVARAConfig:
         object.__setattr__(self, "refit_frequency_months", refit_frequency)
         object.__setattr__(self, "ridge", ridge)
         object.__setattr__(self, "attention_top_k", attention_top_k)
+        object.__setattr__(self, "attention_mode", attention_mode)
         object.__setattr__(self, "attention_cache_mode", cache_mode)
         object.__setattr__(self, "attention_batch_size", attention_batch_size)
         object.__setattr__(self, "lambda_window_months", lambda_window)

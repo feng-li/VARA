@@ -35,7 +35,7 @@ source_workflow:
   executable_config: data/DataMine/full_quality_formula_topk500_exact.yml
   output_dir: outputs/datamine_vara/ew_log_risk_full_formula_topk500_exact_lambda24
   data_dir: data/DataMine
-  return_file: DataMinedLongShortReturnsEW.parquet
+  return_file: DataMinedLongShortReturnsEW_21800.parquet
   metadata_file: DataMinedSignalList.parquet
   weighting: ew
   return_unit: percent

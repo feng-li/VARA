@@ -210,9 +210,16 @@ def test_har_comparator_requires_matching_contract_and_shape(tmp_path) -> None:
     loaded = load_validated_har_vara_forecast(
         output_dir,
         expected_shape=(3, 4),
-        required_contract_fields=required,
+        required_contract_fields={**required, "attention_mode": "topk"},
     )
     np.testing.assert_array_equal(loaded, expected)
+
+    with pytest.raises(ValueError, match="attention_mode"):
+        load_validated_har_vara_forecast(
+            output_dir,
+            expected_shape=(3, 4),
+            required_contract_fields={**required, "attention_mode": "dense"},
+        )
 
     with pytest.raises(ValueError, match="eta_estimation"):
         load_validated_har_vara_forecast(
@@ -357,7 +364,13 @@ def test_garch_runner_forwards_paper_eta_on_effective_scale(
     monkeypatch.setattr(runner, "_dm_table", lambda monthly: pd.DataFrame())
     monkeypatch.setattr(
         "sys.argv",
-        ["run_datamine_garch_vara.py", str(source), str(output)],
+        [
+            "run_datamine_garch_vara.py",
+            str(source),
+            str(output),
+            "--attention-mode",
+            "dense",
+        ],
     )
 
     runner.main()
@@ -372,11 +385,13 @@ def test_garch_runner_forwards_paper_eta_on_effective_scale(
         np.concatenate((split.validation_indices, split.test_indices)),
     )
     assert isinstance(captured_typed["config"], RollingVARAConfig)
+    assert captured_typed["config"].attention_mode == "dense"
     assert isinstance(captured_typed["execution"], ExecutionConfig)
     scale = np.log(component_count)
     assert captured["eta_bounds"] == pytest.approx((-2.0 * scale, 2.0 * scale))
     assert captured["eta_local_tolerance"] == pytest.approx(1e-4 * scale)
     assert captured["response_standardization"] == "median_mad"
+    assert captured["attention_mode"] == "dense"
     saved = pd.read_csv(output / "forecasts" / "fit_summary.csv")
     assert saved.loc[0, "eta_hat"] == pytest.approx(0.8)
     assert saved.loc[0, "eta_effective_slope_hat"] == pytest.approx(0.8 * scale)
@@ -385,6 +400,11 @@ def test_garch_runner_forwards_paper_eta_on_effective_scale(
     contract_path = output / "forecasts" / "contract.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     assert contract["response_standardization"] == "median_mad"
+    assert contract["attention_mode"] == "dense"
+    assert contract["attention_top_k"] is None
+    assert contract["eta_estimation"]["attention_support"] == (
+        "full_dense_off_diagonal_scores"
+    )
     contract.pop("garch_variant")
     contract.pop("upstream_garch_output")
     contract_path.write_text(json.dumps(contract), encoding="utf-8")
@@ -395,6 +415,8 @@ def test_garch_runner_forwards_paper_eta_on_effective_scale(
             str(source),
             str(output),
             "--reuse-saved-correction",
+            "--attention-mode",
+            "dense",
         ],
     )
     runner.main()
@@ -415,6 +437,8 @@ def test_garch_runner_forwards_paper_eta_on_effective_scale(
             str(source),
             str(output),
             "--reuse-saved-correction",
+            "--attention-mode",
+            "dense",
         ],
     )
     with pytest.raises(ValueError, match="different GARCH validation offset"):

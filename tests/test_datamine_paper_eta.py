@@ -159,6 +159,22 @@ def test_eta_contract_records_paper_and_effective_scales() -> None:
     assert contract["attention_support"] == "deterministic_fixed_smallest_scores"
 
 
+def test_dense_attention_support_is_full_and_cache_independent() -> None:
+    assert attention_support_name(
+        "exact",
+        attention_mode="dense",
+    ) == "full_dense_off_diagonal_scores"
+    assert attention_support_name(
+        "cluster",
+        attention_mode="dense",
+    ) == "full_dense_off_diagonal_scores"
+
+
+def test_attention_support_rejects_unknown_attention_mode() -> None:
+    with pytest.raises(ValueError, match="topk or dense"):
+        attention_support_name("exact", attention_mode="uniform")
+
+
 def test_core_fit_summary_is_converted_once_and_preserves_raw_slope() -> None:
     specification = _specification()
     core = _core_fit_summary(specification)

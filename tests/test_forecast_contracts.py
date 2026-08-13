@@ -180,7 +180,9 @@ def test_vara_and_execution_configs_validate_current_modes() -> None:
         eta=PaperEtaConfig(),
     )
     assert config.response_standardization == "training_zscore"
+    assert config.attention_mode == "topk"
     assert config.eta.grid_size == 7
+    assert RollingVARAConfig(attention_mode="dense").attention_mode == "dense"
     assert ExecutionConfig(ray_num_cpus=15, max_cpus_per_task=1).ray_num_cpus == 15
 
     with pytest.raises(ValueError, match="at least 24"):
@@ -189,6 +191,8 @@ def test_vara_and_execution_configs_validate_current_modes() -> None:
         RollingVARAConfig(response_standardization="global")
     with pytest.raises(TypeError, match="ridge must be a real number"):
         RollingVARAConfig(ridge=True)
+    with pytest.raises(ValueError, match="attention_mode must be topk or dense"):
+        RollingVARAConfig(attention_mode="approximate")
     with pytest.raises(TypeError, match="eta lower must be a real number"):
         PaperEtaConfig(lower=False)
     with pytest.raises(ValueError, match="cannot exceed"):

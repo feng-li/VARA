@@ -68,7 +68,7 @@ FORMULA_ENCODINGS = ("svd", "role_embedding")
 @dataclass
 class WorkflowConfig:
     data_dir: Path = Path("data/DataMine")
-    return_file: str = "DataMinedLongShortReturnsEW.parquet"
+    return_file: str = "DataMinedLongShortReturnsEW_21800.parquet"
     metadata_file: str = "DataMinedSignalList.parquet"
     output_dir: Path = Path("outputs/datamine_vara/ew_log_risk_pilot")
     weighting: str = "ew"

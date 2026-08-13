@@ -100,9 +100,14 @@ def load_validated_har_vara_forecast(
         raise FileNotFoundError(forecast_path)
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     for field, expected in required_contract_fields.items():
-        if contract.get(field) != expected:
+        actual = (
+            contract.get(field, "topk")
+            if field == "attention_mode"
+            else contract.get(field)
+        )
+        if actual != expected:
             raise ValueError(
-                f"HAR--VARA comparator has {field}={contract.get(field)!r}; "
+                f"HAR--VARA comparator has {field}={actual!r}; "
                 f"expected {expected!r}."
             )
     forecast = np.load(forecast_path, mmap_mode="r")
@@ -339,6 +344,15 @@ def main() -> None:
     )
     parser.add_argument("--response-clip", type=float, default=8.0)
     parser.add_argument("--ridge", type=float, default=0.001)
+    parser.add_argument(
+        "--attention-mode",
+        choices=("topk", "dense"),
+        default="topk",
+        help=(
+            "Attention support used by VARA. Dense uses every off-diagonal "
+            "component; topk retains the fixed smallest-score support."
+        ),
+    )
     parser.add_argument("--attention-top-k", type=int, default=500)
     parser.add_argument("--attention-cache-mode", choices=("exact", "cluster"), default="exact")
     parser.add_argument("--attention-batch-size", type=int, default=512)
@@ -383,6 +397,9 @@ def main() -> None:
     parser.add_argument("--reuse-saved-correction", action="store_true")
     args = parser.parse_args()
     _validate_ray_resources(args.ray_num_cpus, args.max_cpus_per_task)
+    contract_attention_top_k = (
+        int(args.attention_top_k) if args.attention_mode == "topk" else None
+    )
 
     source_contract = json.loads(
         (args.source_output / "forecasts" / "locked_test_config.json").read_text(
@@ -531,7 +548,10 @@ def main() -> None:
         local_tolerance=args.eta_local_tolerance,
     )
     eta_estimation = eta_specification.contract(
-        attention_support=attention_support_name(args.attention_cache_mode)
+        attention_support=attention_support_name(
+            args.attention_cache_mode,
+            attention_mode=args.attention_mode,
+        )
     )
     split = relative_panel_split(
         panel.dates,
@@ -614,7 +634,8 @@ def main() -> None:
                 "response_standardization": str(args.response_standardization),
                 "response_clip": float(args.response_clip),
                 "ridge": float(args.ridge),
-                "attention_top_k": int(args.attention_top_k),
+                "attention_mode": str(args.attention_mode),
+                "attention_top_k": contract_attention_top_k,
                 "attention_cache_mode": str(args.attention_cache_mode),
                 "attention_batch_size": int(args.attention_batch_size),
                 "eta_estimation": eta_estimation,
@@ -685,6 +706,13 @@ def main() -> None:
         if not contract_path.exists():
             raise FileNotFoundError(contract_path)
         saved_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        saved_attention_mode = saved_contract.get("attention_mode", "topk")
+        if saved_attention_mode != args.attention_mode:
+            raise ValueError(
+                "Saved correction uses "
+                f"attention_mode={saved_attention_mode!r}; requested "
+                f"{args.attention_mode!r}."
+            )
         if saved_contract.get("eta_estimation") != eta_estimation:
             raise ValueError("Saved correction does not match the requested eta estimator.")
         for field, expected in (
@@ -699,7 +727,7 @@ def main() -> None:
             ("response_standardization", str(args.response_standardization)),
             ("response_clip", float(args.response_clip)),
             ("ridge", float(args.ridge)),
-            ("attention_top_k", int(args.attention_top_k)),
+            ("attention_top_k", contract_attention_top_k),
             ("attention_cache_mode", str(args.attention_cache_mode)),
             ("attention_batch_size", int(args.attention_batch_size)),
             ("forecast_scope", "validation_and_test"),
@@ -834,6 +862,7 @@ def main() -> None:
             response_clip=args.response_clip,
             refit_frequency_months=args.refit_frequency_months,
             ridge=args.ridge,
+            attention_mode=args.attention_mode,
             attention_top_k=args.attention_top_k,
             attention_cache_mode=args.attention_cache_mode,
             attention_batch_size=args.attention_batch_size,
@@ -1111,7 +1140,8 @@ def main() -> None:
         "response_standardization": args.response_standardization,
         "response_clip": args.response_clip,
         "ridge": args.ridge,
-        "attention_top_k": args.attention_top_k,
+        "attention_mode": args.attention_mode,
+        "attention_top_k": contract_attention_top_k,
         "attention_cache_mode": args.attention_cache_mode,
         "attention_batch_size": args.attention_batch_size,
         "eta_estimation": eta_estimation,

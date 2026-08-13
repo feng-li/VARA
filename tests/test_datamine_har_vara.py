@@ -9,6 +9,12 @@ import pytest
 
 import scripts.run_datamine_har_vara as runner
 import vara.datamine_vara_runner as vara_runner
+from vara.attention import (
+    attention_weighted_lags,
+    build_fixed_smallest_topk_attention_cache,
+    cached_topk_attention_weighted_lags,
+)
+from vara.datamine import estimate_har_vara_eta
 
 from scripts.run_datamine_har_vara import (
     HAR_VARA_LAMBDA_MODEL,
@@ -164,6 +170,141 @@ def _small_rolling_kwargs():
         "eta_local_tolerance": 0.05,
         "zero_own_lag_coefficients": False,
     }
+
+
+@pytest.mark.parametrize("eta", [-0.8, 0.0, 0.6])
+def test_dense_attention_matches_full_off_diagonal_topk(eta) -> None:
+    import jax.numpy as jnp
+
+    rng = np.random.default_rng(41)
+    component_count = 7
+    features = rng.normal(size=(component_count, 4))
+    features /= np.linalg.norm(features, axis=1, keepdims=True)
+    lagged = rng.normal(size=(13, component_count))
+    cache = build_fixed_smallest_topk_attention_cache(
+        features,
+        top_k=component_count - 1,
+        batch_size=3,
+    )
+
+    dense = np.asarray(attention_weighted_lags(
+        jnp.asarray(lagged),
+        jnp.asarray(features),
+        eta,
+        {"eta_a": 1.0},
+        batch_size=3,
+        dense_threshold=0,
+        attention_mode="dense",
+    ))
+    full_support_topk = cached_topk_attention_weighted_lags(
+        lagged,
+        cache,
+        eta,
+    )
+
+    np.testing.assert_allclose(
+        dense,
+        full_support_topk,
+        rtol=2e-6,
+        atol=2e-6,
+    )
+
+
+def test_dense_eta_profile_matches_full_support_topk() -> None:
+    rng = np.random.default_rng(101)
+    component_count = 6
+    response = rng.normal(size=(40, component_count))
+    features = rng.normal(size=(component_count, 4))
+    features /= np.linalg.norm(features, axis=1, keepdims=True)
+    cache = build_fixed_smallest_topk_attention_cache(
+        features,
+        top_k=component_count - 1,
+        batch_size=3,
+    )
+    common = {
+        "response": response,
+        "feature_matrix": features,
+        "attention_top_k": component_count - 1,
+        "attention_batch_size": 3,
+        "ridge": 0.01,
+        "eta_bounds": (-1.0, 1.0),
+        "eta_grid_size": 5,
+        "eta_local_tolerance": 0.01,
+    }
+
+    topk_eta, topk_diagnostics, topk_fit = estimate_har_vara_eta(
+        **common,
+        attention_cache=cache,
+        attention_mode="topk",
+    )
+    dense_eta, dense_diagnostics, dense_fit = estimate_har_vara_eta(
+        **common,
+        attention_cache=None,
+        attention_mode="dense",
+    )
+
+    assert dense_eta == pytest.approx(topk_eta, abs=0.01)
+    assert dense_diagnostics["eta_objective"] == pytest.approx(
+        topk_diagnostics["eta_objective"],
+        abs=1e-5,
+    )
+    np.testing.assert_allclose(
+        dense_fit["coefficients"],
+        topk_fit["coefficients"],
+        rtol=2e-5,
+        atol=2e-5,
+    )
+    assert dense_diagnostics["attention_mode"] == "dense"
+    assert (
+        dense_diagnostics["attention_support"]
+        == "full_dense_off_diagonal_scores"
+    )
+
+
+def test_dense_ray_refits_match_sequential_without_building_topk_cache(
+    monkeypatch,
+) -> None:
+    kwargs = _small_rolling_kwargs()
+    kwargs["attention_mode"] = "dense"
+    sequential = runner.rolling_har_vara_corrections(**kwargs)
+
+    def unexpected_cache(*args, **kwargs):
+        raise AssertionError("dense attention must not build a top-k cache")
+
+    monkeypatch.setattr(
+        vara_runner,
+        "_build_shared_attention_cache_arrays",
+        unexpected_cache,
+    )
+    parallel, execution = runner.rolling_har_vara_corrections_ray(
+        **kwargs,
+        ray_num_cpus=3,
+        max_cpus_per_task=1,
+        ray_module=_FakeRay(),
+    )
+
+    np.testing.assert_allclose(
+        parallel.standardized_forecast,
+        sequential.standardized_forecast,
+        equal_nan=True,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        parallel.correction,
+        sequential.correction,
+        equal_nan=True,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_array_equal(parallel.refit_index, sequential.refit_index)
+    pd.testing.assert_frame_equal(parallel.fit_summary, sequential.fit_summary)
+    assert parallel.fit_summary["attention_mode"].eq("dense").all()
+    assert parallel.fit_summary["attention_top_k"].isna().all()
+    assert parallel.fit_summary["attention_support"].eq(
+        "full_dense_off_diagonal_scores"
+    ).all()
+    assert execution["backend"] == "ray"
 
 
 @pytest.mark.parametrize(
@@ -365,6 +506,8 @@ def test_har_runner_forwards_paper_eta_on_effective_scale(
             str(output),
             "--response-standardization",
             "training_zscore",
+            "--attention-mode",
+            "dense",
         ],
     )
 
@@ -374,6 +517,7 @@ def test_har_runner_forwards_paper_eta_on_effective_scale(
     assert captured["eta_bounds"] == pytest.approx((-2.0 * scale, 2.0 * scale))
     assert captured["eta_local_tolerance"] == pytest.approx(1e-4 * scale)
     assert captured["response_standardization"] == "training_zscore"
+    assert captured["attention_mode"] == "dense"
     saved = pd.read_csv(output / "forecasts" / "fit_summary.csv")
     assert saved.loc[0, "eta_hat"] == pytest.approx(0.8)
     assert saved.loc[0, "eta_effective_slope_hat"] == pytest.approx(0.8 * scale)
@@ -383,6 +527,11 @@ def test_har_runner_forwards_paper_eta_on_effective_scale(
     )
     assert initial_contract["response_standardization"] == "training_zscore"
     assert initial_contract["rolling_refit_execution"]["backend"] == "sequential"
+    assert initial_contract["attention_mode"] == "dense"
+    assert initial_contract["attention_top_k"] is None
+    assert initial_contract["eta_estimation"]["attention_support"] == (
+        "full_dense_off_diagonal_scores"
+    )
 
     def unexpected_refit(**kwargs):
         raise AssertionError("Reuse must not refit or reconvert eta.")
@@ -398,6 +547,8 @@ def test_har_runner_forwards_paper_eta_on_effective_scale(
             "--reuse-saved-correction",
             "--response-standardization",
             "training_zscore",
+            "--attention-mode",
+            "dense",
             "--ray-num-cpus",
             "2",
         ],
@@ -421,6 +572,22 @@ def test_har_runner_forwards_paper_eta_on_effective_scale(
             str(source),
             str(output),
             "--reuse-saved-correction",
+            "--response-standardization",
+            "training_zscore",
+        ],
+    )
+    with pytest.raises(ValueError, match="attention_mode"):
+        runner.main()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_datamine_har_vara.py",
+            str(source),
+            str(output),
+            "--reuse-saved-correction",
+            "--attention-mode",
+            "dense",
         ],
     )
     with pytest.raises(ValueError, match="response_standardization"):
@@ -435,6 +602,8 @@ def test_har_runner_forwards_paper_eta_on_effective_scale(
             "--reuse-saved-correction",
             "--response-standardization",
             "training_zscore",
+            "--attention-mode",
+            "dense",
         ],
     )
     np.save(source / "baseline" / "baseline_error.npy", 2.0 * ones)

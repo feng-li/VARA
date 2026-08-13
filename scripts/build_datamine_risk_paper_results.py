@@ -87,6 +87,161 @@ TABLE_METHOD_LATEX_LABELS = {
         r"GARCH(1,1)--$t$ + $\lambda^\ast\mathrm{VARA}$"
     ),
 }
+FULL_DENSE_ATTENTION_SUPPORT = "full_dense_off_diagonal_scores"
+
+
+def render_risk_table(
+    metrics: pd.DataFrame,
+    *,
+    attention_support: str,
+) -> tuple[str, str]:
+    """Render the original-scale ten-method comparison as Markdown and LaTeX.
+
+    The displayed order and within-family emphasis match Table 5: lower MSE
+    and larger absolute R2 and RankScore are preferred. Exact ties are bolded
+    on both rows.
+    """
+    source_columns = (
+        "log_risk_rmse",
+        "absolute_r2",
+        "rank_score",
+    )
+    metric_columns = ("log_risk_mse", "absolute_r2", "rank_score")
+    required = {"model", *source_columns}
+    missing = sorted(required.difference(metrics.columns))
+    if missing:
+        raise ValueError(
+            "Risk table rendering is missing columns: " + ", ".join(missing)
+        )
+    if metrics["model"].duplicated().any():
+        raise ValueError("Risk table rendering requires one row per model.")
+    indexed = metrics.set_index("model")
+    if set(indexed.index) != set(TABLE_METHODS):
+        raise ValueError("Risk table rendering has the wrong method set.")
+    source_values = indexed.loc[list(TABLE_METHODS), list(source_columns)].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    values = source_values.loc[:, ["absolute_r2", "rank_score"]].copy()
+    values.insert(0, "log_risk_mse", np.square(source_values["log_risk_rmse"]))
+    if not np.isfinite(values.to_numpy(dtype=float)).all():
+        raise ValueError("Risk table rendering requires finite metric values.")
+
+    dense_attention = str(attention_support) == FULL_DENSE_ATTENTION_SUPPORT
+    if dense_attention:
+        markdown_title = "Parallel full-dense-attention Table 5 comparison"
+        caption = (
+            "Parallel full-dense-attention comparison for the Accounting-Signal "
+            "Risk application. Each family reports its base forecast followed by "
+            "the forecast with the refit-specific pooled LSE-weighted VARA "
+            "correction. Every VARA correction uses all off-diagonal component "
+            "scores. Within each pair, bold entries identify lower MSE or "
+            "higher absolute R2 and RankScore."
+        )
+        label = "tab:datamine_forecasting_results_full_dense_attention"
+    else:
+        markdown_title = "Standalone Table 5 comparison"
+        caption = (
+            "Standalone Table 5 comparison for the Accounting-Signal Risk "
+            "application. Each family reports its base forecast followed by the "
+            "forecast with the refit-specific pooled LSE-weighted VARA correction. "
+            "Within each pair, bold entries identify lower MSE or higher "
+            "absolute R2 and RankScore."
+        )
+        label = "tab:datamine_forecasting_results_table10_comparison"
+
+    minimize = {"log_risk_mse"}
+    maximize = {"absolute_r2", "rank_score"}
+
+    def preferred(model_position: int, column: str) -> bool:
+        pair_start = 2 * (model_position // 2)
+        pair = values.iloc[pair_start : pair_start + 2][column].to_numpy(dtype=float)
+        current = float(values.iloc[model_position][column])
+        if column in minimize:
+            return current == float(np.min(pair))
+        if column in maximize:
+            return current == float(np.max(pair))
+        raise ValueError(f"Unknown display preference for column {column!r}.")
+
+    formats = {
+        "log_risk_mse": ".4f",
+        "absolute_r2": ".4f",
+        "rank_score": ".2f",
+    }
+
+    def display_value(column: str, value: float) -> float:
+        return 100.0 * value if column == "absolute_r2" else value
+
+    markdown = [
+        f"### {markdown_title}",
+        "",
+        caption,
+        "",
+        "| Method | Log-risk MSE | Absolute R2 (%) | RankScore (%) |",
+        "|---|---:|---:|---:|",
+    ]
+    latex = [
+        r"\begin{table}[!htbp]",
+        r"\centering",
+        r"\small",
+        rf"\caption{{{caption}}}",
+        rf"\label{{{label}}}",
+        r"\resizebox{\textwidth}{!}{%",
+        r"\begin{tabular}{lrrr}",
+        r"\toprule",
+        r"Method & Log-risk MSE & $R^2_{\mathrm{abs}}$ (\%) & RankScore (\%) \\",
+        r"\midrule",
+    ]
+    for position, model in enumerate(TABLE_METHODS):
+        row = values.loc[model]
+        markdown_cells: list[str] = []
+        latex_cells: list[str] = []
+        for column in metric_columns:
+            value = display_value(column, float(row[column]))
+            rendered = format(value, formats[column])
+            if preferred(position, column):
+                markdown_cells.append(f"**{rendered}**")
+                latex_cells.append(rf"\textbf{{{rendered}}}")
+            else:
+                markdown_cells.append(rendered)
+                latex_cells.append(rendered)
+        markdown.append(
+            f"| {TABLE_METHOD_LABELS[model]} | "
+            + " | ".join(markdown_cells)
+            + " |"
+        )
+        latex.append(
+            f"{TABLE_METHOD_LATEX_LABELS[model]} & "
+            + " & ".join(latex_cells)
+            + r" \\"
+        )
+        if position % 2 == 1 and position != len(TABLE_METHODS) - 1:
+            latex.append(r"\addlinespace")
+    latex.extend([
+        r"\bottomrule",
+        r"\end{tabular}%",
+        r"}",
+        r"\end{table}",
+    ])
+    return "\n".join(markdown) + "\n", "\n".join(latex) + "\n"
+
+
+def write_risk_table(
+    metrics: pd.DataFrame,
+    *,
+    output_dir: Path,
+    attention_support: str,
+) -> tuple[Path, Path]:
+    """Write the standalone original-scale comparison beside its CSV."""
+    markdown, latex = render_risk_table(
+        metrics,
+        attention_support=attention_support,
+    )
+    markdown_path = Path(output_dir) / "paper_table.md"
+    latex_path = Path(output_dir) / "paper_table.tex"
+    markdown_path.write_text(markdown, encoding="utf-8")
+    latex_path.write_text(latex, encoding="utf-8")
+    return markdown_path, latex_path
 
 
 def _validate_selectable_contract_field(
@@ -278,10 +433,7 @@ def render_training_zscore_table(metrics: pd.DataFrame) -> tuple[str, str]:
     """Render the optional z-score table as Markdown and standalone LaTeX."""
     required = {
         "model",
-        "z_log_risk_mse",
         "z_log_risk_rmse",
-        "z_log_risk_mae",
-        "z_log_risk_bias",
         "z_absolute_r2",
         "rank_score",
     }
@@ -296,8 +448,8 @@ def render_training_zscore_table(metrics: pd.DataFrame) -> tuple[str, str]:
         raise ValueError("Training-z-score table rendering has the wrong method set.")
 
     markdown = [
-        "| Method | z-MSE | z-RMSE | z-MAE | z-Bias | z-absolute R2 (%) | RankScore (%) |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Method | z-RMSE | z-absolute R2 (%) | RankScore (%) |",
+        "|---|---:|---:|---:|",
     ]
     latex = [
         r"\begin{table}[!htbp]",
@@ -308,40 +460,32 @@ def render_training_zscore_table(metrics: pd.DataFrame) -> tuple[str, str]:
             r"application. Forecasts are identical to Table~\ref{tab:datamine_forecasting_results}; "
             r"only their evaluation scale changes. For each series, the mean and population "
             r"standard deviation are estimated from the fixed January 1988--December 2007 "
-            r"training window. MSE, RMSE, MAE, and bias use the resulting standardized log-risk "
-            r"errors; $R^2_{\mathrm{abs}}$ is calculated after applying the same transformation "
+            r"training window. RMSE uses the resulting standardized log-risk errors; "
+            r"$R^2_{\mathrm{abs}}$ is calculated after applying the same transformation "
             r"to the observations, and RankScore uses monthly strict wins based on "
-            r"cross-sectional mean standardized absolute error. CRPS is omitted because it is "
-            r"defined on the original return scale.}"
+            r"cross-sectional mean standardized absolute error.}"
         ),
         r"\label{tab:datamine_forecasting_results_training_zscore}",
         r"\resizebox{\textwidth}{!}{%",
-        r"\begin{tabular}{lrrrrrr}",
+        r"\begin{tabular}{lrrr}",
         r"\toprule",
-        (
-            r"Method & z-MSE & z-RMSE & z-MAE & z-Bias & "
-            r"$z$-$R^2_{\mathrm{abs}}$ (\%) & RankScore (\%) \\"
-        ),
+        r"Method & z-RMSE & $z$-$R^2_{\mathrm{abs}}$ (\%) & RankScore (\%) \\",
         r"\midrule",
     ]
     for model in TABLE_METHODS:
         row = indexed.loc[model]
         values = (
-            float(row["z_log_risk_mse"]),
             float(row["z_log_risk_rmse"]),
-            float(row["z_log_risk_mae"]),
-            float(row["z_log_risk_bias"]),
             100.0 * float(row["z_absolute_r2"]),
             float(row["rank_score"]),
         )
         markdown.append(
-            f"| {TABLE_METHOD_LABELS[model]} | {values[0]:.6f} | {values[1]:.6f} | "
-            f"{values[2]:.6f} | {values[3]:.6f} | {values[4]:.4f} | {values[5]:.2f} |"
+            f"| {TABLE_METHOD_LABELS[model]} | {values[0]:.6f} | "
+            f"{values[1]:.4f} | {values[2]:.2f} |"
         )
         latex.append(
             f"{TABLE_METHOD_LATEX_LABELS[model]} & {values[0]:.6f} & "
-            f"{values[1]:.6f} & {values[2]:.6f} & {values[3]:.6f} & "
-            f"{values[4]:.4f} & {values[5]:.2f} \\\\"
+            f"{values[1]:.4f} & {values[2]:.2f} \\\\"
         )
     latex.extend([
         r"\bottomrule",
@@ -1187,6 +1331,16 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     metrics.to_csv(args.output_dir / "paper_metrics.csv", index=False)
     table_metrics.to_csv(args.output_dir / "paper_table_metrics.csv", index=False)
+    eta_contract = har_contract["eta_estimation"]
+    assert isinstance(eta_contract, dict)
+    table_attention_support = str(
+        eta_contract.get("attention_support", "unspecified")
+    )
+    write_risk_table(
+        table_metrics,
+        output_dir=args.output_dir,
+        attention_support=table_attention_support,
+    )
     monthly.to_csv(args.output_dir / "paper_monthly_losses.csv", index=False)
     rankscore_audit.to_csv(
         args.output_dir / "paper_table_rankscore_by_month.csv",
@@ -1277,6 +1431,15 @@ def main() -> None:
                 args.lightgbm_response_normalization
             ),
             "table_methods": list(displayed_methods),
+            "standalone_table": {
+                "attention_support": table_attention_support,
+                "full_dense_attention_comparison": (
+                    table_attention_support == FULL_DENSE_ATTENTION_SUPPORT
+                ),
+                "metrics": "paper_table_metrics.csv",
+                "markdown": "paper_table.md",
+                "latex": "paper_table.tex",
+            },
             "training_zscore_table": (
                 {"enabled": False}
                 if zscore_contract is None

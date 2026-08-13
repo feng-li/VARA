@@ -336,8 +336,23 @@ class PaperEtaSpecification:
         }
 
 
-def attention_support_name(cache_mode: str) -> str:
-    """Return the application contract name for its fixed sparse support."""
+def attention_support_name(
+    cache_mode: str,
+    *,
+    attention_mode: str = "topk",
+) -> str:
+    """Return the application-contract name for the selected support.
+
+    ``attention_mode`` defaults to ``"topk"`` so existing application code
+    and persisted-contract tests retain their original sparse-support meaning.
+    Dense attention always uses every off-diagonal score and therefore has no
+    cache-dependent support.
+    """
+    mode = str(attention_mode)
+    if mode == "dense":
+        return "full_dense_off_diagonal_scores"
+    if mode != "topk":
+        raise ValueError("attention_mode must be topk or dense.")
     return (
         "deterministic_fixed_smallest_scores"
         if str(cache_mode) == "exact"

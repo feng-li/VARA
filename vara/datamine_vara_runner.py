@@ -183,8 +183,8 @@ def _build_shared_attention_cache_arrays(
 def _fit_har_vara_refit_block(
     baseline_errors: np.ndarray,
     feature_matrix: np.ndarray,
-    attention_indices: np.ndarray,
-    attention_scores: np.ndarray,
+    attention_indices: np.ndarray | None,
+    attention_scores: np.ndarray | None,
     evaluation_indices: np.ndarray,
     *,
     block_position: int,
@@ -198,9 +198,16 @@ def _fit_har_vara_refit_block(
     eta_grid_size: int,
     eta_local_tolerance: float,
     zero_own_lag_coefficients: bool,
+    attention_mode: str = "topk",
 ) -> dict[str, Any]:
     """Fit one independent rolling-refit block and return only its target rows."""
-    from .attention import TopKAttentionCache, build_cached_topk_attention_csr
+    import jax.numpy as jnp
+
+    from .attention import (
+        TopKAttentionCache,
+        attention_weighted_lags,
+        build_cached_topk_attention_csr,
+    )
 
     try:
         errors = np.asarray(baseline_errors)
@@ -215,17 +222,23 @@ def _fit_har_vara_refit_block(
                 "baseline_errors and feature_matrix have inconsistent shapes."
             )
 
-        indices = np.asarray(attention_indices, dtype=np.int32)
-        scores = np.asarray(attention_scores, dtype=np.float64)
-        if indices.shape != scores.shape or indices.shape[0] != errors.shape[1]:
-            raise ValueError("Shared attention cache arrays have inconsistent shapes.")
-        cache = TopKAttentionCache(
-            indices_pos=indices,
-            scores_pos=scores,
-            indices_neg=indices,
-            scores_neg=scores,
-            mode="exact-fixed-smallest",
-        )
+        mode = str(attention_mode)
+        if mode not in {"topk", "dense"}:
+            raise ValueError("attention_mode must be topk or dense.")
+        if mode == "topk":
+            indices = np.asarray(attention_indices, dtype=np.int32)
+            scores = np.asarray(attention_scores, dtype=np.float64)
+            if indices.shape != scores.shape or indices.shape[0] != errors.shape[1]:
+                raise ValueError("Shared attention cache arrays have inconsistent shapes.")
+            cache = TopKAttentionCache(
+                indices_pos=indices,
+                scores_pos=scores,
+                indices_neg=indices,
+                scores_neg=scores,
+                mode="exact-fixed-smallest",
+            )
+        else:
+            cache = None
 
         windows = (1, 3, 12)
         origin_index = int(evaluation[0]) - 1
@@ -255,6 +268,7 @@ def _fit_har_vara_refit_block(
             eta_bounds=(float(eta_bounds[0]), float(eta_bounds[1])),
             eta_grid_size=int(eta_grid_size),
             eta_local_tolerance=float(eta_local_tolerance),
+            attention_mode=mode,
             windows=windows,
             zero_own_lag_coefficients=bool(zero_own_lag_coefficients),
         )
@@ -270,7 +284,9 @@ def _fit_har_vara_refit_block(
             "residual_variance_mean": float(
                 np.mean(profile_fit["residual_variance"])
             ),
-            "attention_top_k": int(attention_top_k),
+            "attention_top_k": (
+                int(attention_top_k) if mode == "topk" else None
+            ),
             "own_lag_coefficients_fixed_zero": bool(zero_own_lag_coefficients),
         }
         row.update(eta_diagnostics)
@@ -286,8 +302,11 @@ def _fit_har_vara_refit_block(
                 np.max(np.abs(coefficients[:, index]))
             )
 
-        attention_operator = build_cached_topk_attention_csr(cache, float(eta_hat))
-        calculation_dtype = np.result_type(scores.dtype, np.float32)
+        attention_operator = (
+            build_cached_topk_attention_csr(cache, float(eta_hat))
+            if mode == "topk"
+            else None
+        )
         standardized = np.empty((len(evaluation), errors.shape[1]), dtype=float)
         correction = np.empty_like(standardized)
         for target_position, target_index in enumerate(evaluation):
@@ -306,10 +325,24 @@ def _fit_har_vara_refit_block(
                 np.mean(recent[-window:], axis=0) for window in windows
             ]
             own_matrix = np.stack(own_regressors, axis=0)
-            peer_matrix = np.asarray(
-                attention_operator
-                @ own_matrix.astype(calculation_dtype, copy=False).T
-            ).T
+            if attention_operator is not None:
+                calculation_dtype = np.result_type(scores.dtype, np.float32)
+                peer_matrix = np.asarray(
+                    attention_operator
+                    @ own_matrix.astype(calculation_dtype, copy=False).T
+                ).T
+            else:
+                peer_matrix = np.asarray(attention_weighted_lags(
+                    jnp.asarray(own_matrix),
+                    jnp.asarray(Z),
+                    float(eta_hat),
+                    {"eta_a": 1.0},
+                    batch_size=int(attention_batch_size),
+                    dense_threshold=0,
+                    attention_mode="dense",
+                    attention_top_k=None,
+                    attention_cache=None,
+                ))
             peer_regressors = [
                 peer_matrix[index] for index in range(len(windows))
             ]
@@ -411,11 +444,15 @@ def rolling_har_vara_corrections_ray(
     ray_debug: bool = False,
     progress_callback: Any | None = None,
     ray_module: Any | None = None,
+    attention_mode: str = "topk",
 ) -> tuple[RollingHARVARAResult, dict[str, Any]]:
     """Run independent rolling-refit blocks as Ray tasks."""
     _validate_ray_resources(ray_num_cpus, max_cpus_per_task)
     if int(ray_num_cpus) <= 1:
         raise ValueError("Ray rolling refits require ray_num_cpus greater than one.")
+    mode = str(attention_mode)
+    if mode not in {"topk", "dense"}:
+        raise ValueError("attention_mode must be topk or dense.")
     errors = np.asarray(baseline_errors)
     Z = np.asarray(feature_matrix, dtype=float)
     if errors.ndim != 2 or Z.ndim != 2 or errors.shape[1] != Z.shape[0]:
@@ -462,16 +499,24 @@ def rolling_har_vara_corrections_ray(
             f"max_cpus_per_task={int(max_cpus_per_task)}",
             flush=True,
         )
-        attention_indices, attention_scores = _build_shared_attention_cache_arrays(
-            Z,
-            attention_top_k=int(attention_top_k),
-            attention_cache_mode=str(attention_cache_mode),
-            attention_batch_size=int(attention_batch_size),
-        )
+        if mode == "topk":
+            attention_indices, attention_scores = _build_shared_attention_cache_arrays(
+                Z,
+                attention_top_k=int(attention_top_k),
+                attention_cache_mode=str(attention_cache_mode),
+                attention_batch_size=int(attention_batch_size),
+            )
+        else:
+            attention_indices = None
+            attention_scores = None
         errors_ref = ray.put(errors)
         features_ref = ray.put(Z)
-        attention_indices_ref = ray.put(attention_indices)
-        attention_scores_ref = ray.put(attention_scores)
+        attention_indices_ref = (
+            ray.put(attention_indices) if attention_indices is not None else None
+        )
+        attention_scores_ref = (
+            ray.put(attention_scores) if attention_scores is not None else None
+        )
         remote_refit = ray.remote(
             num_cpus=int(max_cpus_per_task),
             runtime_env=worker_runtime_env,
@@ -500,6 +545,7 @@ def rolling_har_vara_corrections_ray(
                 eta_grid_size=int(eta_grid_size),
                 eta_local_tolerance=float(eta_local_tolerance),
                 zero_own_lag_coefficients=bool(zero_own_lag_coefficients),
+                attention_mode=mode,
             )
             futures.append(future)
             pending.append(future)
@@ -596,6 +642,7 @@ def fit_rolling_vara_family(
     ray_debug: bool = False,
     ray_module: Any | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    attention_mode: str = "topk",
 ) -> RollingVARAFamilyResult:
     """Fit one common rolling VARA correction and its bounded-LSE family.
 
@@ -604,6 +651,9 @@ def fit_rolling_vara_family(
     floating-point representation remain authoritative.
     """
     _validate_ray_resources(ray_num_cpus, max_cpus_per_task)
+    mode = str(attention_mode)
+    if mode not in {"topk", "dense"}:
+        raise ValueError("attention_mode must be topk or dense.")
     base = np.asarray(base_forecast, dtype=float)
     error = np.asarray(base_error)
     if base.ndim != 2 or error.ndim != 2 or base.shape != error.shape:
@@ -621,6 +671,7 @@ def fit_rolling_vara_family(
         "attention_top_k": attention_top_k,
         "attention_cache_mode": attention_cache_mode,
         "attention_batch_size": attention_batch_size,
+        "attention_mode": mode,
         "eta_bounds": eta_bounds,
         "eta_grid_size": eta_grid_size,
         "eta_local_tolerance": eta_local_tolerance,
@@ -697,6 +748,7 @@ def run_vara_family(
         response_clip=config.response_clip,
         refit_frequency_months=config.refit_frequency_months,
         ridge=config.ridge,
+        attention_mode=config.attention_mode,
         attention_top_k=config.attention_top_k,
         attention_cache_mode=config.attention_cache_mode,
         attention_batch_size=config.attention_batch_size,

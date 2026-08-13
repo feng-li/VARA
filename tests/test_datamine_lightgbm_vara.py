@@ -551,6 +551,8 @@ def test_lightgbm_main_forwards_typed_vara_request_and_preserves_outputs(
             "12",
             "--ridge",
             "0.004",
+            "--attention-mode",
+            "dense",
             "--attention-top-k",
             "3",
             "--attention-cache-mode",
@@ -606,6 +608,7 @@ def test_lightgbm_main_forwards_typed_vara_request_and_preserves_outputs(
     assert config.response_clip == pytest.approx(6.5)
     assert config.refit_frequency_months == 12
     assert config.ridge == pytest.approx(0.004)
+    assert config.attention_mode == "dense"
     assert config.attention_top_k == 3
     assert config.attention_cache_mode == "cluster"
     assert config.attention_batch_size == 16
@@ -669,4 +672,9 @@ def test_lightgbm_main_forwards_typed_vara_request_and_preserves_outputs(
     }
     assert contract["response_standardization"] == "training_zscore"
     assert contract["rolling_refit_execution"]["backend"] == "ray"
+    assert contract["attention_mode"] == "dense"
+    assert contract["attention_top_k"] is None
+    assert contract["eta_estimation"]["attention_support"] == (
+        "full_dense_off_diagonal_scores"
+    )
     assert contract["eta_estimation"]["bounds"] == [-1.5, 1.25]
