@@ -2664,6 +2664,8 @@ def estimate_har_vara_eta(
     attention_mode: str = "topk",
     windows: Sequence[int] = (1, 3, 12),
     zero_own_lag_coefficients: bool = False,
+    pilot_size: int | None = None,
+    pilot_seed: int = 20260924,
 ) -> tuple[float, dict[str, Any], dict[str, Any]]:
     """Estimate eta by the HAR-specific concentrated quasi-likelihood."""
     import jax.numpy as jnp
@@ -2681,6 +2683,8 @@ def estimate_har_vara_eta(
         raise ValueError("eta_grid_size must be at least two.")
     if float(eta_local_tolerance) <= 0.0:
         raise ValueError("eta_local_tolerance must be positive.")
+    if int(attention_batch_size) < 1:
+        raise ValueError("attention_batch_size must be positive.")
     mode = str(attention_mode)
     if mode not in {"topk", "dense"}:
         raise ValueError("attention_mode must be topk or dense.")
@@ -2689,12 +2693,33 @@ def estimate_har_vara_eta(
 
     values = np.asarray(response, dtype=float)
     Z = np.asarray(feature_matrix, dtype=float)
+    if pilot_size is not None:
+        if isinstance(pilot_size, (bool, np.bool_)) or not isinstance(pilot_size, (int, np.integer)) or pilot_size < 1:
+            raise ValueError("pilot_size must be a positive integer or None")
+        if mode != "dense":
+            raise ValueError("Pilot subsampling requires dense attention")
+    if isinstance(pilot_seed, (bool, np.bool_)) or not isinstance(pilot_seed, (int, np.integer)) or pilot_seed < 0:
+        raise ValueError("pilot_seed must be a nonnegative integer")
+    p = values.shape[1]
+    indices = (np.arange(p) if pilot_size is None or pilot_size >= p else
+               np.sort(np.random.default_rng(pilot_seed).choice(p, pilot_size, replace=False)))
+    subsampled = len(indices) < p
     profile_cache: dict[float, dict[str, Any]] = {}
 
     def profile(eta_value: float) -> dict[str, Any]:
         key = float(eta_value)
         if key not in profile_cache:
-            if mode == "dense":
+            if subsampled:
+                from scipy.special import softmax
+
+                # Sample response equations, never the source columns/neighbors.
+                peer_response = np.empty((len(values), len(indices)), dtype=float)
+                for start in range(0, len(indices), int(attention_batch_size)):
+                    ids = indices[start:start + int(attention_batch_size)]
+                    scores = key * (Z[ids] @ Z.T)
+                    scores[np.arange(len(ids)), ids] = -np.inf
+                    peer_response[:, start:start + len(ids)] = values @ softmax(scores, axis=1).T
+            elif mode == "dense":
                 peer_response = np.asarray(attention_weighted_lags(
                     jnp.asarray(values),
                     jnp.asarray(Z),
@@ -2725,7 +2750,7 @@ def estimate_har_vara_eta(
                     attention_cache=attention_cache,
                 ))
             profile_cache[key] = _fit_har_vara_profile(
-                values,
+                values[:, indices] if subsampled else values,
                 peer_response,
                 windows=windows,
                 ridge=ridge,
@@ -2761,6 +2786,10 @@ def estimate_har_vara_eta(
     selected_profile = profile(eta_hat)
     tolerance = max(float(eta_local_tolerance), 1e-10)
     diagnostics = {
+        "pilot_size": int(len(indices)),
+        "pilot_seed": int(pilot_seed),
+        "pilot_indices": json.dumps(indices.tolist()),
+        "pilot_sampling": "fixed_uniform_without_replacement" if subsampled else "full_panel",
         "eta_hat": eta_hat,
         "eta_on_boundary": bool(
             abs(eta_hat - lower) <= tolerance or abs(eta_hat - upper) <= tolerance
@@ -2784,6 +2813,14 @@ def estimate_har_vara_eta(
             )
         ),
     }
+    if subsampled:
+        # Only this final fit evaluates all component equations.
+        peers = np.asarray(attention_weighted_lags(
+            jnp.asarray(values), jnp.asarray(Z), eta_hat, {"eta_a": 1.0},
+            batch_size=int(attention_batch_size), dense_threshold=0, attention_mode="dense"))
+        selected_profile = _fit_har_vara_profile(
+            values, peers, windows=windows, ridge=ridge,
+            zero_own_lag_coefficients=zero_own_lag_coefficients)
     return eta_hat, diagnostics, selected_profile
 
 
@@ -2962,6 +2999,8 @@ def rolling_har_vara_corrections(
     response_standardization: str = "median_mad",
     progress_callback: Any | None = None,
     attention_mode: str = "topk",
+    pilot_size: int | None = None,
+    pilot_seed: int = 20260924,
 ) -> RollingHARVARAResult:
     """Forecast errors using rolling QMLE-estimated HAR--VARA corrections.
 
@@ -3041,6 +3080,8 @@ def rolling_har_vara_corrections(
             imputed_cells = int((~np.isfinite(response)).sum())
             response = np.where(np.isfinite(response), response, 0.0)
             eta_hat, eta_diagnostics, profile_fit = estimate_har_vara_eta(
+                pilot_size=pilot_size,
+                pilot_seed=pilot_seed,
                 response=response,
                 feature_matrix=Z,
                 attention_cache=cache,

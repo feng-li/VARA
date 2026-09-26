@@ -11,6 +11,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 import _bootstrap  # noqa: F401
 
@@ -173,6 +174,10 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=PAPER_VARA.attention_batch_size,
     )
+    parser.add_argument("--pilot-size", type=int, default=PAPER_VARA.pilot_size,
+                        help="Number of response equations used to estimate eta (default: 1000).")
+    parser.add_argument("--pilot-seed", type=int, default=PAPER_VARA.pilot_seed,
+                        help="Fixed sampling seed shared across refits and base models.")
     parser.add_argument(
         "--ray-num-cpus",
         type=int,
@@ -534,6 +539,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         attention_cache_mode=args.attention_cache_mode,
         attention_batch_size=attention_batch_size,
         attention_mode=args.attention_mode,
+        pilot_size=min(args.pilot_size, data.component_count),
+        pilot_seed=args.pilot_seed,
         lambda_window_months=args.lambda_window_months,
         lambda_ridge=args.lambda_ridge,
         eta=PaperEtaConfig(
@@ -570,19 +577,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"Risk study profile={RISK_PAPER_PROFILE}: "
         f"series={data.component_count:,} models={len(models)} "
         f"attention={vara_config.attention_mode} "
+        f"pilot_size={vara_config.pilot_size} pilot_seed={vara_config.pilot_seed} "
         f"normalization={vara_config.response_standardization}",
         flush=True,
     )
 
-    def progress(row: dict[str, Any]) -> None:
-        refit = row.get("refit_index", "?")
-        print(f"Completed VARA refit at target index {refit}", flush=True)
+    evaluation_count = len(split.plan(data).evaluation_indices)
+    refits_per_model = (evaluation_count + vara_config.refit_frequency_months - 1) // vara_config.refit_frequency_months
+    with tqdm(total=len(models) * refits_per_model, desc="Risk VARA refits", unit="refit") as bar:
+        def progress(row: dict[str, Any]) -> None:
+            bar.update(1)
+            bar.set_postfix(refit=row.get("refit_index", "?"))
 
-    result = study.run(
-        models,
-        execution=execution,
-        progress_callback=progress,
-    )
+        result = study.run(models, execution=execution, progress_callback=progress)
     output = result.save(args.output_dir)
     _write_run_config(
         output / "run_config.json",

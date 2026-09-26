@@ -199,6 +199,8 @@ def _fit_har_vara_refit_block(
     eta_local_tolerance: float,
     zero_own_lag_coefficients: bool,
     attention_mode: str = "topk",
+    pilot_size: int | None = None,
+    pilot_seed: int = 20260924,
 ) -> dict[str, Any]:
     """Fit one independent rolling-refit block and return only its target rows."""
     import jax.numpy as jnp
@@ -259,6 +261,8 @@ def _fit_har_vara_refit_block(
         imputed_cells = int((~np.isfinite(response)).sum())
         response = np.where(np.isfinite(response), response, 0.0)
         eta_hat, eta_diagnostics, profile_fit = estimate_har_vara_eta(
+            pilot_size=pilot_size,
+            pilot_seed=pilot_seed,
             response=response,
             feature_matrix=Z,
             attention_cache=cache,
@@ -445,6 +449,8 @@ def rolling_har_vara_corrections_ray(
     progress_callback: Any | None = None,
     ray_module: Any | None = None,
     attention_mode: str = "topk",
+    pilot_size: int | None = None,
+    pilot_seed: int = 20260924,
 ) -> tuple[RollingHARVARAResult, dict[str, Any]]:
     """Run independent rolling-refit blocks as Ray tasks."""
     _validate_ray_resources(ray_num_cpus, max_cpus_per_task)
@@ -535,6 +541,8 @@ def rolling_har_vara_corrections_ray(
                 attention_scores_ref,
                 block,
                 block_position=int(block_position),
+                pilot_size=pilot_size,
+                pilot_seed=pilot_seed,
                 error_window_months=int(error_window_months),
                 response_standardization=str(response_standardization),
                 response_clip=response_clip,
@@ -643,6 +651,8 @@ def fit_rolling_vara_family(
     ray_module: Any | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     attention_mode: str = "topk",
+    pilot_size: int | None = None,
+    pilot_seed: int = 20260924,
 ) -> RollingVARAFamilyResult:
     """Fit one common rolling VARA correction and its bounded-LSE family.
 
@@ -660,6 +670,8 @@ def fit_rolling_vara_family(
         raise ValueError("base_forecast and base_error must have the same 2D shape.")
 
     correction_kwargs = {
+        "pilot_size": pilot_size,
+        "pilot_seed": pilot_seed,
         "baseline_errors": error,
         "evaluation_indices": evaluation_indices,
         "feature_matrix": feature_matrix,
@@ -738,6 +750,8 @@ def run_vara_family(
     component_count = len(request.panel.series_ids)
     eta_specification = config.eta.resolve(component_count)
     return fit_rolling_vara_family(
+        pilot_size=config.pilot_size,
+        pilot_seed=config.pilot_seed,
         base_forecast=request.base.forecast,
         base_error=request.base.error,
         metadata=request.panel.metadata,

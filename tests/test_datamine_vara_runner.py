@@ -192,6 +192,8 @@ def test_fit_rolling_vara_family_routes_sequential_and_composes_output(
     np.testing.assert_array_equal(captured.pop("evaluation_indices"), evaluation)
     np.testing.assert_array_equal(captured.pop("feature_matrix"), feature_matrix)
     assert captured == {
+        "pilot_size": None,
+        "pilot_seed": 20260924,
         "error_window_months": 37,
         "response_standardization": "training_zscore",
         "response_clip": 7.5,

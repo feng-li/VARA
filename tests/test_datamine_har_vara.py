@@ -15,6 +15,9 @@ from vara.attention import (
     cached_topk_attention_weighted_lags,
 )
 from vara.datamine import estimate_har_vara_eta
+from vara.datamine import _fit_har_vara_profile
+from vara.forecast_contracts import RollingVARAConfig
+from scipy.special import softmax
 
 from scripts.run_datamine_har_vara import (
     HAR_VARA_LAMBDA_MODEL,
@@ -22,6 +25,45 @@ from scripts.run_datamine_har_vara import (
     _validate_ray_resources,
     combine_har_vara_forecasts,
 )
+
+
+def test_pilot_objective_and_full_second_stage():
+    rng = np.random.default_rng(26)
+    response = rng.normal(size=(40, 8))
+    features = rng.normal(size=(8, 3))
+    features /= np.linalg.norm(features, axis=1, keepdims=True)
+    kwargs = dict(response=response, feature_matrix=features, attention_cache=None,
+                  attention_top_k=7, attention_batch_size=2, ridge=.01,
+                  eta_bounds=(-1., 1.), eta_grid_size=3, eta_local_tolerance=.02,
+                  attention_mode="dense", pilot_size=3, pilot_seed=73)
+    eta, diagnostic, fit = estimate_har_vara_eta(**kwargs)
+    indices = np.array(json.loads(diagnostic["pilot_indices"]))
+    assert len(indices) == len(set(indices)) == 3
+    scores = eta * features @ features.T
+    np.fill_diagonal(scores, -np.inf)
+    peers = response @ softmax(scores, axis=1).T
+    options = dict(windows=(1, 3, 12), ridge=.01, zero_own_lag_coefficients=False)
+    selected = _fit_har_vara_profile(response[:, indices], peers[:, indices], **options)
+    full = _fit_har_vara_profile(response, peers, **options)
+    assert diagnostic["eta_objective"] == pytest.approx(selected["objective"], abs=1e-8)
+    assert fit["coefficients"].shape == (8, 6)
+    np.testing.assert_allclose(fit["coefficients"], full["coefficients"], rtol=2e-5, atol=2e-6)
+    # Changing the response (as with another window/base) must not change sampling.
+    kwargs["response"] = response * 1.2
+    _, other, _ = estimate_har_vara_eta(**kwargs)
+    assert other["pilot_indices"] == diagnostic["pilot_indices"]
+
+
+@pytest.mark.parametrize("kwargs", [dict(pilot_size=0), dict(pilot_size=True),
+                                    dict(pilot_seed=-1), dict(pilot_seed=1.5)])
+def test_invalid_pilot_config(kwargs):
+    with pytest.raises((ValueError, TypeError)):
+        RollingVARAConfig(attention_mode="dense", **kwargs)
+
+
+def test_sparse_pilot_config_rejected():
+    with pytest.raises(ValueError, match="dense"):
+        RollingVARAConfig(attention_mode="topk", pilot_size=3)
 
 
 class _FakeObjectRef:
@@ -261,11 +303,14 @@ def test_dense_eta_profile_matches_full_support_topk() -> None:
     )
 
 
+@pytest.mark.parametrize("pilot_size", [None, 2])
 def test_dense_ray_refits_match_sequential_without_building_topk_cache(
-    monkeypatch,
+    monkeypatch, pilot_size,
 ) -> None:
     kwargs = _small_rolling_kwargs()
     kwargs["attention_mode"] = "dense"
+    kwargs["pilot_size"] = pilot_size
+    kwargs["pilot_seed"] = 91
     sequential = runner.rolling_har_vara_corrections(**kwargs)
 
     def unexpected_cache(*args, **kwargs):
@@ -299,6 +344,8 @@ def test_dense_ray_refits_match_sequential_without_building_topk_cache(
     )
     np.testing.assert_array_equal(parallel.refit_index, sequential.refit_index)
     pd.testing.assert_frame_equal(parallel.fit_summary, sequential.fit_summary)
+    assert parallel.fit_summary["pilot_indices"].nunique() == 1
+    assert parallel.fit_summary["pilot_seed"].eq(91).all()
     assert parallel.fit_summary["attention_mode"].eq("dense").all()
     assert parallel.fit_summary["attention_top_k"].isna().all()
     assert parallel.fit_summary["attention_support"].eq(

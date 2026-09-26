@@ -289,6 +289,8 @@ class RollingVARAConfig:
     attention_cache_mode: str = "exact"
     attention_batch_size: int = 512
     attention_mode: str = "topk"
+    pilot_size: int | None = None
+    pilot_seed: int = 20260924
     lambda_window_months: int = 24
     lambda_ridge: float = 0.001
     zero_own_lag_coefficients: bool = False
@@ -322,6 +324,12 @@ class RollingVARAConfig:
         attention_mode = str(self.attention_mode)
         if attention_mode not in ATTENTION_MODE_CHOICES:
             raise ValueError("attention_mode must be topk or dense.")
+        if self.pilot_size is not None:
+            _positive_integer(self.pilot_size, name="pilot_size")
+            if attention_mode != "dense":
+                raise ValueError("pilot_size requires dense attention.")
+        if isinstance(self.pilot_seed, (bool, np.bool_)) or not isinstance(self.pilot_seed, (int, np.integer)) or self.pilot_seed < 0:
+            raise ValueError("pilot_seed must be a nonnegative integer.")
         cache_mode = str(self.attention_cache_mode)
         if cache_mode not in ATTENTION_CACHE_MODE_CHOICES:
             raise ValueError("attention_cache_mode must be exact or cluster.")

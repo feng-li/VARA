@@ -145,15 +145,23 @@ Each target is forecast from observations ending at the preceding origin. The
 adapters also generate the pre-validation error history required by VARA;
 `error_history_months` should match `VARAConfig.error_window_months`.
 
-The risk application has one thin, resumable entry point. Its defaults reproduce
-the paper specification: the complete 21,800-series panel, the five fitted paper
+The risk application has one thin entry point. Its defaults use
+the complete 21,800-series panel, the five fitted paper
 benchmarks, a 60-month validation and 120-month test split, full-dense attention,
 a 240-month median--MAD standardized residual window, annual refits, and a
 24-month rolling LSE combination coefficient. The 15 annual refit tasks use
-Ray with one CPU per task, matching the saved paper run:
+Ray with one CPU per task. The revised first stage estimates the attention
+parameter from 1,000 equations sampled without replacement, using the same
+seed and component subset across models and refits. Dense attention still uses
+all other series; the second stage fits every component. Set `--pilot-size`
+and `--pilot-seed` to override these defaults; a pilot size at least as large
+as the panel gives the full criterion. `--attention-batch-size` controls only
+memory use (default 512). Refit CSVs record pilot indices (zero-based in the
+selected panel), seed, objective, and boundary status. Existing regressors,
+normalization, and lambda calibration are unchanged. Run into a new directory:
 
 ```bash
-python scripts/run_risk_study.py
+python scripts/run_risk_study.py --output-dir outputs/risk_subsampled_pilot
 ```
 
 The saved `run_config.json` records the paper profile and reports whether any

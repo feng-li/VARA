@@ -83,8 +83,10 @@ def risk_paper_vara_config(
         ridge=0.001,
         attention_top_k=count - 1,
         attention_cache_mode="exact",
-        attention_batch_size=count,
+        attention_batch_size=min(512, count),
         attention_mode="dense",
+        pilot_size=min(1000, count),
+        pilot_seed=20260924,
         lambda_window_months=24,
         lambda_ridge=0.001,
         eta=PaperEtaConfig(

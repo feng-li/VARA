@@ -372,7 +372,9 @@ def test_risk_paper_profile_is_the_primary_application_specification() -> None:
     assert config.attention_mode == "dense"
     assert config.attention_top_k == 21_799
     assert config.attention_cache_mode == "exact"
-    assert config.attention_batch_size == 21_800
+    assert config.attention_batch_size == 512
+    assert config.pilot_size == 1000
+    assert config.pilot_seed == 20260924
     assert config.lambda_window_months == 24
     assert config.lambda_ridge == pytest.approx(0.001)
     assert (config.eta.lower, config.eta.upper) == (-2.0, 2.0)
