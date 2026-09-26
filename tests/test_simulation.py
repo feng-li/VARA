@@ -20,17 +20,46 @@ from vara.simulation import (
     p_for_setting,
     reparam_theta_from_params,
     simulate_vara,
+    full_single_replication,
+    draw_simulation_params,
 )
 
 
 class SimulationTests(unittest.TestCase):
+    def test_replication_full_and_nested_pilots(self):
+        from unittest.mock import patch
+        key = jax.random.PRNGKey(18)
+        p, q, T = 5, 3, 12
+        params = draw_simulation_params(key, p)
+        captured = []
+
+        def fit(**kwargs):
+            captured.append(kwargs)
+            estimates = {"eta_hat": 1., "se_eta": jnp.nan}
+            for name in ("alpha", "beta", "sigma2"):
+                estimates[name + "_hat"] = jnp.ones(p)
+                estimates["se_" + name] = jnp.ones(p)
+            return estimates, 0
+
+        with patch("vara.simulation.run_two_stage_on_dataset", side_effect=fit):
+            rows = full_single_replication(
+                0, key, params, draw_Z(key, p, q), "high", T, p, q, "uniform", 18,
+                ["two_stage"], .05, "lbfgs", .05, (0., 5.), 5, .02, 0., 3, 2500,
+                params_scale={"eta_a": math.log(p)}, redraw_dgp=True, pilot_sizes=[2, 5])
+        self.assertEqual([r["status"] for r in rows], [0, 0])
+        self.assertEqual(captured[0]["Y"].shape, (T + 1, p))
+        np.testing.assert_array_equal(captured[0]["Y"], captured[1]["Y"])
+        np.testing.assert_array_equal(captured[0]["component_indices"], captured[1]["component_indices"][:2])
+
     def test_p_for_setting_matches_paper_rules(self):
+        self.assertEqual([p_for_setting(t, "high") for t in (200, 400, 800)], [200, 500, 1600])
         self.assertEqual(p_for_setting(16, "low"), 4)
         self.assertEqual(p_for_setting(4, "high"), 8)
         with self.assertRaises(ValueError):
             p_for_setting(16, "unknown")
 
     def test_kappa4_for_supported_distributions(self):
+        self.assertEqual(kappa4_for_dist("uniform"), 1.8)
         self.assertEqual(kappa4_for_dist("normal"), 3.0)
         self.assertEqual(kappa4_for_dist("laplace"), 6.0)
         self.assertEqual(kappa4_for_dist("t5"), 9.0)
@@ -69,7 +98,7 @@ class SimulationTests(unittest.TestCase):
 
     def test_draw_standard_innovations_shapes_and_errors(self):
         key = jax.random.PRNGKey(123)
-        for dist in ["normal", "laplace", "t5"]:
+        for dist in ["normal", "uniform", "laplace", "t5"]:
             draws = draw_standard_innovations(key, (10, 3), dist)
             self.assertEqual(draws.shape, (10, 3))
             self.assertTrue(bool(jnp.isfinite(draws).all()))
@@ -77,7 +106,7 @@ class SimulationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             draw_standard_innovations(key, (10, 3), "bad")
 
-    def test_simulate_vara_returns_finite_series_with_zero_initial_state(self):
+    def test_simulate_vara_returns_finite_series_with_innovation_initial_state(self):
         p, q, T = 3, 4, 8
         key = jax.random.PRNGKey(321)
         params = {
@@ -91,7 +120,8 @@ class SimulationTests(unittest.TestCase):
         Y = simulate_vara(key, params, Z, T, p, q, "normal", PARAMS_SCALE)
 
         self.assertEqual(Y.shape, (T, p))
-        np.testing.assert_allclose(np.asarray(Y[0]), np.zeros(p), atol=1e-7)
+        expected = draw_standard_innovations(key, (T, p), "normal")[0] * jnp.sqrt(params["sigma2"])
+        np.testing.assert_allclose(np.asarray(Y[0]), np.asarray(expected), atol=1e-7)
         self.assertTrue(bool(jnp.isfinite(Y).all()))
 
     def test_simulate_vara_matches_precomputed_attention(self):

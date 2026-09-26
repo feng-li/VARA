@@ -160,3 +160,39 @@ The saved `run_config.json` records the paper profile and reports whether any
 command-line override departed from it. For a quick diagnostic, add (for
 example) `--max-series 200 --models paper_har_ridge`; use a separate
 `--output-dir` for every materially different model or VARA configuration.
+
+## Revised manuscript simulations
+
+The existing simulation driver uses the September 2026 manuscript designs:
+low-dimensional `(T,p,G)=(100,8,2),(200,12,3),(500,16,4)` and high-dimensional
+`(200,200,10),(400,500,20),(800,1600,40)`. Defaults include normal, uniform,
+and Laplace innovations, 500 replications, dense attention scaled by `log(p)`,
+and no feature screening. Each replication redraws features and parameters;
+the initial observation is its first innovation and there are `T` transitions.
+
+```bash
+python scripts/run_full_simulation.py --results-dir outputs/simulation_revised
+```
+
+Low-dimensional runs use joint log-variance QMLE with three data-based starts.
+High-dimensional runs compare full and subsampled concentrated likelihood on
+the same panel. The subsampled pilot selects `ceil(log2(p)^2)` component rows
+once; every selected row still attends to all other series. Both methods then
+fit all component equations. Standard errors use plug-in moments rather than
+the known innovation fourth moment. CPU timings include JAX compilation, so
+they are not directly comparable with the NumPy reference implementation.
+
+For the pilot-size sensitivity experiment (CSV output includes `RMSE_pool`):
+
+```bash
+python scripts/run_full_simulation.py --settings high --T-list 800 \
+  --dist-list normal --R 100 --pilot-sizes 50,100,200,400,800,1600 \
+  --results-dir outputs/simulation_pilot_sensitivity
+```
+
+Use `--ray-num-cpus 1` for sequential execution; Ray and sequential runs both
+report completed replications with progress bars. Explicit `--T-list` overrides
+the default time grid for every requested setting. Saved JSON records effective
+designs and pilot settings. Legacy screened-feature runs remain available but
+are not the manuscript default. These commands do not modify the manuscript
+or the saved results under `docs/vara_simu/`.

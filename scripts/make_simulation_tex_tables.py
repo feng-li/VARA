@@ -25,6 +25,7 @@ from pandas.errors import EmptyDataError
 
 
 TABLE_PREFIXES = {
+    "simulation_low_uniform": ["summary_full_simulation_", "table_simulation_publication_wide_"],
     "simulation_design": ["table_simulation_setup_", "summary_full_simulation_"],
     "simulation_low_normal": ["summary_full_simulation_", "table_simulation_publication_wide_"],
     "simulation_low_laplace": ["summary_full_simulation_", "table_simulation_publication_wide_"],
@@ -38,6 +39,7 @@ TABLE_PREFIXES = {
 
 
 OUTPUT_FILES = {
+    "simulation_low_uniform": "simulation_low_uniform.tex",
     "simulation_design": "simulation_design.tex",
     "simulation_low_normal": "simulation_low_normal.tex",
     "simulation_low_laplace": "simulation_low_laplace.tex",
@@ -47,6 +49,7 @@ OUTPUT_FILES = {
 
 
 DEFAULT_TABLES = [
+    "simulation_low_uniform",
     "simulation_design",
     "simulation_low_normal",
     "simulation_low_laplace",
@@ -139,6 +142,7 @@ def _format_set(values: Sequence[object]) -> str:
 def _dist_label(value: object) -> str:
     labels = {
         "normal": "Normal",
+        "uniform": "Uniform",
         "laplace": "Laplace",
         "t5": "Student-$t_5$",
     }
@@ -146,14 +150,15 @@ def _dist_label(value: object) -> str:
 
 
 def _ordered_dists(values: Sequence[object]) -> List[object]:
-    order = {"normal": 0, "laplace": 1}
+    order = {"normal": 0, "uniform": 1, "laplace": 2}
     return sorted(values, key=lambda x: order.get(str(x).lower(), 99))
 
 
 def _method_label(value: object) -> str:
     labels = {
         "qmle": "QMLE",
-        "two_stage": "Two-stage",
+        "two_stage": "Full pilot",
+        "two_stage_subsampled": "Subsampled pilot",
     }
     return labels.get(str(value).lower(), _latex_escape(value))
 
@@ -248,7 +253,7 @@ def render_design_table(setup: pd.DataFrame) -> str:
             q_values = _format_set(sorted(group["q"].dropna().unique())) if "q" in group else "--"
             g_values = _format_set(sorted(group["G"].dropna().unique())) if "G" in group else "--"
             dist_values = ", ".join(_dist_label(v) for v in _ordered_dists(group["dist"].dropna().unique())) if "dist" in group else "--"
-            method = "QMLE, two-stage" if setting == "low" else "Two-stage"
+            method = "QMLE" if setting == "low" else "Full/subsampled two-stage"
             rows.append(
                 " & ".join([
                     "Low" if setting == "low" else "High",
@@ -358,12 +363,14 @@ def _high_dist_rows(group: pd.DataFrame, *, include_midrule: bool) -> List[str]:
             " & ".join([
                 prefix,
                 tpg,
+                _method_label(row.get("method", "")),
                 *[_format_number(row.get(col)) for col in METRIC_COLS],
                 _format_time(row.get("cpu_sec_mean")),
             ]) + r" \\"
         )
         rows.append(
             " & ".join([
+                "",
                 "",
                 "",
                 "",
@@ -382,7 +389,7 @@ def render_high_combined_table(df: pd.DataFrame) -> str:
     filtered = _sort_table(filtered, ["dist", "T", "p", "G"])
     rows: List[str] = []
     if filtered.empty:
-        rows = [r"-- & -- & -- & -- & -- & -- & -- \\"]
+        rows = [r"-- & -- & -- & -- & -- & -- & -- & -- \\"]
     else:
         # Match the manuscript order: normal first, then Laplace.
         order = {"normal": 0, "laplace": 1}
@@ -391,9 +398,9 @@ def render_high_combined_table(df: pd.DataFrame) -> str:
             group = filtered.loc[filtered["dist"].astype(str).str.lower() == str(dist).lower()]
             rows.extend(_high_dist_rows(group, include_midrule=idx < len(dists) - 1))
     body = (
-        "\\begin{tabular*}{\\textwidth}{@{\\extracolsep{\\fill}}llccccc}\n"
+        "\\begin{tabular*}{\\textwidth}{@{\\extracolsep{\\fill}}lllccccc}\n"
         "\\toprule\n"
-        "Innovation & $(T,p,G)$ & $\\gamma$ & $\\balpha$ & $\\bbeta$ & $\\bsigma^2$ & Time (sec.) \\\\\n"
+        "Innovation & $(T,p,G)$ & Pilot & $\\gamma$ & $\\balpha$ & $\\bbeta$ & $\\bsigma^2$ & Time (sec.) \\\\\n"
         "\\midrule\n"
         + "\n".join(rows)
         + "\n\\bottomrule\n"
@@ -466,6 +473,8 @@ def render_xhigh_diagnostics(df: pd.DataFrame) -> str:
 
 def render_table(table_name: str, df: pd.DataFrame) -> str:
     table_name = LEGACY_TABLE_ALIASES.get(table_name, table_name)
+    if table_name == "simulation_low_uniform":
+        return render_low_innovation_table(df, dist="uniform")
     if table_name == "simulation_design":
         return render_design_table(df)
     if table_name == "simulation_low_normal":

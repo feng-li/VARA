@@ -13,6 +13,26 @@ from vara.two_stage import concentrated_eta_loglik, fit_all_components_two_stage
 
 
 class TwoStageTests(unittest.TestCase):
+    def test_subsample_uses_full_attention_neighbors(self):
+        key = jax.random.PRNGKey(43)
+        Y = jax.random.normal(key, (25, 7))
+        Z = jax.random.normal(jax.random.fold_in(key, 1), (7, 3))
+        indices = np.array([5, 1, 3])
+        full = fit_all_components_two_stage(Y, Z, 0.7, {"eta_a": 1.9})
+        selected = fit_all_components_two_stage(
+            Y, Z, 0.7, {"eta_a": 1.9}, component_indices=indices, batch_size=2)
+        for name in ("alpha_hat", "beta_hat", "sigma2_hat", "se_alpha", "se_beta"):
+            np.testing.assert_allclose(selected[name], full[name][indices], rtol=2e-5, atol=1e-6)
+        value = concentrated_eta_loglik(Y=Y, Z=Z, eta=0.7, params_scale={"eta_a": 1.9},
+                                         component_indices=indices)
+        np.testing.assert_allclose(value, -12 * jnp.sum(jnp.log(full["sigma2_hat"][indices])), rtol=1e-6)
+
+    def test_invalid_subsets_rejected(self):
+        for indices in ([], [1, 1], [-1], [3], [0.5]):
+            with self.assertRaises(ValueError):
+                fit_all_components_two_stage(jnp.ones((10, 3)), jnp.eye(3), 1.,
+                                             {"eta_a": 1.}, component_indices=indices)
+
     def test_fit_all_components_recovers_noise_free_linear_recursion(self):
         p, q, T = 3, 4, 80
         eta = 0.5

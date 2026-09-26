@@ -544,7 +544,8 @@ def compute_Avar(H, V):
     return Avar
 
 
-def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0.05, verbose=False):
+def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0.05, verbose=False,
+                             empirical_lags=False):
     """
     Compute Wald-style uncertainty estimates for a fitted parameter vector.
 
@@ -565,6 +566,10 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
         Two-sided confidence level parameter.
     verbose : bool, default=False
         If ``True``, print eigenvalue diagnostics for the scaled ``V`` and ``H``.
+    empirical_lags : bool, default=False
+        Use the observed lag second moment and T-1 transitions for the
+        manuscript simulation plug-in estimator. The legacy stationary
+        covariance remains the default for existing callers.
 
     Returns
     -------
@@ -586,7 +591,11 @@ def compute_sandwich_variance(Y, Z, theta_hat, params_scale, kappa4=3.0, alpha=0
 
     G = jnp.diag(beta) + ldiag_mul(gamma_a, Wa)
 
-    Gamma0 = Gamma0_stationary_with_lyapunov_doubling(G, sigma2)
+    if empirical_lags:
+        T = T - 1
+        Gamma0 = Y[:-1].T @ Y[:-1] / T
+    else:
+        Gamma0 = Gamma0_stationary_with_lyapunov_doubling(G, sigma2)
     # full = False
     # V = assemble_V(Wa, Wb, Wa_dot, Wb_dot,
     #                     gamma_a, gamma_b,

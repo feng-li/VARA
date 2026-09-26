@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 import jax.numpy as jnp
+import jax
+import numpy as np
 
 from .attention import TopKAttentionCache, attention_weighted_lags
 
@@ -20,6 +22,7 @@ def fit_all_components_two_stage(
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
     attention_cache: Optional[TopKAttentionCache] = None,
+    component_indices=None,
 ) -> Dict[str, jnp.ndarray]:
     """Fit componentwise OLS regressions at a fixed eta value.
 
@@ -27,21 +30,46 @@ def fit_all_components_two_stage(
     ``Y_lag[:, k]`` and the attention-weighted lag ``X2[:, k]``. Returned
     names follow paper notation: ``alpha_hat`` estimates code ``beta`` and
     ``beta_hat`` estimates code ``gamma_a``.
+
+    ``component_indices`` selects response equations, not attention neighbors.
+    The selected dense rows retain all off-diagonal neighbors and cost
+    O(T m p) to apply. None fits all p equations as before.
     """
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
     T, _ = Y.shape
     T_eff = T - 1
     Y_lag = Y[:-1]
     Y_now = Y[1:]
 
     X1 = Y_lag
-    X2 = attention_weighted_lags(
-        Y_lag, Z, eta, params_scale,
-        batch_size=batch_size,
-        dense_threshold=dense_threshold,
-        attention_mode=attention_mode,
-        attention_top_k=attention_top_k,
-        attention_cache=attention_cache,
-    )
+    if component_indices is not None:
+        indices = np.asarray(component_indices)
+        if (indices.ndim != 1 or not len(indices) or
+                not np.issubdtype(indices.dtype, np.integer) or
+                np.any(indices < 0) or np.any(indices >= Y.shape[1]) or
+                len(np.unique(indices)) != len(indices)):
+            raise ValueError("component_indices must be distinct valid component indices")
+        if attention_mode != "dense":
+            raise ValueError("Component subsampling requires dense attention")
+        blocks = []
+        for start in range(0, len(indices), batch_size):
+            ids = jnp.asarray(indices[start:start + batch_size])
+            scores = eta * params_scale["eta_a"] * (Z[ids] @ Z.T)
+            scores = scores.at[jnp.arange(len(ids)), ids].set(-jnp.inf)
+            blocks.append(Y_lag @ jax.nn.softmax(scores, axis=1).T)
+        X2 = jnp.concatenate(blocks, axis=1)
+        X1 = Y_lag[:, indices]
+        Y_now = Y_now[:, indices]
+    else:
+        X2 = attention_weighted_lags(
+            Y_lag, Z, eta, params_scale,
+            batch_size=batch_size,
+            dense_threshold=dense_threshold,
+            attention_mode=attention_mode,
+            attention_top_k=attention_top_k,
+            attention_cache=attention_cache,
+        )
 
     xx11 = jnp.sum(X1 * X1, axis=0)
     xx22 = jnp.sum(X2 * X2, axis=0)
@@ -94,6 +122,7 @@ def concentrated_eta_loglik(
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
     attention_cache: Optional[TopKAttentionCache] = None,
+    component_indices=None,
 ) -> jnp.ndarray:
     """Evaluate the concentrated Gaussian log-likelihood for ``eta_a``.
 
@@ -110,6 +139,7 @@ def concentrated_eta_loglik(
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
         attention_cache=attention_cache,
+        component_indices=component_indices,
     )
     sigma2_hat = jnp.maximum(fit["sigma2_hat"], eps)
     return -0.5 * T_eff * jnp.sum(jnp.log(sigma2_hat))

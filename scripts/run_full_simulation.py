@@ -121,7 +121,12 @@ def _simulation_params_scale(p: int) -> Dict[str, float]:
     """Scale attention scores as log(p) for the manuscript simulation DGP."""
     return {"eta_a": math.log(max(int(p), 2))}
 
+
+def _times_for_setting(T_list, setting):
+    return T_list or ((100, 200, 500) if setting == "low" else (200, 400, 800))
+
 RUN_CONFIG_KEYS = (
+    "pilot_sizes",
     "seed",
     "R",
     "T_list",
@@ -208,6 +213,7 @@ def _run_kwargs_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         if key not in {"T_list", "settings", "dist_list", "eta_bounds", "results_dir"}
     }
     kwargs.update({
+        "pilot_sizes": _parse_int_list(args.pilot_sizes) if args.pilot_sizes else None,
         "T_list": _parse_int_list(args.T_list),
         "settings": _parse_str_list(args.settings),
         "dist_list": _parse_str_list(args.dist_list),
@@ -252,7 +258,7 @@ def _full_simulation_config_tag(
     _ensure_runtime_imports()
     p_values = []
     for setting in settings:
-        for T in T_list:
+        for T in _times_for_setting(T_list, setting):
             p = p_for_setting(T, setting)
             if setting == "high" and high_max_p is not None and p > high_max_p:
                 continue
@@ -391,9 +397,9 @@ def make_simulation_setup_table(
         f"approx_pairs={z_approx_pairs}"
     )
     for setting in settings:
-        p_rule = "paper grid: 5,10,20" if setting == "low" else "paper grid: 100,300,1000"
+        p_rule = "paper grid: 8,12,16" if setting == "low" else "paper grid: 200,500,1600"
         for dist in dist_list:
-            for T in T_list:
+            for T in _times_for_setting(T_list, setting):
                 p = p_for_setting(T, setting)
                 feature_clusters = feature_clusters_for_setting(T, setting)
                 if setting == "high" and high_max_p is not None and p > high_max_p:
@@ -877,20 +883,20 @@ def run_full_simulation(
     *,
     seed: int = 2026,
     R: int = 500,
-    T_list: Sequence[int] = (100, 200, 500),
+    T_list: Sequence[int] = (),
     settings: Sequence[str] = ("low", "high"),
-    dist_list: Sequence[str] = ("normal", "laplace"),
+    dist_list: Sequence[str] = ("normal", "uniform", "laplace"),
     q: int = 50,
     alpha: float = 0.05,
     ray_num_cpus: int = 52,
     max_cpus_per_task: int = 1,
     qmle_algorithm: str = "lbfgs",
     qmle_perturb_scale: float = 0.05,
-    eta_bounds: Tuple[float, float] = (-2.0, 2.0),
+    eta_bounds: Tuple[float, float] = (0.0, 5.0),
     grid_size: int = 41,
     high_grid_size: Optional[int] = None,
     curvature_step: float = 0.02,
-    ridge: float = 1e-10,
+    ridge: float = 0.0,
     batch_size: int = 512,
     dense_threshold: int = 2500,
     screen_z: bool = False,
@@ -920,6 +926,7 @@ def run_full_simulation(
     ray_debug: bool = False,
     high_max_p: Optional[int] = None,
     results_dir: Path = RESULTS_DIR,
+    pilot_sizes: Optional[Sequence[int]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Run the full simulation grid and save detailed/summary CSVs."""
     if ray_num_cpus < 1:
@@ -933,6 +940,8 @@ def run_full_simulation(
         raise ValueError("attention_mode must be 'dense' or 'topk'.")
     if attention_mode == "topk" and attention_top_k is None:
         raise ValueError("--attention-top-k must be set when --attention-mode=topk.")
+    if attention_mode != "dense" and ("high" in settings or pilot_sizes):
+        raise ValueError("The manuscript pilot comparison requires dense attention, not top-k.")
     if attention_cache_mode not in {"exact", "cluster"}:
         raise ValueError("attention_cache_mode must be 'exact' or 'cluster'.")
 
@@ -1020,6 +1029,13 @@ def run_full_simulation(
     )
     run_config = _select_run_config_values(locals())
     run_config.update({
+        "simulation_profile": "manuscript_20260924",
+        "effective_T_by_setting": {s: list(_times_for_setting(T_list, s)) for s in settings},
+        "pilot_rule": "ceil(log2(p)^2)" if pilot_sizes is None else list(pilot_sizes),
+        "dgp_redrawn_per_replication": not screen_z and attention_mode == "dense",
+        "initial_state": "innovation_0",
+        "transition_count": "T (T+1 stored rows)",
+        "timing": "process CPU seconds including JAX compilation and standard errors",
         "command": " ".join(sys.argv),
         "config_tag": config_tag,
         "run_tag": run_tag,
@@ -1036,15 +1052,15 @@ def run_full_simulation(
             raise ValueError("settings must contain only 'low' and/or 'high'")
 
         for dist in dist_list:
-            for T in T_list:
+            for T in _times_for_setting(T_list, setting):
                 p = p_for_setting(T, setting)
                 feature_clusters = feature_clusters_for_setting(T, setting)
                 if setting == "high" and high_max_p is not None and p > high_max_p:
                     print(f"[skip] high-dimensional setting T={T} gives p={p} > high_max_p={high_max_p}")
                     continue
 
-                methods = ["two_stage"] if setting == "high" else ["qmle", "two_stage"]
-                p_rule = "paper grid: 100,300,1000" if setting == "high" else "paper grid: 5,10,20"
+                methods = ["two_stage", "two_stage_subsampled"] if setting == "high" else ["qmle"]
+                p_rule = "paper grid: 200,500,1600" if setting == "high" else "paper grid: 8,12,16"
                 grid_size_use = int(
                     high_grid_size
                     if (setting == "high" and high_grid_size is not None)
@@ -1052,6 +1068,8 @@ def run_full_simulation(
                 )
 
                 key, k_params, k_Z, k_rep = jax.random.split(key, 4)
+                # Couple replication designs across innovation distributions.
+                k_rep = jax.random.fold_in(jax.random.PRNGKey(seed), T * 2 + (setting == "high"))
                 _print_progress(f"Starting setting: setting={setting}, dist={dist}, T={T}, p={p}, q={q}")
                 _print_progress("Drawing DGP parameters")
                 params_true, stat_info = draw_simulation_dgp_params(k_params, p, eta_a=dgp_eta_a)
@@ -1279,6 +1297,8 @@ def run_full_simulation(
                                 attention_top_k=attention_top_k,
                                 attention_cache=attention_cache_arg,
                                 ray_debug=ray_debug,
+                                redraw_dgp=not screen_z and attention_mode == "dense",
+                                pilot_sizes=pilot_sizes,
                             )
 
                         max_pending = min(R, max(1, 2 * n_actors))
@@ -1362,6 +1382,8 @@ def run_full_simulation(
                             attention_mode=attention_mode,
                             attention_top_k=attention_top_k,
                             attention_cache=attention_cache,
+                            redraw_dgp=not screen_z and attention_mode == "dense",
+                            pilot_sizes=pilot_sizes,
                         ))
 
                 elapsed_setting = (datetime.now() - setting_start).total_seconds()
@@ -1371,6 +1393,7 @@ def run_full_simulation(
                     row["setting_elapsed_sec"] = elapsed_setting
                     row["G"] = int(feature_clusters)
                     row["Z_design"] = "clustered"
+                    row["dgp_redrawn_per_replication"] = not screen_z and attention_mode == "dense"
                     row["attention_score_scale"] = "log(p)"
                     row["attention_score_scale_value"] = params_scale["eta_a"]
                     row["Z_screened"] = bool(screen_z)
@@ -1405,7 +1428,7 @@ def run_full_simulation(
                     row["Z_gamma_a_x2_resid_std_min"] = Z_info.get("gamma_a_x2_resid_std_min", math.nan)
                     row["Z_gamma_a_x1_x2_corr_abs_mean"] = Z_info.get("gamma_a_x1_x2_corr_abs_mean", math.nan)
                     row["Z_selection_score"] = Z_info.get("selection_score", math.nan)
-                    row["DGP_attention_precomputed"] = dgp_attention is not None
+                    row.setdefault("DGP_attention_precomputed", dgp_attention is not None)
                     row["TopK_attention_cached"] = attention_cache is not None
                     row["attention_cache_mode"] = attention_cache.mode if attention_cache is not None else ""
                     row["attention_cache_clusters"] = (
@@ -1439,8 +1462,8 @@ def run_full_simulation(
                     row["attention_mode"] = attention_mode
                     row["attention_top_k"] = attention_top_k if attention_top_k is not None else math.nan
                     row["stationarity_rescaled"] = bool(stat_info["rescaled"])
-                    row["stationary_lhs_before"] = float(stat_info["lhs_before"])
-                    row["stationary_lhs_after"] = float(stat_info["lhs_after"])
+                    row.setdefault("stationary_lhs_before", float(stat_info["lhs_before"]))
+                    row.setdefault("stationary_lhs_after", float(stat_info["lhs_after"]))
 
                 all_detail_rows.extend(setting_rows)
                 _print_progress("Summarizing current setting")
@@ -1515,9 +1538,11 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--R", type=int, default=500)
-    parser.add_argument("--T-list", type=str, default="100,200,500")
+    parser.add_argument("--pilot-sizes", default=None,
+                        help="Comma-separated nested pilot sizes for a sensitivity experiment.")
+    parser.add_argument("--T-list", type=str, default="", help="Override both grids; default uses manuscript low/high grids.")
     parser.add_argument("--settings", type=str, default="low,high", help="Comma list: low,high")
-    parser.add_argument("--dist-list", type=str, default="normal,laplace")
+    parser.add_argument("--dist-list", type=str, default="normal,uniform,laplace")
     parser.add_argument("--q", type=int, default=50)
     parser.add_argument("--alpha", type=float, default=0.05)
     parser.add_argument("--max-cpus-per-task", type=int, default=1)
@@ -1530,12 +1555,12 @@ def main():
 
     parser.add_argument("--qmle-algorithm", type=str, default="lbfgs")
     parser.add_argument("--qmle-perturb-scale", type=float, default=0.05)
-    parser.add_argument("--eta-lower", type=float, default=-2.0)
-    parser.add_argument("--eta-upper", type=float, default=2.0)
+    parser.add_argument("--eta-lower", type=float, default=0.0)
+    parser.add_argument("--eta-upper", type=float, default=5.0)
     parser.add_argument("--grid-size", type=int, default=41)
     parser.add_argument("--high-grid-size", type=int, default=None)
     parser.add_argument("--curvature-step", type=float, default=0.02)
-    parser.add_argument("--ridge", type=float, default=1e-10)
+    parser.add_argument("--ridge", type=float, default=0.0)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--dense-threshold", type=int, default=2500)
     parser.add_argument(

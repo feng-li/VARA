@@ -25,27 +25,30 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import jax
 import jax.numpy as jnp
 import pandas as pd
+import numpy as np
+from scipy.optimize import minimize
 
-from .attention import TopKAttentionCache, attention_matvec
+from .attention import TopKAttentionCache, attention_matvec, build_attention
 from .cov import compute_sandwich_variance
-from .dgp import ensure_stationarity
-from .fit import estimate
+from .dgp import ensure_stationarity, draw_Z
 from .params import make_block_order
+from .loglik_attn import loglik
 from .two_stage import concentrated_eta_loglik, fit_all_components_two_stage
 
 
 PARAMS_SCALE = {"eta_a": 1.0}
 Z_CRIT_975 = 1.959963984540054
 LOW_P_BY_T = {100: 8, 200: 12, 500: 16}
-HIGH_P_BY_T = {100: 100, 200: 300, 500: 1000}
+HIGH_P_BY_T = {200: 200, 400: 500, 800: 1600}
 LOW_FEATURE_CLUSTERS_BY_T = {100: 2, 200: 3, 500: 4}
-HIGH_FEATURE_CLUSTERS_BY_T = {100: 5, 200: 10, 500: 15}
+HIGH_FEATURE_CLUSTERS_BY_T = {200: 10, 400: 20, 800: 40}
 
 
 def p_for_setting(T: int, setting: str) -> int:
     """Return the response dimension used by a paper simulation setting.
 
-    The paper design uses fixed grids for ``T in {100, 200, 500}``.
+    Low-dimensional T values are 100, 200, 500; high-dimensional values
+    are 200, 400, 800.
     Other ``T`` values fall back to the older growth rules for diagnostics.
     """
     T = int(T)
@@ -70,6 +73,8 @@ def kappa4_for_dist(dist: str) -> float:
     """Return the fourth moment of the standardized innovation distribution."""
     if dist == "normal":
         return 3.0
+    if dist == "uniform":
+        return 1.8
     if dist == "laplace":
         return 6.0
     if dist == "t5":
@@ -117,16 +122,16 @@ def reparam_theta_from_params(params: Dict[str, Any], p: int) -> jnp.ndarray:
 def draw_simulation_params(key: jax.Array, p: int) -> Dict[str, Any]:
     """Draw one paper-style DGP parameter vector for a simulation setting.
 
-    The draw uses ``eta_a = 0.5``, independent uniform draws for ``gamma_a``
-    and ``beta`` on ``[-0.2, 0.2]``, and ``sigma2`` on ``[0.25, 1.0]``.
+    The draw uses ``eta_a = 1``, ``gamma_a`` on ``[0.55, 0.75]``,
+    ``beta`` on ``[-0.2, 0.2]``, and ``sigma2`` on ``[0.5, 1.0]``.
     ``beta`` and ``gamma_a`` are rescaled only if needed for stationarity.
     """
     k_beta_paper, k_alpha_paper, k_sig = jax.random.split(key, 3)
     params = {
-        "eta_a": jnp.asarray(0.5),
-        "gamma_a": jax.random.uniform(k_beta_paper, (p,), minval=-0.2, maxval=0.2),
+        "eta_a": jnp.asarray(1.0),
+        "gamma_a": jax.random.uniform(k_beta_paper, (p,), minval=0.55, maxval=0.75),
         "beta": jax.random.uniform(k_alpha_paper, (p,), minval=-0.2, maxval=0.2),
-        "sigma2": jax.random.uniform(k_sig, (p,), minval=0.25, maxval=1.0),
+        "sigma2": jax.random.uniform(k_sig, (p,), minval=0.5, maxval=1.0),
     }
 
     beta, gamma_a, _ = ensure_stationarity(params["beta"], params["gamma_a"], margin=0.98)
@@ -138,11 +143,13 @@ def draw_simulation_params(key: jax.Array, p: int) -> Dict[str, Any]:
 def draw_standard_innovations(key: jax.Array, shape: Tuple[int, int], dist: str) -> jnp.ndarray:
     """Draw mean-zero, variance-one innovations.
 
-    Supported values are ``normal``, ``laplace``, and ``t5``. The Student-t
+    Supported values are ``normal``, ``uniform``, ``laplace``, and ``t5``. The Student-t
     draw is rescaled to unit variance.
     """
     if dist == "normal":
         return jax.random.normal(key, shape)
+    if dist == "uniform":
+        return jax.random.uniform(key, shape, minval=-jnp.sqrt(3.), maxval=jnp.sqrt(3.))
     if dist == "laplace":
         u = jax.random.uniform(key, shape, minval=-0.5 + 1e-12, maxval=0.5 - 1e-12)
         b = 1.0 / jnp.sqrt(2.0)
@@ -152,7 +159,7 @@ def draw_standard_innovations(key: jax.Array, shape: Tuple[int, int], dist: str)
         z = jax.random.normal(k1, shape)
         chi = jax.random.chisquare(k2, df=5, shape=shape)
         return (z / jnp.sqrt(chi / 5.0)) * jnp.sqrt(3.0 / 5.0)
-    raise ValueError("dist must be 'normal', 'laplace', or 't5'.")
+    raise ValueError("dist must be 'normal', 'uniform', 'laplace', or 't5'.")
 
 
 def simulate_vara(
@@ -176,7 +183,8 @@ def simulate_vara(
     The recursion is
     ``Y_t = beta * Y_{t-1} + gamma_a * (W(eta_a) @ Y_{t-1}) + eps_t``.
     Innovations are drawn with unit variance and then scaled coordinatewise by
-    ``sqrt(sigma2)``. The initial state is zero.
+    ``sqrt(sigma2)``. The initial state is the first innovation, with no burn-in.
+    ``T`` is the returned row count, including that initial state.
 
     If ``precomputed_attention`` is supplied, it is reused for every time step.
     This is useful for large-``p`` simulations when memory is available and the
@@ -194,7 +202,7 @@ def simulate_vara(
     eps = eps_raw * jnp.sqrt(sigma2)[None, :]
 
     ys = []
-    y_prev = jnp.zeros((p,), dtype=Z.dtype)
+    y_prev = eps[0]
     ys.append(y_prev)
 
     for t in range(1, T):
@@ -253,6 +261,7 @@ def estimate_eta_concentrated(
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
     attention_cache: Optional[TopKAttentionCache] = None,
+    component_indices=None,
 ):
     """Estimate ``eta_a`` by a grid search followed by local refinement.
 
@@ -260,6 +269,8 @@ def estimate_eta_concentrated(
     value, and whether the grid optimum occurred at the search boundary.
     """
     lower, upper = eta_bounds
+    if grid_size < 3 or not lower < upper:
+        raise ValueError("Use at least three grid points and increasing eta bounds")
     grid = jnp.linspace(lower, upper, grid_size)
 
     vals = []
@@ -272,6 +283,7 @@ def estimate_eta_concentrated(
             attention_mode=attention_mode,
             attention_top_k=attention_top_k,
             attention_cache=attention_cache,
+            component_indices=component_indices,
         ))
     vals = jnp.array(vals)
     best_idx = int(jnp.argmax(vals))
@@ -293,8 +305,15 @@ def estimate_eta_concentrated(
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
         attention_cache=attention_cache,
+        component_indices=component_indices,
     )
-    eta_hat, obj = golden_section_maximize(fn, local_lower, local_upper)
+    candidates = [(float(grid[best_idx]), float(vals[best_idx]))]
+    for idx in range(grid_size):
+        if ((idx == 0 or vals[idx] >= vals[idx - 1]) and
+                (idx == grid_size - 1 or vals[idx] >= vals[idx + 1])):
+            candidates.append(golden_section_maximize(
+                fn, float(grid[max(0, idx - 1)]), float(grid[min(grid_size - 1, idx + 1)])))
+    eta_hat, obj = max(candidates, key=lambda item: item[1])
     info = {
         "grid_best_eta": float(grid[best_idx]),
         "grid_best_obj": float(vals[best_idx]),
@@ -491,32 +510,35 @@ def run_qmle_on_dataset(
 ) -> Tuple[Dict[str, Any], int]:
     """Run full QMLE for one simulated dataset.
 
-    The optimizer is initialized near the true optimizer-scale theta. Returned
+    Three data-based starts are used, with log-variance coordinates. Returned
     estimates are converted into the paper-facing names used by summaries:
     ``alpha_hat`` for code ``beta`` and ``beta_hat`` for code ``gamma_a``.
     """
     _, p = Y.shape
-    theta_true_reparam = reparam_theta_from_params(params_true, p)
-    block_order = make_block_order(p)
+    if algorithm != "lbfgs":
+        raise ValueError("The manuscript QMLE uses algorithm='lbfgs'")
+    def natural(theta):
+        return jnp.concatenate((theta[:1 + 2*p], jnp.exp(theta[1 + 2*p:])))
 
-    theta_init = theta_true_reparam + perturb_scale * jax.random.normal(
-        key, theta_true_reparam.shape
-    )
-
-    result, convergence = estimate(
-        Y=Y,
-        Z=Z,
-        key=key,
-        theta_init=theta_init,
-        params_scale=params_scale,
-        algorithm=algorithm,
-        update_idx=slice(None),
-        block_order=block_order,
-        kappa4=kappa4,
-        eta_bounds=eta_bounds,
-    )
-
-    theta_hat = jnp.asarray(result["theta"])
+    objective = jax.jit(jax.value_and_grad(lambda theta: -loglik(natural(theta), Y, Z, params_scale)))
+    initial_variance = jnp.maximum(jnp.var(Y[1:], axis=0), 0.1)
+    candidates = []
+    for initial_eta in (0.25, 1.5, 3.0):
+        initial = jnp.concatenate((jnp.array([np.clip(initial_eta, *eta_bounds)]),
+                                   jnp.full(p, 0.5), jnp.zeros(p), jnp.log(initial_variance)))
+        fitted = minimize(objective, np.asarray(initial), jac=True, method="L-BFGS-B",
+                          bounds=[eta_bounds] + [(-1.5, 1.5)] * (2*p) +
+                          [(math.log(1e-4), math.log(10.))] * p,
+                          options={"maxiter": 3000, "ftol": 1e-12, "gtol": 1e-7})
+        if np.isfinite(fitted.fun):
+            candidates.append(fitted)
+    if not candidates:
+        raise RuntimeError("All QMLE starts failed")
+    fitted = min(candidates, key=lambda item: item.fun)
+    theta_hat = natural(jnp.asarray(fitted.x))
+    weights = build_attention(Z, theta_hat[0], params_scale["eta_a"])
+    residual = Y[1:] - Y[:-1] * theta_hat[1+p:1+2*p] - (Y[:-1] @ weights.T) * theta_hat[1:1+p]
+    kappa4 = float(jnp.mean(jnp.mean(residual**4, axis=0) / theta_hat[1+2*p:]**2))
 
     try:
         var = compute_sandwich_variance(
@@ -526,10 +548,11 @@ def run_qmle_on_dataset(
             params_scale=params_scale,
             kappa4=kappa4,
             alpha=alpha,
+            empirical_lags=True,
         )
         se = jnp.asarray(var["se"])
     except Exception:
-        se = jnp.asarray(result.get("se", jnp.full_like(theta_hat, jnp.nan)))
+        se = jnp.full_like(theta_hat, jnp.nan)
 
     estimates = {
         "eta_hat": theta_hat[0],
@@ -541,7 +564,7 @@ def run_qmle_on_dataset(
         "se_beta": se[1:1 + p],
         "se_sigma2": se[1 + 2 * p:1 + 3 * p],
     }
-    return estimates, int(convergence.get("status", 1))
+    return estimates, 0 if fitted.success else int(fitted.status or 1)
 
 
 def run_two_stage_on_dataset(
@@ -561,6 +584,7 @@ def run_two_stage_on_dataset(
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
     attention_cache: Optional[TopKAttentionCache] = None,
+    component_indices=None,
 ) -> Tuple[Dict[str, Any], int]:
     """Run the two-stage estimator on one simulated dataset.
 
@@ -584,6 +608,7 @@ def run_two_stage_on_dataset(
         attention_mode=attention_mode,
         attention_top_k=attention_top_k,
         attention_cache=attention_cache,
+        component_indices=component_indices,
     )
     eta_hat_f = float(eta_hat)
 
@@ -601,9 +626,10 @@ def run_two_stage_on_dataset(
     )
 
     sigma2_hat = fit["sigma2_hat"]
-    se_sigma2 = jnp.sqrt(jnp.maximum((kappa4 - 1.0) * sigma2_hat ** 2 / T_eff, 0.0))
+    kappa4_hat = jnp.mean(jnp.mean(fit["resid"] ** 4, axis=0) / sigma2_hat**2)
+    se_sigma2 = sigma2_hat * jnp.sqrt(jnp.maximum(kappa4_hat - 1., 0.) / T_eff)
 
-    report_gamma_ecp = setting == "low"
+    report_gamma_ecp = setting == "low" and component_indices is None
     se_eta = jnp.nan
     omega_hat = jnp.nan
     if report_gamma_ecp:
@@ -635,6 +661,7 @@ def run_two_stage_on_dataset(
         "se_beta": fit["se_beta"],
         "se_sigma2": se_sigma2,
         "extra": {
+            "pilot_size": p if component_indices is None else len(component_indices),
             "omega_hat": float(omega_hat) if jnp.isfinite(omega_hat) else math.nan,
             "eta_on_boundary": bool(info.get("on_boundary", False)),
             "grid_best_eta": float(info.get("grid_best_eta", math.nan)),
@@ -669,6 +696,8 @@ def full_single_replication(
     attention_mode: str = "dense",
     attention_top_k: Optional[int] = None,
     attention_cache: Optional[TopKAttentionCache] = None,
+    redraw_dgp: bool = False,
+    pilot_sizes: Optional[Sequence[int]] = None,
 ) -> List[Dict[str, Any]]:
     """Simulate one dataset and run all requested estimation methods.
 
@@ -679,14 +708,26 @@ def full_single_replication(
     if params_scale is None:
         params_scale = PARAMS_SCALE
 
-    sim_key, qmle_key = jax.random.split(key)
+    sim_key, qmle_key, subset_key, feature_key, parameter_key = jax.random.split(key, 5)
+    if redraw_dgp:
+        true_eta = params_true["eta_a"]
+        params_true = draw_simulation_params(parameter_key, p)
+        params_true["eta_a"] = true_eta
+        Z = draw_Z(feature_key, p, q, n_clusters=feature_clusters_for_setting(T, setting))
+        dgp_attention = build_attention(Z, float(true_eta), params_scale["eta_a"])
+    permutation = jax.random.permutation(subset_key, p)
+    subset = permutation[:min(p, math.ceil(math.log2(p) ** 2))]
+    if pilot_sizes is not None:
+        if any(size < 1 or size > p for size in pilot_sizes):
+            raise ValueError("Pilot sizes must be between 1 and p")
+        methods = [f"two_stage_m{size}" for size in pilot_sizes]
     kappa4 = kappa4_for_dist(dist)
 
     Y = simulate_vara(
         key=sim_key,
         params=params_true,
         Z=Z,
-        T=T,
+        T=T + 1,
         p=p,
         q=q,
         dist=dist,
@@ -701,7 +742,7 @@ def full_single_replication(
 
     rows = []
     for method in methods:
-        start = time.time()
+        start = time.process_time()
         try:
             if method == "qmle":
                 estimates, status = run_qmle_on_dataset(
@@ -718,7 +759,10 @@ def full_single_replication(
                 )
                 extra = {}
                 report_gamma_ecp = True
-            elif method == "two_stage":
+            elif method in {"two_stage", "two_stage_subsampled"} or method.startswith("two_stage_m"):
+                indices = (permutation[:int(method.removeprefix("two_stage_m"))]
+                           if method.startswith("two_stage_m") else
+                           subset if method == "two_stage_subsampled" else None)
                 estimates, status = run_two_stage_on_dataset(
                     Y=Y,
                     Z=Z,
@@ -736,13 +780,15 @@ def full_single_replication(
                     attention_mode=attention_mode,
                     attention_top_k=attention_top_k,
                     attention_cache=attention_cache,
+                    component_indices=indices,
                 )
                 extra = estimates.pop("extra", {})
-                report_gamma_ecp = setting == "low"
+                report_gamma_ecp = setting == "low" and indices is None
             else:
                 raise ValueError(f"Unknown method: {method}")
 
-            elapsed = time.time() - start
+            jax.block_until_ready(estimates)
+            elapsed = time.process_time() - start
             rows.append(pack_result_row(
                 setting=setting,
                 method=method,
@@ -761,7 +807,7 @@ def full_single_replication(
                 **estimates,
             ))
         except Exception as e:
-            elapsed = time.time() - start
+            elapsed = time.process_time() - start
             rows.append(pack_result_row(
                 setting=setting,
                 method=method,
@@ -778,6 +824,11 @@ def full_single_replication(
                 report_gamma_ecp=(setting == "low"),
                 extra={"error": repr(e)},
             ))
+    for row in rows:
+        lhs = float(jnp.max(jnp.abs(params_true["beta"])) + jnp.max(jnp.abs(params_true["gamma_a"])))
+        row["stationary_lhs_before"] = lhs
+        row["stationary_lhs_after"] = lhs
+        row["DGP_attention_precomputed"] = dgp_attention is not None
     return rows
 
 
@@ -806,12 +857,15 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
             "cpu_sec_mean": float(valid["elapsed_sec"].mean()) if len(valid) else math.nan,
             "cpu_sec_sum": float(valid["elapsed_sec"].sum()) if len(valid) else math.nan,
         }
+        if "pilot_size" in sub:
+            rec["pilot_size"] = sub["pilot_size"].iloc[0]
         if len(valid):
             rec.update({
                 "RMSE_gamma": math.sqrt(float(valid["eta_sqerr"].mean())),
                 "RMSE_alpha": math.sqrt(float(valid["alpha_mse"].mean())),
                 "RMSE_beta": math.sqrt(float(valid["beta_mse"].mean())),
                 "RMSE_sigma2": math.sqrt(float(valid["sigma2_mse"].mean())),
+                "RMSE_pool": math.sqrt(float(valid[["alpha_mse", "beta_mse", "sigma2_mse"]].to_numpy().mean())),
                 "ECP_gamma": float(valid["eta_covered"].mean()),
                 "ECP_alpha": float(valid["alpha_ecp"].mean()),
                 "ECP_beta": float(valid["beta_ecp"].mean()),

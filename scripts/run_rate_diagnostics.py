@@ -55,29 +55,29 @@ def _feature_clusters_for_design(T: int, p: int, feature_clusters=None) -> int:
 # 1. Rate utilities for convergence diagnostics
 # =====================================================================
 
-def convergence_rate_bound(T_eff, p):
+def convergence_rate_bound(T_eff, p, pilot_size=None):
     """
     Convergence rate for sqrt(T) * (eta_hat_c - eta):
-        1 / sqrt(p) + sqrt(log(p) log(Tp) / T).
+        1 / sqrt(m_p) + sqrt(log(p) / T), with m_p=p by default.
     """
     T_eff = float(T_eff)
     p = float(p)
-    return 1.0 / math.sqrt(p) + math.sqrt(
-        math.log(p) * math.log(T_eff * p) / T_eff
+    return 1.0 / math.sqrt(p if pilot_size is None else pilot_size) + math.sqrt(
+        math.log(p) / T_eff
     )
 
 
-def convergence_condition_numbers(T_eff, p):
+def convergence_condition_numbers(T_eff, p, pilot_size=None):
     """
     Return the two rate-condition quantities for convergence diagnostics.
 
-    Statement (i):  log(p) log(Tp) / T -> 0.
-    Statement (ii): p log(p) log(Tp) / T -> 0.
+    Statement (i):  log(p) / T -> 0 (also requires m_p -> infinity).
+    Statement (ii): m_p log(p) / T -> 0.
     """
     T_eff = float(T_eff)
     p = float(p)
-    c1 = math.log(p) * math.log(T_eff * p) / T_eff
-    c2 = p * c1
+    c1 = math.log(p) / T_eff
+    c2 = (p if pilot_size is None else pilot_size) * c1
     return c1, c2
 
 
