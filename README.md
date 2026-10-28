@@ -1,6 +1,6 @@
 # Vector Autoregression with Attentions (VARA)
 
-VARA is a research codebase for a network-augmented vector autoregression that uses structured attention weights to model cross-series dependence.
+VARA is a network-augmented vector autoregression that uses structured attention weights to model cross-series dependence.
 
 ## Repository Layout
 
@@ -9,7 +9,6 @@ VARA is a research codebase for a network-augmented vector autoregression that u
 ├── vara/          # core model, likelihood, covariance, and estimation code
 ├── scripts/       # experiment runners, plotting helpers, and setup utilities
 ├── data/          # small checked-in input data files
-├── patches/       # reference patch files kept with the repo
 ├── README.md
 ├── pyproject.toml
 └── requirements.txt
@@ -139,11 +138,6 @@ result = study.run(
 result.save("outputs/risk_study")
 ```
 
-By default, the pipeline applies the Risk specification's componentwise
-median--MAD normalization to each rolling base-residual window before fitting
-VARA, and transforms the residual correction back before forecast combination.
-The selected normalization is recorded in the saved study manifest.
-
 To reuse the exact five fitted risk benchmarks from a completed paper run:
 
 ```python
@@ -158,19 +152,6 @@ result = study.run(benchmarks.forecasters(panel, study.split))
 This loads HAR ridge, pooled LightGBM, RiskMetrics EWMA, Gaussian GARCH(1,1),
 and Student-t GARCH(1,1) in the fixed paper-table order. The framework then
 applies the configured VARA correction to each model's genuine forecast errors.
-
-Previously used rolling-origin benchmarks are also native base models:
-
-```python
-from vara.api import AutoARIMAForecaster, AutoETSForecaster, NBEATSForecaster
-
-models = [
-    AutoETSForecaster(season_length=12),
-    AutoARIMAForecaster(season_length=12),
-    NBEATSForecaster(season_length=12),
-]
-result = study.run(models, execution=ExecutionConfig(ray_num_cpus=16))
-```
 
 Each target is forecast from observations ending at the preceding origin. The
 adapters also generate the pre-validation error history required by VARA;
@@ -200,14 +181,12 @@ command-line override departed from it. For a quick diagnostic, add (for
 example) `--max-series 200 --models paper_har_ridge`; use a separate
 `--output-dir` for every materially different model or VARA configuration.
 
-## Revised manuscript simulations
+## Simulations
 
-The existing simulation driver uses the September 2026 manuscript designs:
-low-dimensional `(T,p,G)=(100,8,2),(200,12,3),(500,16,4)` and high-dimensional
-`(200,200,10),(400,500,20),(800,1600,40)`. Defaults include normal, uniform,
-and Laplace innovations, 500 replications, dense attention scaled by `log(p)`,
-and no feature screening. Each replication redraws features and parameters;
-the initial observation is its first innovation and there are `T` transitions.
+The existing simulation driver uses low-dimensional `(T,p,G)=(100,8,2),(200,12,3),(500,16,4)` and high-dimensional
+`(200,200,10),(400,500,20),(800,1600,40)`. Defaults include normal, uniform, and Laplace innovations, 500 replications,
+dense attention scaled by `log(p)`, and no feature screening. Each replication redraws features and parameters; the
+initial observation is its first innovation and there are `T` transitions.
 
 ```bash
 python scripts/run_full_simulation.py --results-dir outputs/simulation_revised
