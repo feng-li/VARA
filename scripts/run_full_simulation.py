@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("RAY_memory_usage_threshold", "0.9")
+for _thread_variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ[_thread_variable] = "1"
 
 import pandas as pd
 from tqdm import trange
@@ -881,19 +883,19 @@ def draw_good_Z_for_eta_with_ray(
 
 def run_full_simulation(
     *,
-    seed: int = 2026,
+    seed: int = 20260919,
     R: int = 500,
     T_list: Sequence[int] = (),
     settings: Sequence[str] = ("low", "high"),
     dist_list: Sequence[str] = ("normal", "uniform", "laplace"),
     q: int = 50,
     alpha: float = 0.05,
-    ray_num_cpus: int = 52,
+    ray_num_cpus: int = 20,
     max_cpus_per_task: int = 1,
     qmle_algorithm: str = "lbfgs",
     qmle_perturb_scale: float = 0.05,
     eta_bounds: Tuple[float, float] = (0.0, 5.0),
-    grid_size: int = 41,
+    grid_size: int = 9,
     high_grid_size: Optional[int] = None,
     curvature_step: float = 0.02,
     ridge: float = 0.0,
@@ -969,6 +971,15 @@ def run_full_simulation(
             )
 
     _ensure_runtime_imports()
+
+    if pilot_sizes is not None:
+        if list(settings) != ["high"]:
+            raise ValueError("Pilot sensitivity requires --settings high.")
+        dimensions = [p_for_setting(T, "high") for T in _times_for_setting(T_list, "high")]
+        if not pilot_sizes or any(size < 1 or size > min(dimensions) for size in pilot_sizes):
+            raise ValueError("Pilot sizes must be between 1 and every selected panel dimension.")
+        if screen_z:
+            raise ValueError("Pilot sensitivity uses unscreened, replication-specific features.")
 
     key = jax.random.PRNGKey(seed)
     all_detail_rows: List[Dict[str, Any]] = []
@@ -1047,6 +1058,12 @@ def run_full_simulation(
     save_run_config(config_path, run_config)
     _print_progress(f"Saved run config to: {config_path}")
 
+    total_replications = R * len(dist_list) * (len(pilot_sizes) if pilot_sizes else 1) * sum(
+        1 for setting in settings for T in _times_for_setting(T_list, setting)
+        if not (setting == "high" and high_max_p is not None
+                and p_for_setting(T, setting) > high_max_p)
+    )
+    overall_progress = trange(total_replications, desc="Simulation replications", ncols=100)
     for setting in settings:
         if setting not in {"low", "high"}:
             raise ValueError("settings must contain only 'low' and/or 'high'")
@@ -1255,24 +1272,112 @@ def run_full_simulation(
                 rep_keys = jax.random.split(k_rep, R)
                 setting_start = datetime.now()
 
-                if use_ray:
-                    _print_progress(f"Starting Ray replications: R={R}")
-                    n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
-                    _print_progress(f"Creating {n_actors} replication actors")
-                    actors = []
-                    progress = None
-                    try:
-                        actors = [
-                            FullSimulationActor.options(num_cpus=max_cpus_per_task).remote()
-                            for _ in range(n_actors)
-                        ]
-                        dgp_attention_arg = ray.put(dgp_attention) if dgp_attention is not None else None
-                        attention_cache_arg = ray.put(attention_cache) if attention_cache is not None else None
+                setting_rows = []
+                # Use fresh Ray workers for each pilot size when measuring CPU time.
+                pilot_runs = [[size] for size in pilot_sizes] if pilot_sizes else [None]
+                for pilot_run in pilot_runs:
+                    if use_ray:
+                        _print_progress(f"Starting Ray replications: R={R}")
+                        n_actors = max(1, min(R, int(ray_num_cpus / max_cpus_per_task)))
+                        _print_progress(f"Creating {n_actors} replication actors")
+                        actors = []
+                        progress = None
+                        try:
+                            actors = [
+                                FullSimulationActor.options(num_cpus=max_cpus_per_task).remote()
+                                for _ in range(n_actors)
+                            ]
+                            dgp_attention_arg = ray.put(dgp_attention) if dgp_attention is not None else None
+                            attention_cache_arg = ray.put(attention_cache) if attention_cache is not None else None
 
-                        def submit_replication(rep: int):
-                            return actors[rep % n_actors].run.remote(
-                                rep=rep,
-                                key=rep_keys[rep],
+                            def submit_replication(rep: int):
+                                return actors[rep % n_actors].run.remote(
+                                    rep=rep,
+                                    key=rep_keys[rep],
+                                    params_true=params_true,
+                                    Z=Z,
+                                    setting=setting,
+                                    T=T,
+                                    p=p,
+                                    q=q,
+                                    dist=dist,
+                                    seed=seed,
+                                    methods=methods,
+                                    alpha=alpha,
+                                    qmle_algorithm=qmle_algorithm,
+                                    qmle_perturb_scale=qmle_perturb_scale,
+                                    eta_bounds=eta_bounds,
+                                    grid_size=grid_size_use,
+                                    curvature_step=curvature_step,
+                                    ridge=ridge,
+                                    batch_size=batch_size,
+                                    dense_threshold=dense_threshold,
+                                    dgp_attention=dgp_attention_arg,
+                                    params_scale=params_scale,
+                                    attention_mode=attention_mode,
+                                    attention_top_k=attention_top_k,
+                                    attention_cache=attention_cache_arg,
+                                    ray_debug=ray_debug,
+                                    redraw_dgp=not screen_z and attention_mode == "dense",
+                                    pilot_sizes=pilot_run,
+                                )
+
+                            max_pending = min(R, max(1, 2 * n_actors))
+                            _print_progress(
+                                f"Submitting replication tasks: max_pending={max_pending}, n_actors={n_actors}"
+                            )
+                            batch_rows = []
+                            pending = []
+                            submitted = 0
+                            completed = 0
+                            submit_times = {}
+                            progress = overall_progress
+
+                            while submitted < R and len(pending) < max_pending:
+                                ref = submit_replication(submitted)
+                                pending.append(ref)
+                                submit_times[ref] = time.time()
+                                submitted += 1
+
+                            while pending:
+                                ready, pending = ray.wait(pending, num_returns=1, timeout=60.0)
+                                if not ready:
+                                    now = time.time()
+                                    slowest_wait = now - min(submit_times.values()) if submit_times else 0.0
+                                    elapsed = (datetime.now() - setting_start).total_seconds()
+                                    _print_progress(
+                                        "Ray replication wait: "
+                                        f"done={completed}/{R}, submitted={submitted}/{R}, "
+                                        f"pending={len(pending)}, elapsed_sec={elapsed:.1f}, "
+                                        f"slowest_pending_sec={slowest_wait:.1f}, "
+                                        f"available={ray.available_resources()}"
+                                    )
+                                    continue
+
+                                for ref in ready:
+                                    batch_rows.extend(ray.get(ref))
+                                    submit_times.pop(ref, None)
+                                    completed += 1
+                                    progress.update(1)
+
+                                    while submitted < R and len(pending) < max_pending:
+                                        next_ref = submit_replication(submitted)
+                                        pending.append(next_ref)
+                                        submit_times[next_ref] = time.time()
+                                        submitted += 1
+                        finally:
+                            for actor in actors:
+                                try:
+                                    ray.kill(actor, no_restart=True)
+                                except Exception:
+                                    pass
+                    else:
+                        _print_progress(f"Starting sequential replications: R={R}")
+                        batch_rows = []
+                        for r in range(R):
+                            batch_rows.extend(full_single_replication(
+                                rep=r,
+                                key=rep_keys[r],
                                 params_true=params_true,
                                 Z=Z,
                                 setting=setting,
@@ -1291,100 +1396,16 @@ def run_full_simulation(
                                 ridge=ridge,
                                 batch_size=batch_size,
                                 dense_threshold=dense_threshold,
-                                dgp_attention=dgp_attention_arg,
+                                dgp_attention=dgp_attention,
                                 params_scale=params_scale,
                                 attention_mode=attention_mode,
                                 attention_top_k=attention_top_k,
-                                attention_cache=attention_cache_arg,
-                                ray_debug=ray_debug,
+                                attention_cache=attention_cache,
                                 redraw_dgp=not screen_z and attention_mode == "dense",
-                                pilot_sizes=pilot_sizes,
-                            )
-
-                        max_pending = min(R, max(1, 2 * n_actors))
-                        _print_progress(
-                            f"Submitting replication tasks: max_pending={max_pending}, n_actors={n_actors}"
-                        )
-                        setting_rows = []
-                        pending = []
-                        submitted = 0
-                        completed = 0
-                        submit_times = {}
-                        progress = trange(R, desc=f"{setting}/{dist}/T={T}", ncols=100)
-
-                        while submitted < R and len(pending) < max_pending:
-                            ref = submit_replication(submitted)
-                            pending.append(ref)
-                            submit_times[ref] = time.time()
-                            submitted += 1
-
-                        while pending:
-                            ready, pending = ray.wait(pending, num_returns=1, timeout=60.0)
-                            if not ready:
-                                now = time.time()
-                                slowest_wait = now - min(submit_times.values()) if submit_times else 0.0
-                                elapsed = (datetime.now() - setting_start).total_seconds()
-                                _print_progress(
-                                    "Ray replication wait: "
-                                    f"done={completed}/{R}, submitted={submitted}/{R}, "
-                                    f"pending={len(pending)}, elapsed_sec={elapsed:.1f}, "
-                                    f"slowest_pending_sec={slowest_wait:.1f}, "
-                                    f"available={ray.available_resources()}"
-                                )
-                                continue
-
-                            for ref in ready:
-                                setting_rows.extend(ray.get(ref))
-                                submit_times.pop(ref, None)
-                                completed += 1
-                                progress.update(1)
-
-                                while submitted < R and len(pending) < max_pending:
-                                    next_ref = submit_replication(submitted)
-                                    pending.append(next_ref)
-                                    submit_times[next_ref] = time.time()
-                                    submitted += 1
-                    finally:
-                        if progress is not None:
-                            progress.close()
-                        for actor in actors:
-                            try:
-                                ray.kill(actor, no_restart=True)
-                            except Exception:
-                                pass
-                else:
-                    _print_progress(f"Starting sequential replications: R={R}")
-                    setting_rows = []
-                    for r in trange(R, desc=f"{setting}/{dist}/T={T}", ncols=100):
-                        setting_rows.extend(full_single_replication(
-                            rep=r,
-                            key=rep_keys[r],
-                            params_true=params_true,
-                            Z=Z,
-                            setting=setting,
-                            T=T,
-                            p=p,
-                            q=q,
-                            dist=dist,
-                            seed=seed,
-                            methods=methods,
-                            alpha=alpha,
-                            qmle_algorithm=qmle_algorithm,
-                            qmle_perturb_scale=qmle_perturb_scale,
-                            eta_bounds=eta_bounds,
-                            grid_size=grid_size_use,
-                            curvature_step=curvature_step,
-                            ridge=ridge,
-                            batch_size=batch_size,
-                            dense_threshold=dense_threshold,
-                            dgp_attention=dgp_attention,
-                            params_scale=params_scale,
-                            attention_mode=attention_mode,
-                            attention_top_k=attention_top_k,
-                            attention_cache=attention_cache,
-                            redraw_dgp=not screen_z and attention_mode == "dense",
-                            pilot_sizes=pilot_sizes,
-                        ))
+                                pilot_sizes=pilot_run,
+                            ))
+                            overall_progress.update(1)
+                    setting_rows.extend(batch_rows)
 
                 elapsed_setting = (datetime.now() - setting_start).total_seconds()
                 _print_progress(f"Replications finished in {elapsed_setting:.2f} seconds")
@@ -1483,6 +1504,7 @@ def run_full_simulation(
 
                 gc.collect()
 
+    overall_progress.close()
     if ray_started_here:
         _print_progress("Shutting down Ray")
         ray.shutdown()
@@ -1533,10 +1555,10 @@ def main():
     parser.add_argument(
         "--ray-num-cpus",
         type=int,
-        default=52,
+        default=20,
         help="Total Ray CPU budget. Use 1 to disable Ray and run sequentially.",
     )
-    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--seed", type=int, default=20260919)
     parser.add_argument("--R", type=int, default=500)
     parser.add_argument("--pilot-sizes", default=None,
                         help="Comma-separated nested pilot sizes for a sensitivity experiment.")
@@ -1557,7 +1579,7 @@ def main():
     parser.add_argument("--qmle-perturb-scale", type=float, default=0.05)
     parser.add_argument("--eta-lower", type=float, default=0.0)
     parser.add_argument("--eta-upper", type=float, default=5.0)
-    parser.add_argument("--grid-size", type=int, default=41)
+    parser.add_argument("--grid-size", type=int, default=9)
     parser.add_argument("--high-grid-size", type=int, default=None)
     parser.add_argument("--curvature-step", type=float, default=0.02)
     parser.add_argument("--ridge", type=float, default=0.0)

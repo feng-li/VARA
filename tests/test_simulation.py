@@ -26,6 +26,64 @@ from vara.simulation import (
 
 
 class SimulationTests(unittest.TestCase):
+    def test_profile_search_checks_multiple_peaks_and_true_boundary(self):
+        from unittest.mock import patch
+        from vara.simulation import estimate_eta_concentrated
+
+        def objective(eta, *args, **kwargs):
+            return max(1.0 - (eta - 0.8)**2, 2.0 - 20.0 * (eta - 3.2)**2)
+
+        with patch("vara.simulation.concentrated_eta_loglik", side_effect=objective):
+            eta, info = estimate_eta_concentrated(None, None, {}, (0., 5.))
+        self.assertAlmostEqual(eta, 3.2, places=5)
+        self.assertFalse(info["on_boundary"])
+        self.assertGreater(info["profile_evaluations"], 9)
+        with patch("vara.simulation.concentrated_eta_loglik", side_effect=lambda x, *a, **k: -x):
+            eta, info = estimate_eta_concentrated(None, None, {}, (0., 5.))
+        self.assertEqual(eta, 0.)
+        self.assertTrue(info["on_boundary"])
+
+    def test_invalid_standard_errors_are_missing_coverage(self):
+        from vara.simulation import pack_result_row, summarize_setting
+        import pandas as pd
+
+        params = draw_simulation_params(jax.random.PRNGKey(1), 3)
+        rows = []
+        for rep, se in enumerate((jnp.ones(3), jnp.full(3, jnp.nan))):
+            rows.append(pack_result_row(
+                setting="high", method="two_stage", rep=rep, T=20, p=3, q=2,
+                dist="normal", seed=1, status=0, elapsed_sec=1., params_true=params,
+                eta_hat=1., alpha_hat=params["beta"], beta_hat=params["gamma_a"],
+                sigma2_hat=params["sigma2"], se_alpha=se, se_beta=se, se_sigma2=se,
+                report_gamma_ecp=False,
+            ))
+        self.assertTrue(math.isnan(rows[1]["alpha_ecp"]))
+        summary = summarize_setting(pd.DataFrame(rows)).iloc[0]
+        self.assertEqual(summary["n_fit"], 2)
+        self.assertEqual(summary["n_se"], 1)
+        self.assertEqual(summary["ECP_alpha"], 1.)
+
+    def test_innovation_cases_share_design_but_not_noise(self):
+        from unittest.mock import patch
+        captured = []
+
+        def fit(**kwargs):
+            captured.append(kwargs)
+            raise RuntimeError("capture only")
+
+        key = jax.random.PRNGKey(21)
+        params = draw_simulation_params(key, 5)
+        with patch("vara.simulation.run_two_stage_on_dataset", side_effect=fit):
+            for dist in ("normal", "uniform"):
+                full_single_replication(
+                    0, key, params, draw_Z(key, 5, 3), "high", 12, 5, 3, dist, 21,
+                    ["two_stage_subsampled"], .05, "lbfgs", .05, (0., 5.), 9,
+                    .02, 0., 3, 2500, params_scale={"eta_a": math.log(5)}, redraw_dgp=True)
+        np.testing.assert_array_equal(captured[0]["Z"], captured[1]["Z"])
+        for name in params:
+            np.testing.assert_array_equal(captured[0]["params_true"][name], captured[1]["params_true"][name])
+        self.assertFalse(np.array_equal(captured[0]["Y"], captured[1]["Y"]))
+
     def test_replication_full_and_nested_pilots(self):
         from unittest.mock import patch
         key = jax.random.PRNGKey(18)

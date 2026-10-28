@@ -8,7 +8,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 DATA_DIR = REPO_ROOT / "data"
-OUTPUTS_DIR = REPO_ROOT / "outputs"
+OUTPUTS_DIR = Path(os.environ.get("VARA_OUTPUTS_DIR", "~/running/VARA/outputs")).expanduser()
 FIGURES_DIR = OUTPUTS_DIR / "figures"
 RESULTS_DIR = OUTPUTS_DIR / "results"
 SIMULATIONS_DIR = OUTPUTS_DIR / "simulations"

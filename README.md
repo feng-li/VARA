@@ -10,7 +10,6 @@ VARA is a research codebase for a network-augmented vector autoregression that u
 ├── scripts/       # experiment runners, plotting helpers, and setup utilities
 ├── data/          # small checked-in input data files
 ├── patches/       # reference patch files kept with the repo
-├── outputs/       # generated results, figures, and simulation artifacts
 ├── README.md
 ├── pyproject.toml
 └── requirements.txt
@@ -42,7 +41,39 @@ VARA is a research codebase for a network-augmented vector autoregression that u
    python scripts/plot_varying_p.py
    ```
 
-Generated files are written under `outputs/` instead of cluttering the repository root.
+Scripts using the shared bootstrap write generated files under
+`~/running/VARA/outputs/`. Set `VARA_OUTPUTS_DIR` to override this location.
+
+## Manuscript simulations
+
+`scripts/run_full_simulation.py` implements the settings documented in
+`docs/vara_simu/` using the existing JAX estimators and Ray workers. The default
+table run uses 500 replications, 20 workers, seed `20260919`, and normal,
+uniform, and Laplace innovations. Features and parameters are redrawn for each
+replication and shared across innovation cases. Each panel contains the initial
+innovation plus `T` transitions, with no burn-in. High-dimensional runs compare
+full estimation with `ceil(log2(p)^2)` sampled response equations; both retain
+all series as attention sources and fit every component in the second stage.
+
+```bash
+python scripts/run_full_simulation.py
+```
+
+Run the six-size pilot comparison separately:
+
+```bash
+python scripts/run_full_simulation.py --settings high --T-list 800 \
+  --dist-list normal --R 100 --pilot-sizes 50,100,200,400,800,1600
+python scripts/plot_simulation_pilot_sensitivity.py /path/to/summary_full_simulation.csv
+```
+
+Pilot subsets are nested and use the same data for each replication. Ray workers
+are recreated between sizes. Summary CSVs include pooled component RMSE
+(excluding gamma), its Monte Carlo standard error, valid-fit and standard-error
+counts, and CPU timings for both estimation stages. CPU timing excludes data
+generation but includes standard-error calculation. JAX and NumPy use different
+random-number generators, so these runs follow the documented design without
+reproducing the reference scripts' draws or hardware timings exactly.
 
 ## Model
 

@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 import pandas as pd
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 
 from .attention import TopKAttentionCache, attention_matvec, build_attention
 from .cov import compute_sandwich_variance
@@ -254,7 +254,7 @@ def estimate_eta_concentrated(
     Z: jnp.ndarray,
     params_scale: Dict[str, float],
     eta_bounds: Tuple[float, float] = (-2.0, 2.0),
-    grid_size: int = 41,
+    grid_size: int = 9,
     ridge: float = 1e-10,
     batch_size: int = 512,
     dense_threshold: int = 2500,
@@ -273,52 +273,53 @@ def estimate_eta_concentrated(
         raise ValueError("Use at least three grid points and increasing eta bounds")
     grid = jnp.linspace(lower, upper, grid_size)
 
+    evaluated = {}
+
+    def fn(eta):
+        eta = float(eta)
+        if eta not in evaluated:
+            evaluated[eta] = float(concentrated_eta_loglik(
+                eta, Y, Z, params_scale, ridge=ridge,
+                batch_size=batch_size, dense_threshold=dense_threshold,
+                attention_mode=attention_mode, attention_top_k=attention_top_k,
+                attention_cache=attention_cache, component_indices=component_indices,
+            ))
+        return evaluated[eta]
+
     vals = []
     for eta in grid:
-        vals.append(concentrated_eta_loglik(
-            float(eta), Y, Z, params_scale,
-            ridge=ridge,
-            batch_size=batch_size,
-            dense_threshold=dense_threshold,
-            attention_mode=attention_mode,
-            attention_top_k=attention_top_k,
-            attention_cache=attention_cache,
-            component_indices=component_indices,
-        ))
+        vals.append(fn(eta))
     vals = jnp.array(vals)
     best_idx = int(jnp.argmax(vals))
 
-    left_idx = max(0, best_idx - 1)
-    right_idx = min(grid_size - 1, best_idx + 1)
-    local_lower = float(grid[left_idx])
-    local_upper = float(grid[right_idx])
-    if best_idx == 0:
-        local_lower, local_upper = float(grid[0]), float(grid[1])
-    elif best_idx == grid_size - 1:
-        local_lower, local_upper = float(grid[-2]), float(grid[-1])
-
-    fn = lambda x: concentrated_eta_loglik(
-        x, Y, Z, params_scale,
-        ridge=ridge,
-        batch_size=batch_size,
-        dense_threshold=dense_threshold,
-        attention_mode=attention_mode,
-        attention_top_k=attention_top_k,
-        attention_cache=attention_cache,
-        component_indices=component_indices,
-    )
     candidates = [(float(grid[best_idx]), float(vals[best_idx]))]
     for idx in range(grid_size):
         if ((idx == 0 or vals[idx] >= vals[idx - 1]) and
                 (idx == grid_size - 1 or vals[idx] >= vals[idx + 1])):
-            candidates.append(golden_section_maximize(
-                fn, float(grid[max(0, idx - 1)]), float(grid[min(grid_size - 1, idx + 1)])))
+            left = float(grid[max(0, idx - 1)])
+            right = float(grid[min(grid_size - 1, idx + 1)])
+            # Refine every candidate peak before the bounded scalar search.
+            # This also retains endpoints when the optimum is on a bound.
+            for _ in range(3):
+                points = np.linspace(left, right, 9)
+                values = np.asarray([fn(point) for point in points])
+                best = int(np.argmax(values))
+                left = float(points[max(0, best - 1)])
+                right = float(points[min(8, best + 1)])
+            result = minimize_scalar(
+                lambda value: -fn(value), bounds=(left, right), method="bounded",
+                options={"xatol": 1e-8, "maxiter": 300},
+            )
+            candidates.append((float(result.x), -float(result.fun)))
+    candidates.extend(evaluated.items())
     eta_hat, obj = max(candidates, key=lambda item: item[1])
     info = {
         "grid_best_eta": float(grid[best_idx]),
         "grid_best_obj": float(vals[best_idx]),
         "objective": obj,
-        "on_boundary": bool(best_idx == 0 or best_idx == grid_size - 1),
+        "on_boundary": bool(np.isclose(eta_hat, lower, atol=1e-7, rtol=0)
+                            or np.isclose(eta_hat, upper, atol=1e-7, rtol=0)),
+        "profile_evaluations": len(evaluated),
     }
     return eta_hat, info
 
@@ -483,9 +484,10 @@ def pack_result_row(
             se_arr = jnp.asarray(se)
             lo = jnp.asarray(hat) - zcrit * se_arr
             hi = jnp.asarray(hat) + zcrit * se_arr
+            valid_se = bool(jnp.all(jnp.isfinite(se_arr) & (se_arr > 0)))
             covered = (jnp.asarray(true) >= lo) & (jnp.asarray(true) <= hi)
-            row[f"{name}_ecp"] = float(jnp.mean(covered))
-            row[f"{name}_ci_len"] = float(jnp.mean(hi - lo))
+            row[f"{name}_ecp"] = float(jnp.mean(covered)) if valid_se else math.nan
+            row[f"{name}_ci_len"] = float(jnp.mean(hi - lo)) if valid_se else math.nan
 
     vector_metrics("alpha", alpha_hat, alpha_true, se_alpha)
     vector_metrics("beta", beta_hat, beta_true, se_beta)
@@ -596,6 +598,7 @@ def run_two_stage_on_dataset(
     T, p = Y.shape
     T_eff = T - 1
 
+    started = time.process_time()
     eta_hat, info = estimate_eta_concentrated(
         Y=Y,
         Z=Z,
@@ -611,6 +614,8 @@ def run_two_stage_on_dataset(
         component_indices=component_indices,
     )
     eta_hat_f = float(eta_hat)
+    first_stage_sec = time.process_time() - started
+    started = time.process_time()
 
     fit = fit_all_components_two_stage(
         Y=Y,
@@ -628,6 +633,8 @@ def run_two_stage_on_dataset(
     sigma2_hat = fit["sigma2_hat"]
     kappa4_hat = jnp.mean(jnp.mean(fit["resid"] ** 4, axis=0) / sigma2_hat**2)
     se_sigma2 = sigma2_hat * jnp.sqrt(jnp.maximum(kappa4_hat - 1., 0.) / T_eff)
+    jax.block_until_ready((fit, se_sigma2))
+    second_stage_sec = time.process_time() - started
 
     report_gamma_ecp = setting == "low" and component_indices is None
     se_eta = jnp.nan
@@ -662,6 +669,9 @@ def run_two_stage_on_dataset(
         "se_sigma2": se_sigma2,
         "extra": {
             "pilot_size": p if component_indices is None else len(component_indices),
+            "first_stage_cpu_sec": first_stage_sec,
+            "second_stage_cpu_sec": second_stage_sec,
+            "profile_evaluations": info["profile_evaluations"],
             "omega_hat": float(omega_hat) if jnp.isfinite(omega_hat) else math.nan,
             "eta_on_boundary": bool(info.get("on_boundary", False)),
             "grid_best_eta": float(info.get("grid_best_eta", math.nan)),
@@ -709,6 +719,9 @@ def full_single_replication(
         params_scale = PARAMS_SCALE
 
     sim_key, qmle_key, subset_key, feature_key, parameter_key = jax.random.split(key, 5)
+    # Keep the design and nested subsets shared across innovation cases,
+    # while using a distinct innovation stream for each distribution.
+    sim_key = jax.random.fold_in(sim_key, ("normal", "uniform", "laplace", "t5").index(dist))
     if redraw_dgp:
         true_eta = params_true["eta_a"]
         params_true = draw_simulation_params(parameter_key, p)
@@ -743,6 +756,7 @@ def full_single_replication(
     rows = []
     for method in methods:
         start = time.process_time()
+        wall_start = time.monotonic()
         try:
             if method == "qmle":
                 estimates, status = run_qmle_on_dataset(
@@ -789,6 +803,7 @@ def full_single_replication(
 
             jax.block_until_ready(estimates)
             elapsed = time.process_time() - start
+            extra["wall_sec"] = time.monotonic() - wall_start
             rows.append(pack_result_row(
                 setting=setting,
                 method=method,
@@ -845,6 +860,8 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
     for keys, sub in df.groupby(group_cols, dropna=False):
         setting, dist, T, p, q, method = keys
         valid = sub[sub["status"] == 0].copy()
+        mse_columns = ["eta_sqerr", "alpha_mse", "beta_mse", "sigma2_mse"]
+        valid = valid[np.isfinite(valid[mse_columns]).all(axis=1)]
         rec = {
             "setting": setting,
             "dist": dist,
@@ -853,19 +870,25 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
             "q": int(q),
             "method": method,
             "n_rep": int(len(sub)),
-            "valid_rate": float((sub["status"] == 0).mean()) if len(sub) else math.nan,
+            "n_fit": int(len(valid)),
+            "n_se": int(valid[["alpha_ecp", "beta_ecp", "sigma2_ecp"]].notna().all(axis=1).sum()),
+            "valid_rate": len(valid) / len(sub) if len(sub) else math.nan,
             "cpu_sec_mean": float(valid["elapsed_sec"].mean()) if len(valid) else math.nan,
             "cpu_sec_sum": float(valid["elapsed_sec"].sum()) if len(valid) else math.nan,
         }
         if "pilot_size" in sub:
             rec["pilot_size"] = sub["pilot_size"].iloc[0]
         if len(valid):
+            pooled_mse = valid[["alpha_mse", "beta_mse", "sigma2_mse"]].mean(axis=1)
+            pooled_rmse = math.sqrt(float(pooled_mse.mean()))
             rec.update({
                 "RMSE_gamma": math.sqrt(float(valid["eta_sqerr"].mean())),
                 "RMSE_alpha": math.sqrt(float(valid["alpha_mse"].mean())),
                 "RMSE_beta": math.sqrt(float(valid["beta_mse"].mean())),
                 "RMSE_sigma2": math.sqrt(float(valid["sigma2_mse"].mean())),
-                "RMSE_pool": math.sqrt(float(valid[["alpha_mse", "beta_mse", "sigma2_mse"]].to_numpy().mean())),
+                "RMSE_pool": pooled_rmse,
+                "RMSE_pool_mcse": (float(pooled_mse.std(ddof=1)) / math.sqrt(len(valid)) / (2 * pooled_rmse)
+                                   if len(valid) > 1 and pooled_rmse > 0 else math.nan),
                 "ECP_gamma": float(valid["eta_covered"].mean()),
                 "ECP_alpha": float(valid["alpha_ecp"].mean()),
                 "ECP_beta": float(valid["beta_ecp"].mean()),
@@ -875,6 +898,10 @@ def summarize_setting(df: pd.DataFrame) -> pd.DataFrame:
                 "LEN_beta": float(valid["beta_ci_len"].mean()),
                 "LEN_sigma2": float(valid["sigma2_ci_len"].mean()),
             })
+            for column in ("first_stage_cpu_sec", "second_stage_cpu_sec", "wall_sec", "profile_evaluations"):
+                if column in valid:
+                    rec[column + "_mean"] = float(valid[column].mean())
+            rec["cpu_sec_mcse"] = float(valid["elapsed_sec"].std(ddof=1) / math.sqrt(len(valid)))
             if "eta_on_boundary" in valid.columns:
                 rec["eta_boundary_rate"] = float(valid["eta_on_boundary"].fillna(False).mean())
             else:
